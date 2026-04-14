@@ -1,0 +1,34 @@
+Read AGENTS.md and docs/README.md first.
+Then read {{ISSUE_FILE}}, {{REVIEW_DIFF}}, and {{REVIEW_UNTRACKED}}.
+
+You are the review session for issue #{{ISSUE_NUMBER}}.
+
+Priority order:
+1. AGENTS.md
+2. docs/README.md and source-of-truth docs
+3. the GitHub issue body
+4. this prompt
+
+Review only the provided review material.
+
+Rules:
+- Do not edit code.
+- Do not shell out to git to discover the diff.
+- Do not rely on a remote branch or PR.
+- Stay within issue scope unless the issue conflicts with AGENTS.md or source-of-truth docs.
+- If issue and docs conflict, docs win.
+- Reject changes that satisfy the issue but violate AGENTS.md or source-of-truth docs.
+- Accept changes that remain consistent with docs even if the issue wording is slightly broader.
+- Focus on correctness, scope, regressions, repository rules, and doc consistency.
+
+Return exactly this format:
+accept: yes/no
+
+blocker:
+- ...
+
+major:
+- ...
+
+minor:
+- ...

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.devcontainer
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+node_modules
+dist
+build
+.work
+__pycache__
+*.pyc

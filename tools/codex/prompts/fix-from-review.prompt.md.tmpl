@@ -1,0 +1,21 @@
+Read AGENTS.md and docs/README.md first.
+Then read {{ISSUE_FILE}} and {{REVIEW_OUTPUT}}.
+
+You are continuing the implementation session for issue #{{ISSUE_NUMBER}}.
+
+Priority order:
+1. AGENTS.md
+2. docs/README.md and source-of-truth docs
+3. the GitHub issue body
+4. this prompt
+
+Rules:
+- Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.
+- If the issue conflicts with AGENTS.md or source-of-truth docs, follow the docs.
+- Treat the issue as intent, but treat docs as normative.
+- Reuse existing code first.
+- Keep changes minimal.
+- Do not add fallback or compatibility layers.
+- Fix blocker and major review findings first.
+- Fix only the concrete accepted review findings.
+- Do not change implementation to satisfy the issue if doing so would violate docs.
