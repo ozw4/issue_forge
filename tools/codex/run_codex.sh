@@ -2,8 +2,11 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=tools/codex/lib/config.sh
-source "${SCRIPT_DIR}/lib/config.sh"
+# shellcheck source=tools/codex/lib/engine_defaults.sh
+source "${SCRIPT_DIR}/lib/engine_defaults.sh"
+# shellcheck source=tools/codex/lib/consumer_config.sh
+source "${SCRIPT_DIR}/lib/consumer_config.sh"
+issue_forge_load_consumer_config "${SCRIPT_DIR}/../.."
 # shellcheck source=tools/codex/lib/codex_profiles.sh
 source "${SCRIPT_DIR}/lib/codex_profiles.sh"
 

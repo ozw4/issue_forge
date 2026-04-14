@@ -41,14 +41,14 @@ Current refactor state:
 - the flow is already decomposed into thin entrypoints plus reusable shell libraries under `tools/codex/lib/`
 - prompt text is already separated into template files under `tools/codex/prompts/`
 - regression coverage already exists via `tools/codex/smoke_harness.sh` and `tests/test_codex_smoke_harness.py`
-- `tools/codex/lib/config.sh` currently mixes engine defaults and consumer-specific policy, which is the main configuration seam that still needs a formal split
+- `tools/codex/lib/engine_defaults.sh` and `tools/codex/lib/consumer_config.sh` split engine defaults from consumer-specific policy
 
 Current reusable flow components in this repository:
 
 | Area | Current files | Current role |
 | --- | --- | --- |
 | Orchestration entrypoints | `tools/codex/run_issue_flow.sh`, `tools/codex/restart_issue_flow.sh`, `tools/codex/continue_after_review.sh`, `tools/codex/make_pr_only.sh`, `tools/issue/start_from_issue.sh` | User-facing scripts that sequence bootstrap, Codex sessions, checks, review, commit, push, and PR creation |
-| Codex execution wrapper | `tools/codex/run_codex.sh`, `tools/codex/lib/codex_profiles.sh`, `tools/codex/lib/config.sh` | Resolves `write` vs `read` execution settings, invokes `codex exec`, and retries transient provider-capacity failures |
+| Codex execution wrapper | `tools/codex/run_codex.sh`, `tools/codex/lib/codex_profiles.sh`, `tools/codex/lib/engine_defaults.sh`, `tools/codex/lib/consumer_config.sh` | Resolves `write` vs `read` execution settings, invokes `codex exec`, and retries transient provider-capacity failures |
 | Issue bootstrap logic | `tools/codex/lib/issue_bootstrap.sh` | Fetches issue title/body via `gh`, slugifies branch names, creates issue branches, and writes `.work` issue state |
 | Publish / PR logic | `tools/codex/lib/publish_helpers.sh` | Stages and commits changes, pushes the branch, discovers existing PRs, and creates draft PRs via `gh pr create` |
 | Flow state helpers | `tools/codex/lib/flow_state.sh`, `tools/codex/lib/history_helpers.sh` | Enters repo root, validates current issue/branch state, computes `.work` paths, excludes `.work` from worktree status, and archives round artifacts |
@@ -140,7 +140,7 @@ Git / GitHub / Codex assumptions:
 
 ### 4.4 Required Configuration Values
 
-Current config is hard-coded in `tools/codex/lib/config.sh`. After extraction, the engine still needs these values from engine defaults plus consumer config.
+Current config is loaded from `tools/codex/lib/engine_defaults.sh` plus `tools/codex/lib/consumer_config.sh` (which sources `.issue_forge/project.sh`).
 
 | Setting | Current value in this repo | v1 contract |
 | --- | --- | --- |
@@ -261,8 +261,8 @@ Contract vs current implementation detail:
 
 Current state:
 
-- `tools/codex/lib/config.sh` is the only configuration source
-- it currently mixes reusable engine defaults with consumer-specific repository policy
+- `tools/codex/lib/engine_defaults.sh` contains reusable engine defaults
+- `tools/codex/lib/consumer_config.sh` loads consumer policy from `.issue_forge/project.sh`
 - there is no `.codex/` directory and no `.codex/config.toml` in this repository today
 
 v1 split target:
