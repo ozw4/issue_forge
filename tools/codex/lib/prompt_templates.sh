@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-readonly CODEX_FLOW_PROMPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/prompts"
+readonly CODEX_FLOW_PROMPTS_DIR="${CODEX_FLOW_PROMPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/prompts}"
 
 escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
