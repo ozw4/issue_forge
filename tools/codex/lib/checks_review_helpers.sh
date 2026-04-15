@@ -50,7 +50,7 @@ run_checks_round() {
   round="$checks_run_round"
 
   set +e
-  ./tools/checks/run_changed.sh "$CODEX_FLOW_BASE_REF" > "$checks_log" 2>&1
+  "$CODEX_FLOW_CHECKS_COMMAND" "$CODEX_FLOW_BASE_REF" > "$checks_log" 2>&1
   status=$?
   set -e
 

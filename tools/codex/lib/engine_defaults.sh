@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 readonly CODEX_FLOW_WORK_DIR='.work'
 readonly CODEX_FLOW_ISSUE_DIR='.work/issues'
 readonly CODEX_FLOW_CODEX_DIR='.work/codex'
@@ -6,6 +8,11 @@ readonly CODEX_FLOW_HISTORY_DIR='.work/codex/history'
 readonly CODEX_FLOW_BRANCH_SLUG_MAXLEN=48
 readonly CODEX_FLOW_CHECK_MAX_ROUNDS=20
 readonly CODEX_FLOW_REVIEW_MAX_ROUNDS=19
+
+readonly CODEX_FLOW_PROFILE_WRITE='write'
+readonly CODEX_FLOW_PROFILE_READ='read'
+readonly CODEX_FLOW_WRITE_PROFILE="${CODEX_FLOW_PROFILE_WRITE}"
+readonly CODEX_FLOW_READ_PROFILE="${CODEX_FLOW_PROFILE_READ}"
 
 # Backward-compatible variable names used throughout the current engine scripts.
 readonly CODEX_FLOW_WORK_ROOT="${CODEX_FLOW_WORK_DIR}"

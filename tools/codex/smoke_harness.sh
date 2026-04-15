@@ -64,6 +64,7 @@ copy_flow_scripts() {
   mkdir -p "${repo_dir}/tools/codex/lib" "${repo_dir}/tools/codex/prompts" "${repo_dir}/tools/issue" "${repo_dir}/tools/checks" "${repo_dir}/.issue_forge"
   cp "${REPO_ROOT}/tools/codex/lib/checks_review_helpers.sh" "${repo_dir}/tools/codex/lib/checks_review_helpers.sh"
   cp "${REPO_ROOT}/tools/codex/lib/codex_profiles.sh" "${repo_dir}/tools/codex/lib/codex_profiles.sh"
+  cp "${REPO_ROOT}/tools/codex/lib/config.sh" "${repo_dir}/tools/codex/lib/config.sh"
   cp "${REPO_ROOT}/tools/codex/lib/consumer_config.sh" "${repo_dir}/tools/codex/lib/consumer_config.sh"
   cp "${REPO_ROOT}/tools/codex/lib/engine_defaults.sh" "${repo_dir}/tools/codex/lib/engine_defaults.sh"
   cp "${REPO_ROOT}/tools/codex/lib/flow_state.sh" "${repo_dir}/tools/codex/lib/flow_state.sh"
@@ -84,6 +85,7 @@ copy_flow_scripts() {
   chmod +x \
     "${repo_dir}/tools/codex/lib/checks_review_helpers.sh" \
     "${repo_dir}/tools/codex/lib/codex_profiles.sh" \
+    "${repo_dir}/tools/codex/lib/config.sh" \
     "${repo_dir}/tools/codex/lib/consumer_config.sh" \
     "${repo_dir}/tools/codex/lib/engine_defaults.sh" \
     "${repo_dir}/tools/codex/lib/flow_state.sh" \
@@ -167,10 +169,6 @@ CODEX_FLOW_CHECKS_COMMAND='./tools/checks/run_changed.sh'
 CODEX_FLOW_PROMPTS_DIR='tools/codex/prompts'
 CODEX_FLOW_PR_DRAFT_DEFAULT=1
 
-CODEX_FLOW_PROFILE_WRITE='write'
-CODEX_FLOW_PROFILE_READ='read'
-CODEX_FLOW_WRITE_PROFILE='write'
-CODEX_FLOW_READ_PROFILE='read'
 CODEX_FLOW_PROFILE_WRITE_SANDBOX='danger-full-access'
 CODEX_FLOW_PROFILE_WRITE_REASONING='xhigh'
 CODEX_FLOW_PROFILE_READ_SANDBOX='danger-full-access'
@@ -409,9 +407,7 @@ run_codex_profile_smoke() {
     (
       cd "${repo_dir}"
       bash -lc 'set -euo pipefail
-source tools/codex/lib/engine_defaults.sh
-source tools/codex/lib/consumer_config.sh
-issue_forge_load_consumer_config "$(pwd)"
+source tools/codex/lib/config.sh
 source tools/codex/lib/codex_profiles.sh
 printf "write-profile=%s\n" "$(resolve_codex_profile_for_mode write)"
 printf "write-sandbox=%s\n" "$(resolve_codex_profile_sandbox "$CODEX_FLOW_WRITE_PROFILE")"
@@ -429,9 +425,7 @@ printf "read-reasoning=%s\n" "$(resolve_codex_profile_reasoning "$CODEX_FLOW_REA
   if (
     cd "${repo_dir}"
     bash -lc 'set -euo pipefail
-source tools/codex/lib/engine_defaults.sh
-source tools/codex/lib/consumer_config.sh
-issue_forge_load_consumer_config "$(pwd)"
+source tools/codex/lib/config.sh
 source tools/codex/lib/codex_profiles.sh
 resolve_codex_profile_sandbox invalid-profile
 '

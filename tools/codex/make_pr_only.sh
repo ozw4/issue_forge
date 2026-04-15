@@ -2,12 +2,9 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-# shellcheck source=tools/codex/lib/engine_defaults.sh
-source "${SCRIPT_DIR}/lib/engine_defaults.sh"
-# shellcheck source=tools/codex/lib/consumer_config.sh
-source "${SCRIPT_DIR}/lib/consumer_config.sh"
-issue_forge_load_consumer_config "${REPO_ROOT}"
+# shellcheck source=tools/codex/lib/config.sh
+source "${SCRIPT_DIR}/lib/config.sh"
+readonly REPO_ROOT="${CODEX_FLOW_REPO_ROOT}"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh

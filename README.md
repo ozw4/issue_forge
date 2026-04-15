@@ -9,3 +9,10 @@ Current state:
 
 Primary contract:
 - see docs/consumer-contract.md
+
+
+Vendored runtime usage:
+- mount or place this repository at `<consumer-repo>/vendor/issue_forge`
+- consumer-owned policy stays in `<consumer-repo>/.issue_forge/project.sh`
+- consumer-owned prompts stay in `<consumer-repo>/.issue_forge/prompts/`
+- `tools/codex/lib/config.sh` resolves the consumer repo root in vendored mode and standalone smoke fixtures

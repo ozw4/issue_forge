@@ -2,12 +2,9 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-# shellcheck source=tools/codex/lib/engine_defaults.sh
-source "${SCRIPT_DIR}/lib/engine_defaults.sh"
-# shellcheck source=tools/codex/lib/consumer_config.sh
-source "${SCRIPT_DIR}/lib/consumer_config.sh"
-issue_forge_load_consumer_config "${REPO_ROOT}"
+# shellcheck source=tools/codex/lib/config.sh
+source "${SCRIPT_DIR}/lib/config.sh"
+readonly REPO_ROOT="${CODEX_FLOW_REPO_ROOT}"
 # shellcheck source=tools/codex/lib/history_helpers.sh
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
@@ -31,12 +28,12 @@ log_fail_with_path() {
 }
 
 run_implementation_phase() {
-  log_info "codex implementation"
+  log_info 'codex implementation'
   ./tools/codex/run_codex.sh write "$implement_prompt" > "$implementation_log" 2>&1
-  archive_round_file "$implementation_log" "implementation" 0 ".log"
+  archive_round_file "$implementation_log" 'implementation' 0 '.log'
 
   if [[ -z "$(status_outside_work)" ]]; then
-    log_fail_with_path "initial implementation session produced no file changes" "$implementation_log"
+    log_fail_with_path 'initial implementation session produced no file changes' "$implementation_log"
     exit 1
   fi
 }
