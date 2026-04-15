@@ -69,7 +69,7 @@ copy_flow_scripts() {
   cp "${REPO_ROOT}/.issue_forge/project.sh" "${repo_dir}/.issue_forge/project.sh"
   cp "${REPO_ROOT}/docs/README.md" "${repo_dir}/docs/README.md"
   cp "${REPO_ROOT}/docs/consumer-contract.md" "${repo_dir}/docs/consumer-contract.md"
-  cp "${REPO_ROOT}/docs/07_codex_working_rules.md" "${repo_dir}/docs/07_codex_working_rules.md"
+  cp "${REPO_ROOT}/docs/codex_working_rules.md" "${repo_dir}/docs/codex_working_rules.md"
   cp "${REPO_ROOT}/tools/checks/run_changed.sh" "${repo_dir}/tools/checks/run_changed.sh"
   cp "${REPO_ROOT}/tools/codex/lib/checks_review_helpers.sh" "${repo_dir}/tools/codex/lib/checks_review_helpers.sh"
   cp "${REPO_ROOT}/tools/codex/lib/codex_profiles.sh" "${repo_dir}/tools/codex/lib/codex_profiles.sh"
@@ -698,4 +698,3 @@ main() {
 }
 
 main "$@"
-
