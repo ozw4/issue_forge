@@ -61,7 +61,16 @@ assert_files_equal() {
 }
 
 copy_flow_scripts() {
-  mkdir -p "${repo_dir}/tools/codex/lib" "${repo_dir}/tools/codex/prompts" "${repo_dir}/tools/issue" "${repo_dir}/tools/checks" "${repo_dir}/.issue_forge"
+  mkdir -p     "${repo_dir}/docs"     "${repo_dir}/tools/codex/lib"     "${repo_dir}/tools/codex/prompts"     "${repo_dir}/tools/issue"     "${repo_dir}/tools/checks"     "${repo_dir}/.issue_forge"
+
+  cp "${REPO_ROOT}/AGENTS.md" "${repo_dir}/AGENTS.md"
+  cp "${REPO_ROOT}/README.md" "${repo_dir}/README.md"
+  cp "${REPO_ROOT}/.gitignore" "${repo_dir}/.gitignore"
+  cp "${REPO_ROOT}/.issue_forge/project.sh" "${repo_dir}/.issue_forge/project.sh"
+  cp "${REPO_ROOT}/docs/README.md" "${repo_dir}/docs/README.md"
+  cp "${REPO_ROOT}/docs/consumer-contract.md" "${repo_dir}/docs/consumer-contract.md"
+  cp "${REPO_ROOT}/docs/07_codex_working_rules.md" "${repo_dir}/docs/07_codex_working_rules.md"
+  cp "${REPO_ROOT}/tools/checks/run_changed.sh" "${repo_dir}/tools/checks/run_changed.sh"
   cp "${REPO_ROOT}/tools/codex/lib/checks_review_helpers.sh" "${repo_dir}/tools/codex/lib/checks_review_helpers.sh"
   cp "${REPO_ROOT}/tools/codex/lib/codex_profiles.sh" "${repo_dir}/tools/codex/lib/codex_profiles.sh"
   cp "${REPO_ROOT}/tools/codex/lib/config.sh" "${repo_dir}/tools/codex/lib/config.sh"
@@ -81,8 +90,12 @@ copy_flow_scripts() {
   cp "${REPO_ROOT}/tools/codex/restart_issue_flow.sh" "${repo_dir}/tools/codex/restart_issue_flow.sh"
   cp "${REPO_ROOT}/tools/codex/run_codex.sh" "${repo_dir}/tools/codex/run_codex.sh"
   cp "${REPO_ROOT}/tools/codex/run_issue_flow.sh" "${repo_dir}/tools/codex/run_issue_flow.sh"
+  cp "${REPO_ROOT}/tools/codex/smoke_harness.sh" "${repo_dir}/tools/codex/smoke_harness.sh"
+  cp "${REPO_ROOT}/tools/codex/README.md" "${repo_dir}/tools/codex/README.md"
   cp "${REPO_ROOT}/tools/issue/start_from_issue.sh" "${repo_dir}/tools/issue/start_from_issue.sh"
+
   chmod +x \
+    "${repo_dir}/tools/checks/run_changed.sh" \
     "${repo_dir}/tools/codex/lib/checks_review_helpers.sh" \
     "${repo_dir}/tools/codex/lib/codex_profiles.sh" \
     "${repo_dir}/tools/codex/lib/config.sh" \
@@ -98,6 +111,7 @@ copy_flow_scripts() {
     "${repo_dir}/tools/codex/restart_issue_flow.sh" \
     "${repo_dir}/tools/codex/run_codex.sh" \
     "${repo_dir}/tools/codex/run_issue_flow.sh" \
+    "${repo_dir}/tools/codex/smoke_harness.sh" \
     "${repo_dir}/tools/issue/start_from_issue.sh"
 }
 
@@ -118,64 +132,9 @@ reset_flow_counters() {
 }
 
 write_fixture_files() {
-  mkdir -p "${repo_dir}/docs" "${repo_dir}/.issue_forge"
-
-  cat > "${repo_dir}/AGENTS.md" <<'EOF'
-# Smoke Fixture
-EOF
-
-  cat > "${repo_dir}/docs/README.md" <<'EOF'
-# Smoke Fixture Docs
-EOF
-
-  cat > "${repo_dir}/.gitignore" <<'EOF'
-.work/
-EOF
-
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
 EOF
-
-  cat > "${repo_dir}/tools/checks/run_changed.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-count_file="${SMOKE_CHECKS_COUNT_FILE:?}"
-args_file="${SMOKE_RUN_CHANGED_ARGS_FILE:-}"
-count=0
-if [[ -f "$count_file" ]]; then
-  count="$(< "$count_file")"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" > "$count_file"
-
-if [[ -n "$args_file" ]]; then
-  printf '%s\n' "$*" > "$args_file"
-fi
-
-if [[ "$count" -eq 1 ]]; then
-  printf 'simulated check failure\n' >&2
-  exit 1
-fi
-
-printf 'simulated checks pass on round %s\n' "$count"
-EOF
-
-  cat > "${repo_dir}/.issue_forge/project.sh" <<'EOF'
-CODEX_FLOW_BASE_REF='origin/main'
-CODEX_FLOW_BASE_BRANCH='main'
-CODEX_FLOW_BRANCH_PREFIX='issue/'
-CODEX_FLOW_CHECKS_COMMAND='./tools/checks/run_changed.sh'
-CODEX_FLOW_PROMPTS_DIR='tools/codex/prompts'
-CODEX_FLOW_PR_DRAFT_DEFAULT=1
-
-CODEX_FLOW_PROFILE_WRITE_SANDBOX='danger-full-access'
-CODEX_FLOW_PROFILE_WRITE_REASONING='xhigh'
-CODEX_FLOW_PROFILE_READ_SANDBOX='danger-full-access'
-CODEX_FLOW_PROFILE_READ_REASONING='medium'
-EOF
-
-  chmod +x "${repo_dir}/tools/checks/run_changed.sh"
 }
 
 write_stub_binaries() {
@@ -739,3 +698,4 @@ main() {
 }
 
 main "$@"
+
