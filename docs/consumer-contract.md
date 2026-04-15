@@ -56,7 +56,7 @@ Current reusable flow components in this repository:
 | Prompt template rendering | `tools/codex/lib/prompt_templates.sh` | Resolves template paths, replaces placeholders, and renders prompts into `.work/codex/*.prompt.md` |
 | Prompt templates | `tools/codex/prompts/implementation.prompt.md.tmpl`, `fix-from-checks.prompt.md.tmpl`, `review.prompt.md.tmpl`, `fix-from-review.prompt.md.tmpl` | Consumer-specific prompt text that tells Codex which docs and `.work` artifacts to read |
 | Repo-specific checks | `tools/checks/run_changed.sh` | Consumer hook that decides which lint/type/test/build commands run for the changed files and base ref |
-| Docs / AGENTS inputs used by prompts | `AGENTS.md`, `docs/README.md`, indirectly `docs/07_codex_working_rules.md` and other docs selected by `docs/README.md` | Consumer-owned repository instructions and source-of-truth reading order consumed by Codex sessions |
+| Docs / AGENTS inputs used by prompts | `AGENTS.md`, `docs/README.md`, indirectly `docs/codex_working_rules.md` and other docs selected by `docs/README.md` | Consumer-owned repository instructions and source-of-truth reading order consumed by Codex sessions |
 | Regression harness | `tools/codex/smoke_harness.sh`, `tests/test_codex_smoke_harness.py`, `tools/codex/README.md` | Network-independent fixture-based regression guard for the current shell contract |
 
 ## 3. Responsibility Split
@@ -72,7 +72,7 @@ v1 boundary:
 | PR publish integration | shared engine, GitHub-only in v1 | Current implementation is `gh pr list` and `gh pr create`; v1 keeps that behavior |
 | Prompt template files | consumer | Templates encode repo-specific instructions and docs references |
 | `AGENTS.md` | consumer | Repository-specific normative instructions for Codex sessions |
-| `docs/README.md` and `docs/07_codex_working_rules.md` | consumer | Repository-specific docs reading order and engineering rules; engine must not own or rewrite them |
+| `docs/README.md` and `docs/codex_working_rules.md` | consumer | Repository-specific docs reading order and engineering rules; engine must not own or rewrite them |
 | Repo-specific checks command | consumer | `tools/checks/run_changed.sh` is consumer policy and toolchain integration |
 | `.work` path conventions | shared contract | Engine owns reads/writes; consumer must reserve the path and not repurpose it |
 | `.codex/config.toml` | consumer-owned optional project config | No such file exists in the current repo; v1 engine must not require it |
