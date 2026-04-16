@@ -48,6 +48,20 @@ assert_file_contains() {
   fi
 }
 
+assert_file_not_contains() {
+  local path="$1"
+  local pattern="$2"
+
+  if [[ ! -f "$path" ]]; then
+    fail "expected file to exist: $path"
+  fi
+
+  if grep -Fq "$pattern" "$path"; then
+    printf '[smoke] expected %s to not contain: %s\n' "$path" "$pattern" >&2
+    exit 1
+  fi
+}
+
 assert_commit_excludes_work_paths() {
   local commit_ref="$1"
   local changed_paths
@@ -155,6 +169,42 @@ remove_work_ignore_from_fixture_repo() {
   filtered_gitignore="$(mktemp)"
   sed '/^\.work\/$/d' "${repo_dir}/.gitignore" > "${filtered_gitignore}"
   mv "${filtered_gitignore}" "${repo_dir}/.gitignore"
+}
+
+advance_origin_main_after_bootstrap() {
+  local upstream_repo_dir="${temp_root}/upstream-main"
+
+  log 'advancing origin/main after bootstrap'
+  "${REAL_GIT}" clone --branch main "${remote_dir}" "${upstream_repo_dir}" >/dev/null
+  "${REAL_GIT}" -C "${upstream_repo_dir}" config user.name 'Smoke Harness'
+  "${REAL_GIT}" -C "${upstream_repo_dir}" config user.email 'smoke@example.test'
+  printf 'upstream only after bootstrap\n' > "${upstream_repo_dir}/upstream-only.txt"
+  "${REAL_GIT}" -C "${upstream_repo_dir}" add upstream-only.txt
+  "${REAL_GIT}" -C "${upstream_repo_dir}" commit -m 'fixture: advance main after bootstrap' >/dev/null
+  "${REAL_GIT}" -C "${upstream_repo_dir}" push origin main >/dev/null
+  "${REAL_GIT}" -C "${repo_dir}" fetch origin main >/dev/null
+
+  advanced_origin_main="$("${REAL_GIT}" -C "${repo_dir}" rev-parse origin/main)"
+  if [[ "${advanced_origin_main}" == "${bootstrap_base_commit}" ]]; then
+    fail 'origin/main should move after bootstrap'
+  fi
+}
+
+assert_fixed_base_commit_usage() {
+  local scenario_name="$1"
+  local recorded_base_commit
+
+  recorded_base_commit="$(< "${state_dir}/run-changed-args.txt")"
+  assert_equals "${bootstrap_base_commit}" "${recorded_base_commit}" "${scenario_name} checks base commit"
+  assert_equals "${bootstrap_base_commit}" "$(< "${repo_dir}/.work/base_commit")" "${scenario_name} saved base commit"
+
+  if [[ "${recorded_base_commit}" == "${advanced_origin_main}" ]]; then
+    fail "${scenario_name} should not use moving origin/main"
+  fi
+
+  assert_file_not_contains "${repo_dir}/.work/codex/review.diff" 'upstream-only.txt'
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-01.txt" 'upstream-only.txt'
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-02.txt" 'upstream-only.txt'
 }
 
 write_stub_binaries() {
@@ -324,12 +374,15 @@ run_start_from_issue_smoke() {
   )
 
   assert_equals "${ISSUE_NUMBER}" "$(< "${repo_dir}/.work/current_issue")" 'current issue file'
+  assert_file_exists "${repo_dir}/.work/base_commit"
   assert_equals "issue/${ISSUE_NUMBER}-regression-harness-issue" "$(< "${repo_dir}/.work/current_branch")" 'current branch file'
   assert_equals "issue/${ISSUE_NUMBER}-regression-harness-issue" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'checked-out branch'
   assert_file_exists "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "# Issue #${ISSUE_NUMBER}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "Title: ${ISSUE_TITLE}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "URL: ${ISSUE_URL}"
+  bootstrap_base_commit="$(< "${repo_dir}/.work/base_commit")"
+  assert_equals "$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)" "${bootstrap_base_commit}" 'bootstrap base commit'
 
   if "${REAL_GIT}" -C "${repo_dir}" check-ignore -q .work/current_issue; then
     fail 'fixture repo should not ignore .work/'
@@ -630,9 +683,9 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
-  assert_equals 'origin/main' "$(< "${state_dir}/run-changed-args.txt")" 'run_changed base ref'
   assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_fixed_base_commit_usage 'run_issue_flow'
   assert_commit_excludes_work_paths HEAD
 }
 
@@ -667,6 +720,7 @@ run_restart_issue_flow_smoke() {
   assert_file_contains "${state_dir}/git.log" 'reset --hard HEAD'
   assert_file_contains "${state_dir}/git.log" 'clean -fd -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_fixed_base_commit_usage 'restart_issue_flow'
 }
 
 run_continue_after_review_smoke() {
@@ -704,6 +758,7 @@ run_continue_after_review_smoke() {
 
   assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_fixed_base_commit_usage 'continue_after_review'
   assert_commit_excludes_work_paths HEAD
   assert_commit_excludes_work_paths HEAD~1
 }
@@ -718,6 +773,7 @@ main() {
   trap cleanup EXIT
   create_fixture_repo
   run_start_from_issue_smoke
+  advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
   run_run_codex_smoke
   run_codex_profile_smoke

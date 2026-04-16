@@ -54,8 +54,7 @@ issue_number="$(resolve_numeric_issue_number "${1:-}")"
 issue_file="$(require_issue_file "$issue_number")"
 
 current_branch="$(resolve_current_branch_from_state "Missing ${CODEX_FLOW_CURRENT_BRANCH_FILE}. Run tools/issue/start_from_issue.sh first.")"
-
-require_flow_base_ref
+resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first." >/dev/null
 
 ensure_clean_worktree 'Working tree must be clean before running the issue flow.'
 mkdir -p "$CODEX_FLOW_CODEX_DIR"

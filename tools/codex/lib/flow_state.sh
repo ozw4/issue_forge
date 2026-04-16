@@ -73,8 +73,21 @@ require_current_branch_file() {
   fi
 }
 
+require_base_commit_file() {
+  local missing_message="$1"
+
+  if [[ ! -f "$CODEX_FLOW_BASE_COMMIT_FILE" ]]; then
+    printf '%s\n' "$missing_message" >&2
+    exit 1
+  fi
+}
+
 read_saved_branch() {
   printf '%s\n' "$(< "$CODEX_FLOW_CURRENT_BRANCH_FILE")"
+}
+
+read_saved_base_commit() {
+  printf '%s\n' "$(< "$CODEX_FLOW_BASE_COMMIT_FILE")"
 }
 
 resolve_current_branch() {
@@ -97,11 +110,32 @@ resolve_current_branch() {
   printf '%s\n' "$current_branch"
 }
 
+resolve_saved_base_commit() {
+  local saved_base_commit
+  local resolved_base_commit
+
+  saved_base_commit="$(read_saved_base_commit)"
+
+  if ! resolved_base_commit="$(git rev-parse --verify "${saved_base_commit}^{commit}" 2>/dev/null)"; then
+    printf 'Invalid base commit in %s: %s\n' "$CODEX_FLOW_BASE_COMMIT_FILE" "$saved_base_commit" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$resolved_base_commit"
+}
+
 resolve_current_branch_from_state() {
   local missing_message="$1"
 
   require_current_branch_file "$missing_message"
   resolve_current_branch
+}
+
+resolve_fixed_base_commit_from_state() {
+  local missing_message="$1"
+
+  require_base_commit_file "$missing_message"
+  resolve_saved_base_commit
 }
 
 require_flow_base_ref() {

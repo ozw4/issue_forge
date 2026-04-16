@@ -48,6 +48,7 @@ enter_repo_root
 issue_number="$(resolve_issue_number "$issue_number")"
 current_branch="$(resolve_current_branch_from_state "Missing ${CODEX_FLOW_CURRENT_BRANCH_FILE}. Run tools/issue/start_from_issue.sh first.")"
 require_issue_file "$issue_number" >/dev/null
+resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first." >/dev/null
 
 dirty_status="$(status_outside_work)"
 if [[ -n "$dirty_status" ]]; then

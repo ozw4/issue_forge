@@ -71,14 +71,17 @@ URL: {{.url}}
 write_current_issue_branch_state() {
   local issue_number="$1"
   local branch_name="$2"
+  local base_commit="$3"
 
   printf '%s\n' "$issue_number" > "$CODEX_FLOW_CURRENT_ISSUE_FILE"
   printf '%s\n' "$branch_name" > "$CODEX_FLOW_CURRENT_BRANCH_FILE"
+  printf '%s\n' "$base_commit" > "$CODEX_FLOW_BASE_COMMIT_FILE"
 }
 
 bootstrap_issue_branch() {
   local issue_number="$1"
   local branch_name
+  local base_commit
 
   git fetch origin "$CODEX_FLOW_BASE_BRANCH"
   require_flow_base_ref
@@ -88,7 +91,8 @@ bootstrap_issue_branch() {
   write_issue_context_file "$issue_number"
 
   git switch --create "$branch_name" --track "$CODEX_FLOW_BASE_REF"
-  write_current_issue_branch_state "$issue_number" "$branch_name"
+  base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+  write_current_issue_branch_state "$issue_number" "$branch_name" "$base_commit"
 
   CODEX_FLOW_BOOTSTRAP_BRANCH_NAME="$branch_name"
 }

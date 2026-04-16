@@ -49,13 +49,13 @@ Current reusable flow components in this repository:
 | --- | --- | --- |
 | Orchestration entrypoints | `tools/codex/run_issue_flow.sh`, `tools/codex/restart_issue_flow.sh`, `tools/codex/continue_after_review.sh`, `tools/codex/make_pr_only.sh`, `tools/issue/start_from_issue.sh` | User-facing scripts that sequence bootstrap, Codex sessions, checks, review, commit, push, and PR creation |
 | Codex execution wrapper | `tools/codex/run_codex.sh`, `tools/codex/lib/codex_profiles.sh`, `tools/codex/lib/engine_defaults.sh`, `tools/codex/lib/consumer_config.sh`, `.issue_forge/project.sh` | Resolves fixed engine modes `write` vs `read`, maps them to consumer-supplied sandbox/reasoning values, invokes `codex exec`, and retries transient provider-capacity failures |
-| Issue bootstrap logic | `tools/codex/lib/issue_bootstrap.sh` | Fetches issue title/body via `gh`, slugifies branch names, creates issue branches, and writes `.work` issue state |
+| Issue bootstrap logic | `tools/codex/lib/issue_bootstrap.sh` | Fetches issue title/body via `gh`, slugifies branch names, creates issue branches, and writes `.work` issue state including the fixed base commit captured at bootstrap |
 | Publish / PR logic | `tools/codex/lib/publish_helpers.sh` | Stages and commits repository changes while explicitly excluding `.work/`, pushes the branch, discovers existing PRs, and creates draft PRs via `gh pr create` |
 | Flow state helpers | `tools/codex/lib/flow_state.sh`, `tools/codex/lib/history_helpers.sh` | Enters repo root, validates current issue/branch state, computes `.work` paths, excludes `.work` from worktree status, and archives round artifacts |
 | Checks / review / history helpers | `tools/codex/lib/checks_review_helpers.sh` | Runs repo checks, generates review material, validates structured review output, drives fix loops, and enforces read-only review sessions |
 | Prompt template rendering | `tools/codex/lib/prompt_templates.sh` | Resolves template paths, replaces placeholders, and renders prompts into `.work/codex/*.prompt.md` |
 | Prompt templates | `tools/codex/prompts/implementation.prompt.md.tmpl`, `fix-from-checks.prompt.md.tmpl`, `review.prompt.md.tmpl`, `fix-from-review.prompt.md.tmpl` | Consumer-owned prompt text at the preserved path contract `tools/codex/prompts/`; these templates tell Codex which docs and `.work` artifacts to read |
-| Repo-specific checks | `tools/checks/run_changed.sh` | Consumer hook that decides which lint/type/test/build commands run for the changed files and base ref |
+| Repo-specific checks | `tools/checks/run_changed.sh` | Consumer hook that decides which lint/type/test/build commands run for the changed files relative to the fixed base commit passed by the engine |
 | Docs / AGENTS inputs used by prompts | `AGENTS.md`, `docs/README.md`, indirectly `docs/codex_working_rules.md` and other docs selected by `docs/README.md` | Consumer-owned repository instructions and source-of-truth reading order consumed by Codex sessions |
 | Regression harness | `tools/codex/smoke_harness.sh`, `tests/test_codex_smoke_harness.py`, `tools/codex/README.md` | Network-independent fixture-based regression guard for the current shell contract |
 
@@ -92,7 +92,7 @@ These paths are part of the v1 preservation contract for this repository. Future
 
 | Path | Arguments | Current role |
 | --- | --- | --- |
-| `tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
+| `tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR publish |
 | `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the issue flow |
 | `tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the issue flow |
@@ -149,6 +149,7 @@ Engine-owned fixed/default values visible at runtime:
 | Work root | `.work` | Engine default / fixed contract path |
 | Codex work dir | `.work/codex` | Engine default / fixed contract path |
 | History dir | `.work/codex/history` | Engine default / fixed contract path |
+| Base commit state file | `.work/base_commit` | Engine default / fixed contract path |
 | Max check-fix rounds | `20` | Engine default |
 | Max review-fix rounds | `19` | Engine default |
 | Write mode name | `write` | Engine-fixed mode contract |
@@ -162,7 +163,7 @@ Consumer-supplied values required in `.issue_forge/project.sh` today:
 | Setting | Current value in this repo | Contract classification |
 | --- | --- | --- |
 | Base branch | `main` | Required consumer value for this repository |
-| Base ref | `origin/main` | Required consumer value for this repository |
+| Bootstrap base ref | `origin/main` | Required consumer value for this repository; used to create the issue branch and capture the fixed base commit |
 | Branch prefix | `issue/` | Required consumer value |
 | Prompt template directory | `tools/codex/prompts` | Required consumer value; must point at the consumer-owned preserved prompt path in this repo |
 | Checks command | `./tools/checks/run_changed.sh` | Required consumer value |
@@ -196,8 +197,8 @@ The shared engine expects the consumer repo to provide an executable checks hook
 
 - path: `./tools/checks/run_changed.sh`
 - working directory: repo root
-- invocation: `./tools/checks/run_changed.sh <base_ref>`
-- current argument value in this repo: `origin/main`
+- invocation: `./tools/checks/run_changed.sh <fixed_base_commit>`
+- current argument value in this repo: the commit SHA resolved from `CODEX_FLOW_BASE_REF` during bootstrap
 - stdout and stderr are captured verbatim into `.work/codex/checks.log`
 - exit code `0` means checks passed
 - non-zero exit means checks failed and the engine should enter the fix-from-checks loop
@@ -213,8 +214,10 @@ These conditions should be treated as hard errors by the extracted engine becaus
 | Missing required CLI command (`git`, `gh`, `codex`, `awk`, `sed`, `tr`, `cut`, `mktemp`) | Explicit hard error where currently checked; otherwise a shell execution failure |
 | Missing or non-numeric issue number when numeric is required | Explicit hard error |
 | Missing `.work/current_issue` when issue number is omitted | Explicit hard error |
+| Missing `.work/base_commit` when issue-flow state is required | Explicit hard error |
 | Missing `.work/current_branch` when branch state is required | Explicit hard error |
 | Current checked-out branch does not match `.work/current_branch` | Explicit hard error |
+| Invalid fixed base commit in `.work/base_commit` | Explicit hard error |
 | Missing issue context file `.work/issues/<issue>.md` | Explicit hard error |
 | Missing configured base ref | Explicit hard error |
 | Dirty worktree outside `.work` before `start_from_issue.sh` or `run_issue_flow.sh` | Explicit hard error |
@@ -239,6 +242,7 @@ These invariants must not change during extraction unless the contract and smoke
 | Path or pattern | Producer | Consumer / downstream use | v1 status |
 | --- | --- | --- | --- |
 | `.work/current_issue` | issue bootstrap | Default issue source for later entrypoints | Contract |
+| `.work/base_commit` | issue bootstrap | Fixed base commit for checks, review, and reruns | Contract |
 | `.work/current_branch` | issue bootstrap | Branch identity check for later entrypoints | Contract |
 | `.work/issues/<issue>.md` | issue bootstrap | Prompt input for all Codex sessions | Contract |
 | `.work/codex/implementation.prompt.md` | prompt renderer | Input to `run_codex.sh write` | Contract |
@@ -271,7 +275,7 @@ Issue context and branch invariants:
 
 Contract vs current implementation detail:
 
-- contract: the paths and file names listed above, the branch naming rule, and the base ref/base branch values for this repository
+- contract: the paths and file names listed above, the branch naming rule, the bootstrap base ref/base branch values for this repository, and the use of `.work/base_commit` as the fixed comparison base for checks and review
 - contract: consumer repos should normally keep `.work/` gitignored for hygiene, but publish staging must explicitly exclude `.work/` and must not depend on `.gitignore`
 - current implementation detail: internal shell variable names, use of `mktemp`, exact helper function names, and smoke-only fixture files under temporary directories
 
@@ -282,6 +286,8 @@ Current state:
 - engine defaults are in `tools/codex/lib/engine_defaults.sh`
 - consumer policy is in `.issue_forge/project.sh` and loaded by `tools/codex/lib/consumer_config.sh`
 - there is no `.codex/` directory and no `.codex/config.toml` in this repository today
+- `CODEX_FLOW_BASE_REF` is the consumer-supplied bootstrap source ref used to create the issue branch and capture the fixed base commit
+- runtime checks/review comparisons use the bootstrap-saved fixed base commit in `.work/base_commit`, not the moving `CODEX_FLOW_BASE_REF`
 - `write` / `read` are fixed engine-visible modes defined by engine defaults, and the consumer config only supplies per-mode sandbox/reasoning values
 - `CODEX_FLOW_WRITE_PROFILE`, `CODEX_FLOW_READ_PROFILE`, and `CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH` are engine-owned readonly/compatibility aliases in the current implementation, not consumer-owned project settings
 
@@ -290,8 +296,9 @@ Current implementation split:
 | Config location | What should live there |
 | --- | --- |
 | Shared engine defaults | `.work` state root, `.work/codex` layout, history naming rules, round limits, fixed mode names, readonly/compatibility aliases, and retry env var defaults |
-| Consumer repo config | Repo-specific policy loaded from `.issue_forge/project.sh`: base branch/ref, branch prefix, PR draft policy, prompt template directory, checks command, and mode-specific sandbox/reasoning values for the fixed `write` / `read` modes |
+| Consumer repo config | Repo-specific policy loaded from `.issue_forge/project.sh`: bootstrap base branch/ref, branch prefix, PR draft policy, prompt template directory, checks command, and mode-specific sandbox/reasoning values for the fixed `write` / `read` modes |
 | Project-scoped Codex config | Optional consumer-owned `.codex/config.toml` or equivalent project Codex CLI config; engine must treat it as opaque and optional in v1 |
+| `.work` runtime state | Engine-written issue/branch/base-commit state used after bootstrap, including the fixed base commit for checks/review/rerun |
 | `AGENTS.md` / repository docs | Human-readable repo policy and source-of-truth reading order for Codex sessions; not machine config, but required session context |
 
 Current engine-owned defaults and aliases:
@@ -301,6 +308,7 @@ Current engine-owned defaults and aliases:
 readonly CODEX_FLOW_WORK_DIR='.work'
 readonly CODEX_FLOW_CODEX_DIR='.work/codex'
 readonly CODEX_FLOW_HISTORY_DIR='.work/codex/history'
+readonly CODEX_FLOW_BASE_COMMIT_FILE="${CODEX_FLOW_WORK_DIR}/base_commit"
 readonly CODEX_FLOW_BRANCH_SLUG_MAXLEN=48
 readonly CODEX_FLOW_CHECK_MAX_ROUNDS=20
 readonly CODEX_FLOW_REVIEW_MAX_ROUNDS=19
@@ -340,6 +348,7 @@ Current prompt template and checks configuration:
 - prompt template directory stays consumer-owned at `tools/codex/prompts/`
 - for this repository, `tools/codex/prompts/` is also the preserved path contract; do not document `.issue_forge/prompts/` as the current path
 - checks hook stays consumer-owned at `tools/checks/run_changed.sh`
+- the checks hook receives the fixed base commit saved at bootstrap as its single argument
 - the engine should read these paths from consumer config even if this first consumer keeps the current values
 
 ## 7. Prompt and Documentation Contract

@@ -18,8 +18,11 @@ append_untracked_file_diff() {
 generate_review_material() {
   local has_material=0
   local path
+  local base_commit
 
-  git diff --no-ext-diff --binary "$CODEX_FLOW_BASE_REF" -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC" > "$review_diff"
+  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first.")"
+
+  git diff --no-ext-diff --binary "$base_commit" -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC" > "$review_diff"
   : > "$review_untracked"
 
   while IFS= read -r path; do
@@ -45,12 +48,14 @@ generate_review_material() {
 run_checks_round() {
   local status
   local round
+  local base_commit
 
   checks_run_round=$((checks_run_round + 1))
   round="$checks_run_round"
+  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first.")"
 
   set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$CODEX_FLOW_BASE_REF" > "$checks_log" 2>&1
+  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
   status=$?
   set -e
 
