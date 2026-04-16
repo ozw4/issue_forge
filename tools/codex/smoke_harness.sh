@@ -48,6 +48,18 @@ assert_file_contains() {
   fi
 }
 
+assert_commit_excludes_work_paths() {
+  local commit_ref="$1"
+  local changed_paths
+
+  changed_paths="$("${REAL_GIT}" -C "${repo_dir}" show --pretty= --name-only "$commit_ref")"
+  if printf '%s\n' "$changed_paths" | grep -Eq '^\.work(/|$)'; then
+    printf '[smoke] expected commit %s to exclude .work paths\n' "$commit_ref" >&2
+    printf '%s\n' "$changed_paths" >&2
+    exit 1
+  fi
+}
+
 assert_files_equal() {
   local expected="$1"
   local actual="$2"
@@ -135,6 +147,14 @@ write_fixture_files() {
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
 EOF
+}
+
+remove_work_ignore_from_fixture_repo() {
+  local filtered_gitignore
+
+  filtered_gitignore="$(mktemp)"
+  sed '/^\.work\/$/d' "${repo_dir}/.gitignore" > "${filtered_gitignore}"
+  mv "${filtered_gitignore}" "${repo_dir}/.gitignore"
 }
 
 write_stub_binaries() {
@@ -286,6 +306,7 @@ create_fixture_repo() {
 
   copy_flow_scripts
   write_fixture_files
+  remove_work_ignore_from_fixture_repo
   write_stub_binaries
 
   "${REAL_GIT}" -C "${repo_dir}" add .
@@ -309,6 +330,10 @@ run_start_from_issue_smoke() {
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "# Issue #${ISSUE_NUMBER}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "Title: ${ISSUE_TITLE}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "URL: ${ISSUE_URL}"
+
+  if "${REAL_GIT}" -C "${repo_dir}" check-ignore -q .work/current_issue; then
+    fail 'fixture repo should not ignore .work/'
+  fi
 }
 
 run_make_pr_only_smoke() {
@@ -606,7 +631,9 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
   assert_equals 'origin/main' "$(< "${state_dir}/run-changed-args.txt")" 'run_changed base ref'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_commit_excludes_work_paths HEAD
 }
 
 run_restart_issue_flow_smoke() {
@@ -675,7 +702,10 @@ run_continue_after_review_smoke() {
     fail 'continue_after_review.sh should create the intermediate review-feedback commit'
   fi
 
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_commit_excludes_work_paths HEAD
+  assert_commit_excludes_work_paths HEAD~1
 }
 
 cleanup() {

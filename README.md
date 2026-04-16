@@ -40,7 +40,7 @@
 ### consumer 側で持つもの
 
 - `.issue_forge/project.sh`
-- `.issue_forge/prompts/*.tmpl`
+- `tools/codex/prompts/*.prompt.md.tmpl`
 - `AGENTS.md`
 - `docs/README.md`
 - repo 固有 checks コマンド
@@ -53,18 +53,24 @@ consumer repo に `vendor/issue_forge` として配置します。
 ```text
 <consumer-repo>/
 ├─ .issue_forge/
-│  ├─ project.sh
-│  └─ prompts/
+│  └─ project.sh
 ├─ AGENTS.md
 ├─ docs/
 │  └─ README.md
 ├─ tools/
+│  ├─ checks/
+│  │  └─ run_changed.sh
 │  ├─ codex/
 │  │  ├─ run_issue_flow.sh
 │  │  ├─ restart_issue_flow.sh
 │  │  ├─ continue_after_review.sh
 │  │  ├─ make_pr_only.sh
-│  │  └─ run_codex.sh
+│  │  ├─ run_codex.sh
+│  │  └─ prompts/
+│  │     ├─ implementation.prompt.md.tmpl
+│  │     ├─ fix-from-checks.prompt.md.tmpl
+│  │     ├─ review.prompt.md.tmpl
+│  │     └─ fix-from-review.prompt.md.tmpl
 │  └─ issue/
 │     └─ start_from_issue.sh
 └─ vendor/
@@ -105,7 +111,7 @@ CODEX_FLOW_BASE_REF='origin/main'
 CODEX_FLOW_BASE_BRANCH='main'
 CODEX_FLOW_BRANCH_PREFIX='issue/'
 CODEX_FLOW_CHECKS_COMMAND='./tools/checks/run_changed.sh'
-CODEX_FLOW_PROMPTS_DIR='.issue_forge/prompts'
+CODEX_FLOW_PROMPTS_DIR='tools/codex/prompts'
 CODEX_FLOW_PR_DRAFT_DEFAULT=1
 
 CODEX_FLOW_PROFILE_WRITE_SANDBOX='danger-full-access'
@@ -118,10 +124,12 @@ CODEX_FLOW_PROFILE_READ_REASONING='medium'
 
 以下の 4 ファイルが必要です。
 
-- `.issue_forge/prompts/implementation.prompt.md.tmpl`
-- `.issue_forge/prompts/fix-from-checks.prompt.md.tmpl`
-- `.issue_forge/prompts/review.prompt.md.tmpl`
-- `.issue_forge/prompts/fix-from-review.prompt.md.tmpl`
+- `tools/codex/prompts/implementation.prompt.md.tmpl`
+- `tools/codex/prompts/fix-from-checks.prompt.md.tmpl`
+- `tools/codex/prompts/review.prompt.md.tmpl`
+- `tools/codex/prompts/fix-from-review.prompt.md.tmpl`
+
+prompt templates は consumer-owned artifact ですが、この repo の current preserved path contract は `tools/codex/prompts/` です。`.issue_forge/prompts/` は current path ではありません。
 
 ### 3. Repository docs
 
@@ -246,6 +254,7 @@ CODEX_TRANSIENT_MAX_RETRIES=2 CODEX_TRANSIENT_INITIAL_DELAY_SEC=3 \
 ## `.work/` に作られる主なファイル
 
 `issue_forge` は `.work/` を state と artifact の保存先に使います。
+consumer repo では `.work/` を `.gitignore` に入れるのを推奨しますが、publish staging は `.gitignore` に依存せず `.work/` を明示除外します。
 
 ### issue state
 
@@ -400,6 +409,7 @@ pytest -q tests/test_codex_smoke_harness.py
 
 - `.issue_forge/project.sh`
 - `tools/codex/prompts/`
+- `tools/checks/run_changed.sh`
 - `tools/codex/smoke_harness.sh`
 - `tests/test_codex_smoke_harness.py`
 

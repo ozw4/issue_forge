@@ -18,7 +18,7 @@ current_pr_url_for_branch() {
 }
 
 stage_issue_flow_changes() {
-  git add -A -- .
+  git add -A -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC"
 
   if git diff --cached --quiet; then
     printf 'No staged changes available for commit.\n' >&2

@@ -39,22 +39,22 @@ v1 intentionally out of scope:
 Current refactor state:
 
 - the flow is already decomposed into thin entrypoints plus reusable shell libraries under `tools/codex/lib/`
-- prompt text is already separated into template files under `tools/codex/prompts/`
+- prompt text is already separated into consumer-owned template files under `tools/codex/prompts/`
 - regression coverage already exists via `tools/codex/smoke_harness.sh` and `tests/test_codex_smoke_harness.py`
-- configuration is split between `tools/codex/lib/engine_defaults.sh` (engine defaults) and `.issue_forge/project.sh` loaded via `tools/codex/lib/consumer_config.sh` (consumer policy)
+- configuration is split between `tools/codex/lib/engine_defaults.sh` (engine-owned defaults, fixed mode names, and compatibility aliases) and `.issue_forge/project.sh` loaded via `tools/codex/lib/consumer_config.sh` (consumer-supplied policy values)
 
 Current reusable flow components in this repository:
 
 | Area | Current files | Current role |
 | --- | --- | --- |
 | Orchestration entrypoints | `tools/codex/run_issue_flow.sh`, `tools/codex/restart_issue_flow.sh`, `tools/codex/continue_after_review.sh`, `tools/codex/make_pr_only.sh`, `tools/issue/start_from_issue.sh` | User-facing scripts that sequence bootstrap, Codex sessions, checks, review, commit, push, and PR creation |
-| Codex execution wrapper | `tools/codex/run_codex.sh`, `tools/codex/lib/codex_profiles.sh`, `tools/codex/lib/engine_defaults.sh`, `tools/codex/lib/consumer_config.sh`, `.issue_forge/project.sh` | Resolves `write` vs `read` execution settings, invokes `codex exec`, and retries transient provider-capacity failures |
+| Codex execution wrapper | `tools/codex/run_codex.sh`, `tools/codex/lib/codex_profiles.sh`, `tools/codex/lib/engine_defaults.sh`, `tools/codex/lib/consumer_config.sh`, `.issue_forge/project.sh` | Resolves fixed engine modes `write` vs `read`, maps them to consumer-supplied sandbox/reasoning values, invokes `codex exec`, and retries transient provider-capacity failures |
 | Issue bootstrap logic | `tools/codex/lib/issue_bootstrap.sh` | Fetches issue title/body via `gh`, slugifies branch names, creates issue branches, and writes `.work` issue state |
-| Publish / PR logic | `tools/codex/lib/publish_helpers.sh` | Stages and commits changes, pushes the branch, discovers existing PRs, and creates draft PRs via `gh pr create` |
+| Publish / PR logic | `tools/codex/lib/publish_helpers.sh` | Stages and commits repository changes while explicitly excluding `.work/`, pushes the branch, discovers existing PRs, and creates draft PRs via `gh pr create` |
 | Flow state helpers | `tools/codex/lib/flow_state.sh`, `tools/codex/lib/history_helpers.sh` | Enters repo root, validates current issue/branch state, computes `.work` paths, excludes `.work` from worktree status, and archives round artifacts |
 | Checks / review / history helpers | `tools/codex/lib/checks_review_helpers.sh` | Runs repo checks, generates review material, validates structured review output, drives fix loops, and enforces read-only review sessions |
 | Prompt template rendering | `tools/codex/lib/prompt_templates.sh` | Resolves template paths, replaces placeholders, and renders prompts into `.work/codex/*.prompt.md` |
-| Prompt templates | `tools/codex/prompts/implementation.prompt.md.tmpl`, `fix-from-checks.prompt.md.tmpl`, `review.prompt.md.tmpl`, `fix-from-review.prompt.md.tmpl` | Consumer-specific prompt text that tells Codex which docs and `.work` artifacts to read |
+| Prompt templates | `tools/codex/prompts/implementation.prompt.md.tmpl`, `fix-from-checks.prompt.md.tmpl`, `review.prompt.md.tmpl`, `fix-from-review.prompt.md.tmpl` | Consumer-owned prompt text at the preserved path contract `tools/codex/prompts/`; these templates tell Codex which docs and `.work` artifacts to read |
 | Repo-specific checks | `tools/checks/run_changed.sh` | Consumer hook that decides which lint/type/test/build commands run for the changed files and base ref |
 | Docs / AGENTS inputs used by prompts | `AGENTS.md`, `docs/README.md`, indirectly `docs/codex_working_rules.md` and other docs selected by `docs/README.md` | Consumer-owned repository instructions and source-of-truth reading order consumed by Codex sessions |
 | Regression harness | `tools/codex/smoke_harness.sh`, `tests/test_codex_smoke_harness.py`, `tools/codex/README.md` | Network-independent fixture-based regression guard for the current shell contract |
@@ -105,10 +105,10 @@ These paths are part of the v1 preservation contract for this repository. Future
 | --- | --- | --- | --- |
 | `AGENTS.md` | Prompt input | Required consumer-owned file | Implicit today through prompt text; extracted engine should preflight it |
 | `docs/README.md` | Prompt input | Required consumer-owned file | Implicit today through prompt text; extracted engine should preflight it |
-| `tools/codex/prompts/implementation.prompt.md.tmpl` | Template input | Required consumer-owned file | Explicit hard error if missing |
-| `tools/codex/prompts/fix-from-checks.prompt.md.tmpl` | Template input | Required consumer-owned file | Explicit hard error if missing |
-| `tools/codex/prompts/review.prompt.md.tmpl` | Template input | Required consumer-owned file | Explicit hard error if missing |
-| `tools/codex/prompts/fix-from-review.prompt.md.tmpl` | Template input | Required consumer-owned file | Explicit hard error if missing |
+| `tools/codex/prompts/implementation.prompt.md.tmpl` | Template input at the current preserved prompt path | Required consumer-owned file | Explicit hard error if missing |
+| `tools/codex/prompts/fix-from-checks.prompt.md.tmpl` | Template input at the current preserved prompt path | Required consumer-owned file | Explicit hard error if missing |
+| `tools/codex/prompts/review.prompt.md.tmpl` | Template input at the current preserved prompt path | Required consumer-owned file | Explicit hard error if missing |
+| `tools/codex/prompts/fix-from-review.prompt.md.tmpl` | Template input at the current preserved prompt path | Required consumer-owned file | Explicit hard error if missing |
 | `tools/checks/run_changed.sh` | Checks hook | Required executable consumer-owned hook | Not preflight-checked today; failure occurs on execution |
 | Git worktree rooted at repo top level | Execution environment | Required | Explicit through `git rev-parse --show-toplevel` and subsequent relative paths |
 | Writable `.work/` under repo root | Engine state root | Required | Not preflight-checked separately; required by normal execution |
@@ -142,24 +142,41 @@ Git / GitHub / Codex assumptions:
 
 Current config is loaded from `tools/codex/lib/engine_defaults.sh` plus consumer config in `.issue_forge/project.sh` through `tools/codex/lib/consumer_config.sh`.
 
-| Setting | Current value in this repo | v1 contract |
+Engine-owned fixed/default values visible at runtime:
+
+| Setting | Current value in this repo | Contract classification |
+| --- | --- | --- |
+| Work root | `.work` | Engine default / fixed contract path |
+| Codex work dir | `.work/codex` | Engine default / fixed contract path |
+| History dir | `.work/codex/history` | Engine default / fixed contract path |
+| Max check-fix rounds | `20` | Engine default |
+| Max review-fix rounds | `19` | Engine default |
+| Write mode name | `write` | Engine-fixed mode contract |
+| Read mode name | `read` | Engine-fixed mode contract |
+| `CODEX_FLOW_WRITE_PROFILE` | `write` | Engine-owned readonly alias to the fixed write mode |
+| `CODEX_FLOW_READ_PROFILE` | `read` | Engine-owned readonly alias to the fixed read mode |
+| `CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH` | `48` | Engine-owned compatibility alias to the branch slug max length |
+
+Consumer-supplied values required in `.issue_forge/project.sh` today:
+
+| Setting | Current value in this repo | Contract classification |
 | --- | --- | --- |
 | Base branch | `main` | Required consumer value for this repository |
 | Base ref | `origin/main` | Required consumer value for this repository |
 | Branch prefix | `issue/` | Required consumer value |
-| Issue slug max length | `48` | Required consumer value |
-| Work root | `.work` | Fixed v1 contract path |
-| Codex work dir | `.work/codex` | Fixed v1 contract path |
-| History dir | `.work/codex/history` | Fixed v1 contract path |
-| Max check-fix rounds | `20` | Engine default |
-| Max review-fix rounds | `19` | Engine default |
+| Prompt template directory | `tools/codex/prompts` | Required consumer value; must point at the consumer-owned preserved prompt path in this repo |
+| Checks command | `./tools/checks/run_changed.sh` | Required consumer value |
 | Draft PR default | `1` | Consumer policy for this repository |
-| Write mode name | `write` | Engine mode contract |
-| Read mode name | `read` | Engine mode contract |
-| Write sandbox | `danger-full-access` | Consumer/project policy for this repository |
-| Write reasoning | `xhigh` | Consumer/project policy for this repository |
-| Read sandbox | `danger-full-access` | Consumer/project policy for this repository |
-| Read reasoning | `medium` | Consumer/project policy for this repository |
+| Write profile sandbox | `danger-full-access` via `CODEX_FLOW_PROFILE_WRITE_SANDBOX` | Required consumer value for the fixed `write` mode |
+| Write profile reasoning | `xhigh` via `CODEX_FLOW_PROFILE_WRITE_REASONING` | Required consumer value for the fixed `write` mode |
+| Read profile sandbox | `danger-full-access` via `CODEX_FLOW_PROFILE_READ_SANDBOX` | Required consumer value for the fixed `read` mode |
+| Read profile reasoning | `medium` via `CODEX_FLOW_PROFILE_READ_REASONING` | Required consumer value for the fixed `read` mode |
+
+Not consumer-configurable in the current implementation contract:
+
+- `write` and `read` are fixed engine-visible mode names; consumer config supplies sandbox/reasoning values for those modes, not alternate mode identifiers
+- `CODEX_FLOW_WRITE_PROFILE` and `CODEX_FLOW_READ_PROFILE` are engine-owned readonly aliases defined in `tools/codex/lib/engine_defaults.sh`
+- `CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH` is an engine-owned compatibility alias, not a consumer project setting
 
 Optional runtime environment variables already supported:
 
@@ -255,6 +272,7 @@ Issue context and branch invariants:
 Contract vs current implementation detail:
 
 - contract: the paths and file names listed above, the branch naming rule, and the base ref/base branch values for this repository
+- contract: consumer repos should normally keep `.work/` gitignored for hygiene, but publish staging must explicitly exclude `.work/` and must not depend on `.gitignore`
 - current implementation detail: internal shell variable names, use of `mktemp`, exact helper function names, and smoke-only fixture files under temporary directories
 
 ## 6. Configuration Contract
@@ -264,58 +282,63 @@ Current state:
 - engine defaults are in `tools/codex/lib/engine_defaults.sh`
 - consumer policy is in `.issue_forge/project.sh` and loaded by `tools/codex/lib/consumer_config.sh`
 - there is no `.codex/` directory and no `.codex/config.toml` in this repository today
+- `write` / `read` are fixed engine-visible modes defined by engine defaults, and the consumer config only supplies per-mode sandbox/reasoning values
+- `CODEX_FLOW_WRITE_PROFILE`, `CODEX_FLOW_READ_PROFILE`, and `CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH` are engine-owned readonly/compatibility aliases in the current implementation, not consumer-owned project settings
 
-v1 split target:
+Current implementation split:
 
 | Config location | What should live there |
 | --- | --- |
-| Shared engine defaults | Stable engine defaults that are not consumer-specific: `.work` state root, `.work/codex` layout, history naming rules, round limits, mode names, retry env var defaults |
-| Consumer repo config | Repo-specific policy: base branch/ref, branch prefix, issue slug length, PR draft policy, prompt template directory, checks hook path, and mode-specific sandbox/reasoning values |
+| Shared engine defaults | `.work` state root, `.work/codex` layout, history naming rules, round limits, fixed mode names, readonly/compatibility aliases, and retry env var defaults |
+| Consumer repo config | Repo-specific policy loaded from `.issue_forge/project.sh`: base branch/ref, branch prefix, PR draft policy, prompt template directory, checks command, and mode-specific sandbox/reasoning values for the fixed `write` / `read` modes |
 | Project-scoped Codex config | Optional consumer-owned `.codex/config.toml` or equivalent project Codex CLI config; engine must treat it as opaque and optional in v1 |
 | `AGENTS.md` / repository docs | Human-readable repo policy and source-of-truth reading order for Codex sessions; not machine config, but required session context |
 
-Recommended v1 shape for engine-side defaults:
+Current engine-owned defaults and aliases:
 
 ```sh
-# shared engine defaults
-CODEX_ENGINE_WORK_ROOT=.work
-CODEX_ENGINE_CODEX_SUBDIR=codex
-CODEX_ENGINE_HISTORY_SUBDIR=history
-CODEX_ENGINE_MAX_CHECK_FIX_ROUNDS=20
-CODEX_ENGINE_MAX_REVIEW_FIX_ROUNDS=19
-CODEX_ENGINE_MODE_WRITE=write
-CODEX_ENGINE_MODE_READ=read
+# engine-owned defaults in tools/codex/lib/engine_defaults.sh
+readonly CODEX_FLOW_WORK_DIR='.work'
+readonly CODEX_FLOW_CODEX_DIR='.work/codex'
+readonly CODEX_FLOW_HISTORY_DIR='.work/codex/history'
+readonly CODEX_FLOW_BRANCH_SLUG_MAXLEN=48
+readonly CODEX_FLOW_CHECK_MAX_ROUNDS=20
+readonly CODEX_FLOW_REVIEW_MAX_ROUNDS=19
+readonly CODEX_FLOW_PROFILE_WRITE='write'
+readonly CODEX_FLOW_PROFILE_READ='read'
+readonly CODEX_FLOW_WRITE_PROFILE="${CODEX_FLOW_PROFILE_WRITE}"
+readonly CODEX_FLOW_READ_PROFILE="${CODEX_FLOW_PROFILE_READ}"
+readonly CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH="${CODEX_FLOW_BRANCH_SLUG_MAXLEN}"
 ```
 
-Recommended v1 shape for consumer-side config:
+Current consumer-side config required by `tools/codex/lib/consumer_config.sh`:
 
 ```sh
-# consumer repo config for this repository
+# consumer repo config in .issue_forge/project.sh for this repository
 CODEX_FLOW_BASE_BRANCH=main
 CODEX_FLOW_BASE_REF=origin/main
 CODEX_FLOW_BRANCH_PREFIX=issue/
-CODEX_FLOW_ISSUE_SLUG_MAX_LENGTH=48
-CODEX_FLOW_PR_DRAFT_DEFAULT=1
 CODEX_FLOW_PROMPTS_DIR=tools/codex/prompts
 CODEX_FLOW_CHECKS_COMMAND=./tools/checks/run_changed.sh
-CODEX_FLOW_WRITE_PROFILE=write
-CODEX_FLOW_READ_PROFILE=read
-CODEX_FLOW_WRITE_SANDBOX=danger-full-access
-CODEX_FLOW_WRITE_REASONING=xhigh
-CODEX_FLOW_READ_SANDBOX=danger-full-access
-CODEX_FLOW_READ_REASONING=medium
+CODEX_FLOW_PR_DRAFT_DEFAULT=1
+CODEX_FLOW_PROFILE_WRITE_SANDBOX=danger-full-access
+CODEX_FLOW_PROFILE_WRITE_REASONING=xhigh
+CODEX_FLOW_PROFILE_READ_SANDBOX=danger-full-access
+CODEX_FLOW_PROFILE_READ_REASONING=medium
 ```
 
-Recommended v1 shape for repo-specific Codex profiles:
+Current profile contract:
 
-- keep the engine-visible modes as `write` and `read`
-- let the consumer map those modes to sandbox and reasoning values
+- engine-visible modes are fixed as `write` and `read`
+- the consumer does not override those mode names; it supplies `CODEX_FLOW_PROFILE_WRITE_SANDBOX`, `CODEX_FLOW_PROFILE_WRITE_REASONING`, `CODEX_FLOW_PROFILE_READ_SANDBOX`, and `CODEX_FLOW_PROFILE_READ_REASONING`
+- `resolve_codex_profile_for_mode` maps the fixed modes to the engine-owned aliases `CODEX_FLOW_WRITE_PROFILE` / `CODEX_FLOW_READ_PROFILE`
 - do not make `.codex/config.toml` mandatory in v1
 - if a future consumer wants Codex CLI model aliases in `.codex/config.toml`, that remains consumer-owned and outside the engine contract
 
-Recommended v1 shape for prompt template and checks configuration:
+Current prompt template and checks configuration:
 
 - prompt template directory stays consumer-owned at `tools/codex/prompts/`
+- for this repository, `tools/codex/prompts/` is also the preserved path contract; do not document `.issue_forge/prompts/` as the current path
 - checks hook stays consumer-owned at `tools/checks/run_changed.sh`
 - the engine should read these paths from consumer config even if this first consumer keeps the current values
 
@@ -323,7 +346,7 @@ Recommended v1 shape for prompt template and checks configuration:
 
 Prompt generation after extraction should treat template text as consumer-owned and rendering behavior as engine-owned.
 
-Template ownership and placeholder contract:
+Current template ownership and placeholder contract:
 
 | Template | Consumer-owned path | Required placeholders | Engine dependency |
 | --- | --- | --- | --- |
@@ -336,6 +359,7 @@ Why prompts remain consumer-owned:
 
 - they encode repo-specific reading order and scope rules
 - they refer to consumer docs and issue context files by relative path
+- in this repository, the preserved current path contract for those consumer-owned templates is `tools/codex/prompts/`
 - the acceptable implementation and review language is repository policy, not engine policy
 
 Why `AGENTS.md` and repository docs remain consumer-owned:
