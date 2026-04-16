@@ -191,6 +191,7 @@ consumer repo は checks hook を提供します。
 5. review prompt を生成
 6. `run_codex.sh read` で review
 7. accept されなければ fix-from-review を回す
+   `accept: yes` は `blocker:` と `major:` が空であることを意味し、`minor:` は残りうる
 8. commit
 9. push
 10. draft PR を作成

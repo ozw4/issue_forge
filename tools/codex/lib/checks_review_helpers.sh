@@ -212,9 +212,50 @@ validate_review_output() {
   ' "$file"
 }
 
+validate_review_output_semantics() {
+  local file="$1"
+
+  awk '
+    NR == 1 {
+      accept = $0
+      next
+    }
+    $0 == "blocker:" {
+      section = "blocker"
+      next
+    }
+    $0 == "major:" {
+      section = "major"
+      next
+    }
+    $0 == "minor:" {
+      section = "minor"
+      next
+    }
+    /^- / {
+      if (section == "blocker") {
+        blocker_count += 1
+      } else if (section == "major") {
+        major_count += 1
+      }
+      next
+    }
+    END {
+      if (accept == "accept: yes" && (blocker_count > 0 || major_count > 0)) {
+        exit 1
+      }
+    }
+  ' "$file"
+}
+
 ensure_valid_review_output() {
   if ! validate_review_output "$review_output"; then
     log_fail_with_path "review output format is invalid" "$review_raw_output"
+    exit 1
+  fi
+
+  if ! validate_review_output_semantics "$review_output"; then
+    log_fail_with_path "review output is inconsistent with acceptance" "$review_raw_output"
     exit 1
   fi
 }

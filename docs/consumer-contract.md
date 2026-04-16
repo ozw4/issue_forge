@@ -414,6 +414,8 @@ More precisely:
 - line 2 must be blank
 - section headers must appear in this order: `blocker:`, `major:`, `minor:`
 - section items are zero or more `- ` bullet lines
+- `accept: yes` requires zero `blocker:` items and zero `major:` items
+- `accept: yes` may still include `minor:` items
 - the exact ordering is parsed by the engine and validated today in `tools/codex/lib/checks_review_helpers.sh`
 
 ## 8. Testing Contract
@@ -434,7 +436,7 @@ Existing `tools/codex/smoke_harness.sh` behaviors that belong to engine-level va
 - Codex profile resolution fails on missing or invalid profile settings
 - `run_issue_flow.sh` produces the current `.work/codex/*` file set and history naming pattern
 - review sessions are read-only with respect to repository files
-- review output extraction and validation preserve the current accept/blocker/major/minor format
+- review output extraction and validation preserve the current accept/blocker/major/minor format and reject `accept: yes` outputs that still contain blocker or major findings
 - `restart_issue_flow.sh --hard` discards dirty changes outside `.work`
 - `continue_after_review.sh` creates the intermediate `wip: address review feedback for issue #<n>` commit before rerunning
 - `make_pr_only.sh` creates or returns the PR without pushing the branch

@@ -86,6 +86,69 @@ assert_files_equal() {
   fi
 }
 
+write_review_output_fixture() {
+  local path="$1"
+  local accept_value="$2"
+  local blocker_items="$3"
+  local major_items="$4"
+  local minor_items="$5"
+
+  {
+    printf 'accept: %s\n\n' "$accept_value"
+    printf 'blocker:\n'
+    if [[ -n "$blocker_items" ]]; then
+      printf '%s\n' "$blocker_items"
+    fi
+    printf '\nmajor:\n'
+    if [[ -n "$major_items" ]]; then
+      printf '%s\n' "$major_items"
+    fi
+    printf '\nminor:\n'
+    if [[ -n "$minor_items" ]]; then
+      printf '%s\n' "$minor_items"
+    fi
+  } > "$path"
+}
+
+run_review_validation_command() {
+  local review_output_path="$1"
+  local review_raw_path="$2"
+  local expected_accept_state="$3"
+
+  (
+    set -euo pipefail
+    cd "${repo_dir}"
+    # shellcheck source=tools/codex/lib/config.sh
+    source tools/codex/lib/config.sh
+    # shellcheck source=tools/codex/lib/checks_review_helpers.sh
+    source tools/codex/lib/checks_review_helpers.sh
+    log_fail_with_path() {
+      printf '[flow] %s\n' "$1" >&2
+      printf '[flow] see log: %s\n' "$2" >&2
+    }
+    review_output="${review_output_path}"
+    review_raw_output="${review_raw_path}"
+
+    ensure_valid_review_output
+
+    case "${expected_accept_state}" in
+      yes)
+        review_accepted
+        ;;
+      no)
+        if review_accepted; then
+          printf 'Expected review_accepted to return false for %s\n' "${review_output}" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        printf 'Invalid expected accept state: %s\n' "${expected_accept_state}" >&2
+        exit 1
+        ;;
+    esac
+  )
+}
+
 copy_flow_scripts() {
   mkdir -p     "${repo_dir}/docs"     "${repo_dir}/tools/codex/lib"     "${repo_dir}/tools/codex/prompts"     "${repo_dir}/tools/issue"     "${repo_dir}/tools/checks"     "${repo_dir}/.issue_forge"
 
@@ -512,6 +575,43 @@ resolve_codex_profile_sandbox write
   assert_file_contains "${incomplete_profile_log}" 'Missing Codex profile setting: profile write sandbox'
 }
 
+run_review_output_validation_smoke() {
+  local valid_yes_output="${state_dir}/review-valid-yes.txt"
+  local valid_yes_raw="${state_dir}/review-valid-yes.raw.txt"
+  local invalid_yes_blocker_output="${state_dir}/review-invalid-yes-blocker.txt"
+  local invalid_yes_blocker_raw="${state_dir}/review-invalid-yes-blocker.raw.txt"
+  local invalid_yes_blocker_log="${state_dir}/review-invalid-yes-blocker.log"
+  local invalid_yes_major_output="${state_dir}/review-invalid-yes-major.txt"
+  local invalid_yes_major_raw="${state_dir}/review-invalid-yes-major.raw.txt"
+  local invalid_yes_major_log="${state_dir}/review-invalid-yes-major.log"
+  local valid_no_output="${state_dir}/review-valid-no.txt"
+  local valid_no_raw="${state_dir}/review-valid-no.raw.txt"
+
+  log 'running review output validation smoke'
+
+  write_review_output_fixture "$valid_yes_output" 'yes' '' '' '- minor follow-up remains'
+  cp "$valid_yes_output" "$valid_yes_raw"
+  run_review_validation_command "$valid_yes_output" "$valid_yes_raw" 'yes'
+
+  write_review_output_fixture "$invalid_yes_blocker_output" 'yes' '- blocker still present' '' ''
+  cp "$invalid_yes_blocker_output" "$invalid_yes_blocker_raw"
+  if run_review_validation_command "$invalid_yes_blocker_output" "$invalid_yes_blocker_raw" 'yes' > "$invalid_yes_blocker_log" 2>&1; then
+    fail 'accept: yes with blocker findings should fail validation'
+  fi
+  assert_file_contains "$invalid_yes_blocker_log" 'review output is inconsistent with acceptance'
+
+  write_review_output_fixture "$invalid_yes_major_output" 'yes' '' '- major still present' ''
+  cp "$invalid_yes_major_output" "$invalid_yes_major_raw"
+  if run_review_validation_command "$invalid_yes_major_output" "$invalid_yes_major_raw" 'yes' > "$invalid_yes_major_log" 2>&1; then
+    fail 'accept: yes with major findings should fail validation'
+  fi
+  assert_file_contains "$invalid_yes_major_log" 'review output is inconsistent with acceptance'
+
+  write_review_output_fixture "$valid_no_output" 'no' '- blocker remains' '- major remains' '- minor remains'
+  cp "$valid_no_output" "$valid_no_raw"
+  run_review_validation_command "$valid_no_output" "$valid_no_raw" 'no'
+}
+
 write_expected_issue_flow_prompts() {
   expected_prompt_dir="${prompt_dir}/expected"
   mkdir -p "${expected_prompt_dir}"
@@ -777,6 +877,7 @@ main() {
   run_make_pr_only_smoke
   run_run_codex_smoke
   run_codex_profile_smoke
+  run_review_output_validation_smoke
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
