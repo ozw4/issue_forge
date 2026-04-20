@@ -86,6 +86,12 @@ assert_files_equal() {
   fi
 }
 
+assert_source_checks_command_executable() {
+  if [[ ! -x "${REPO_ROOT}/tools/checks/run_changed.sh" ]]; then
+    fail 'tools/checks/run_changed.sh must be executable'
+  fi
+}
+
 write_review_output_fixture() {
   local path="$1"
   local accept_value="$2"
@@ -949,6 +955,7 @@ cleanup() {
 
 main() {
   trap cleanup EXIT
+  assert_source_checks_command_executable
   create_fixture_repo
   run_start_from_issue_smoke
   advance_origin_main_after_bootstrap

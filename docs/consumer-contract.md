@@ -114,7 +114,7 @@ These paths are part of the v1 preservation contract for this repository. Future
 | Git worktree rooted at repo top level | Execution environment | Required | Explicit through `git rev-parse --show-toplevel` and subsequent relative paths |
 | Writable `.work/` under repo root | Engine state root | Required | Not preflight-checked separately; required by normal execution |
 
-The explicit diagnostic entrypoint is `tools/codex/doctor.sh`. It uses the current runtime config-loading path and treats missing commands, failed `gh auth`, invalid consumer config, unresolved `CODEX_FLOW_BASE_REF`, missing prompt templates, and non-callable checks commands as hard failures. `.work/` not being ignored is reported as a warning only: recommended operationally, but not a hard requirement.
+The explicit diagnostic entrypoint is `tools/codex/doctor.sh`. It uses the current runtime config-loading path and treats missing required commands, failed `gh auth`, invalid consumer config, unresolved `CODEX_FLOW_BASE_REF`, missing prompt templates, and non-callable checks commands as hard failures. Missing `shellcheck` is therefore a hard failure in the current contract. `.work/` not being ignored is reported as a warning only: recommended operationally, but not a hard requirement.
 
 ### 4.3 Required Commands and Runtime Assumptions
 
@@ -126,6 +126,7 @@ The current flow is Bash-based and assumes standard Unix userland plus these req
 | `git` | All flows except prompt rendering helpers |
 | `gh` | Issue bootstrap and PR publish flows |
 | `codex` | `tools/codex/run_codex.sh` and anything that calls it |
+| `shellcheck` | `tools/codex/doctor.sh` preflight and `tools/checks/run_changed.sh` shell validation |
 | `awk` | Prompt placeholder validation and review-output extraction/validation |
 | `sed` | Slugify, placeholder rendering, and review accept parsing |
 | `tr`, `cut` | Branch slug generation |
@@ -214,7 +215,7 @@ These conditions should be treated as hard errors by the extracted engine becaus
 
 | Condition | Current status |
 | --- | --- |
-| Missing required CLI command (`git`, `gh`, `codex`, `awk`, `sed`, `tr`, `cut`, `mktemp`) | Explicit hard error where currently checked; otherwise a shell execution failure |
+| Missing required CLI command (`git`, `gh`, `codex`, `shellcheck`, `awk`, `sed`, `tr`, `cut`, `mktemp`) | Explicit hard error where currently checked; otherwise a shell execution failure |
 | Missing or non-numeric issue number when numeric is required | Explicit hard error |
 | Missing `.work/current_issue` when issue number is omitted | Explicit hard error |
 | Missing `.work/base_commit` when issue-flow state is required | Explicit hard error |
