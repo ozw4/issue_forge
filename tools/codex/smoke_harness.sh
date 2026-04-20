@@ -175,6 +175,7 @@ copy_flow_scripts() {
   cp "${REPO_ROOT}/tools/codex/prompts/review.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/review.prompt.md.tmpl"
   cp "${REPO_ROOT}/tools/codex/prompts/fix-from-review.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/fix-from-review.prompt.md.tmpl"
   cp "${REPO_ROOT}/tools/codex/continue_after_review.sh" "${repo_dir}/tools/codex/continue_after_review.sh"
+  cp "${REPO_ROOT}/tools/codex/doctor.sh" "${repo_dir}/tools/codex/doctor.sh"
   cp "${REPO_ROOT}/tools/codex/make_pr_only.sh" "${repo_dir}/tools/codex/make_pr_only.sh"
   cp "${REPO_ROOT}/tools/codex/restart_issue_flow.sh" "${repo_dir}/tools/codex/restart_issue_flow.sh"
   cp "${REPO_ROOT}/tools/codex/run_codex.sh" "${repo_dir}/tools/codex/run_codex.sh"
@@ -196,6 +197,7 @@ copy_flow_scripts() {
     "${repo_dir}/tools/codex/lib/prompt_templates.sh" \
     "${repo_dir}/tools/codex/lib/publish_helpers.sh" \
     "${repo_dir}/tools/codex/continue_after_review.sh" \
+    "${repo_dir}/tools/codex/doctor.sh" \
     "${repo_dir}/tools/codex/make_pr_only.sh" \
     "${repo_dir}/tools/codex/restart_issue_flow.sh" \
     "${repo_dir}/tools/codex/run_codex.sh" \
@@ -232,6 +234,23 @@ remove_work_ignore_from_fixture_repo() {
   filtered_gitignore="$(mktemp)"
   sed '/^\.work\/$/d' "${repo_dir}/.gitignore" > "${filtered_gitignore}"
   mv "${filtered_gitignore}" "${repo_dir}/.gitignore"
+}
+
+set_work_ignore_fixture_state() {
+  local desired_state="$1"
+  local exclude_file="${repo_dir}/.git/info/exclude"
+  local filtered_exclude
+
+  filtered_exclude="$(mktemp)"
+  if [[ -f "${exclude_file}" ]]; then
+    grep -vx '.work/' "${exclude_file}" > "${filtered_exclude}" || true
+  fi
+
+  if [[ "${desired_state}" == 'enabled' ]]; then
+    printf '.work/\n' >> "${filtered_exclude}"
+  fi
+
+  mv "${filtered_exclude}" "${exclude_file}"
 }
 
 advance_origin_main_after_bootstrap() {
@@ -302,6 +321,11 @@ URL: ${ISSUE_URL}
 **Problem / Goal**
 Smoke harness fixture issue body.
 OUT
+  exit 0
+fi
+
+if [[ "\$#" -ge 2 && "\$1" == "auth" && "\$2" == "status" ]]; then
+  printf 'github.com\n'
   exit 0
 fi
 
@@ -398,7 +422,13 @@ OUT
 esac
 EOF
 
-  chmod +x "${stub_dir}/git" "${stub_dir}/gh" "${stub_dir}/codex"
+  cat > "${stub_dir}/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'stub shellcheck ok\n'
+EOF
+
+  chmod +x "${stub_dir}/git" "${stub_dir}/gh" "${stub_dir}/codex" "${stub_dir}/shellcheck"
 }
 
 create_fixture_repo() {
@@ -471,6 +501,54 @@ run_make_pr_only_smoke() {
   if grep -Fq 'push --set-upstream origin issue/' "${state_dir}/git.log"; then
     fail 'make_pr_only.sh should not push the issue branch'
   fi
+}
+
+run_doctor_smoke() {
+  local doctor_success_log="${state_dir}/doctor-success.log"
+  local doctor_warning_log="${state_dir}/doctor-warning.log"
+  local doctor_failure_log="${state_dir}/doctor-failure.log"
+  local original_project_config
+  local invalid_project_config
+
+  log 'running doctor.sh smoke'
+
+  set_work_ignore_fixture_state 'enabled'
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+  ) > "${doctor_success_log}" 2>&1; then
+    fail 'doctor.sh should succeed when requirements are satisfied'
+  fi
+  assert_file_contains "${doctor_success_log}" 'OK'
+  assert_file_not_contains "${doctor_success_log}" 'WARN .work/'
+  assert_file_not_contains "${doctor_success_log}" 'FAIL'
+
+  set_work_ignore_fixture_state 'disabled'
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+  ) > "${doctor_warning_log}" 2>&1; then
+    fail 'doctor.sh should exit 0 when only warning-level findings exist'
+  fi
+  assert_file_contains "${doctor_warning_log}" 'WARN .work/ is not ignored by git; this is recommended for local hygiene but not a hard requirement'
+  assert_file_contains "${doctor_warning_log}" '0 failure(s)'
+
+  original_project_config="$(mktemp)"
+  invalid_project_config="$(mktemp)"
+  cp "${repo_dir}/.issue_forge/project.sh" "${original_project_config}"
+  sed "s|^CODEX_FLOW_BASE_REF='origin/main'$|CODEX_FLOW_BASE_REF='origin/missing'|" "${original_project_config}" > "${invalid_project_config}"
+  mv "${invalid_project_config}" "${repo_dir}/.issue_forge/project.sh"
+
+  if (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+  ) > "${doctor_failure_log}" 2>&1; then
+    fail 'doctor.sh should fail when the configured bootstrap base ref does not resolve'
+  fi
+  assert_file_contains "${doctor_failure_log}" 'FAIL Missing required base ref: origin/missing'
+  assert_file_contains "${doctor_failure_log}" '1 failure(s)'
+
+  mv "${original_project_config}" "${repo_dir}/.issue_forge/project.sh"
 }
 
 run_run_codex_smoke() {
@@ -875,6 +953,7 @@ main() {
   run_start_from_issue_smoke
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
+  run_doctor_smoke
   run_run_codex_smoke
   run_codex_profile_smoke
   run_review_output_validation_smoke

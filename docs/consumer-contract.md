@@ -93,6 +93,7 @@ These paths are part of the v1 preservation contract for this repository. Future
 | Path | Arguments | Current role |
 | --- | --- | --- |
 | `tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
+| `tools/codex/doctor.sh` | none | Explicit standalone preflight for command availability, GitHub auth, consumer config loading, base-ref resolution, prompt/checks contract, and advisory git-state checks |
 | `tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR publish |
 | `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the issue flow |
 | `tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the issue flow |
@@ -112,6 +113,8 @@ These paths are part of the v1 preservation contract for this repository. Future
 | `tools/checks/run_changed.sh` | Checks hook | Required executable consumer-owned hook | Not preflight-checked today; failure occurs on execution |
 | Git worktree rooted at repo top level | Execution environment | Required | Explicit through `git rev-parse --show-toplevel` and subsequent relative paths |
 | Writable `.work/` under repo root | Engine state root | Required | Not preflight-checked separately; required by normal execution |
+
+The explicit diagnostic entrypoint is `tools/codex/doctor.sh`. It uses the current runtime config-loading path and treats missing commands, failed `gh auth`, invalid consumer config, unresolved `CODEX_FLOW_BASE_REF`, missing prompt templates, and non-callable checks commands as hard failures. `.work/` not being ignored is reported as a warning only: recommended operationally, but not a hard requirement.
 
 ### 4.3 Required Commands and Runtime Assumptions
 
@@ -440,6 +443,7 @@ Existing `tools/codex/smoke_harness.sh` behaviors that belong to engine-level va
 - `restart_issue_flow.sh --hard` discards dirty changes outside `.work`
 - `continue_after_review.sh` creates the intermediate `wip: address review feedback for issue #<n>` commit before rerunning
 - `make_pr_only.sh` creates or returns the PR without pushing the branch
+- `doctor.sh` exits `0` for a healthy setup, exits non-zero for hard contract/environment failures, and keeps `.work/` ignore as a warning-only advisory
 
 Existing behaviors that are consumer-specific after extraction:
 

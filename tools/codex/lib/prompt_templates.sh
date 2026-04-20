@@ -4,9 +4,25 @@ escape_sed_replacement() {
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
 }
 
+required_prompt_template_names() {
+  printf '%s\n' \
+    'implementation' \
+    'fix-from-checks' \
+    'review' \
+    'fix-from-review'
+}
+
+prompt_template_file_path() {
+  local template_name="$1"
+
+  printf '%s/%s.prompt.md.tmpl\n' "$CODEX_FLOW_PROMPTS_DIR" "$template_name"
+}
+
 prompt_template_path() {
   local template_name="$1"
-  local template_path="${CODEX_FLOW_PROMPTS_DIR}/${template_name}.prompt.md.tmpl"
+  local template_path
+
+  template_path="$(prompt_template_file_path "$template_name")"
 
   if [[ ! -f "$template_path" ]]; then
     printf 'Missing prompt template: %s\n' "$template_path" >&2
