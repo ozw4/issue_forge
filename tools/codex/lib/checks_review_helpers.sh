@@ -216,6 +216,15 @@ validate_review_output_semantics() {
   local file="$1"
 
   awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function is_placeholder_item(value, normalized) {
+      normalized = tolower(trim(value))
+      return normalized == "none" || normalized == "n/a" || normalized == "no issues" || normalized == "nothing"
+    }
     NR == 1 {
       accept = $0
       next
@@ -233,6 +242,10 @@ validate_review_output_semantics() {
       next
     }
     /^- / {
+      item = substr($0, 3)
+      if (is_placeholder_item(item)) {
+        next
+      }
       if (section == "blocker") {
         blocker_count += 1
       } else if (section == "major") {

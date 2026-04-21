@@ -660,8 +660,12 @@ resolve_codex_profile_sandbox write
 }
 
 run_review_output_validation_smoke() {
+  local valid_yes_empty_output="${state_dir}/review-valid-yes-empty.txt"
+  local valid_yes_empty_raw="${state_dir}/review-valid-yes-empty.raw.txt"
   local valid_yes_output="${state_dir}/review-valid-yes.txt"
   local valid_yes_raw="${state_dir}/review-valid-yes.raw.txt"
+  local valid_yes_placeholder_output="${state_dir}/review-valid-yes-placeholder.txt"
+  local valid_yes_placeholder_raw="${state_dir}/review-valid-yes-placeholder.raw.txt"
   local invalid_yes_blocker_output="${state_dir}/review-invalid-yes-blocker.txt"
   local invalid_yes_blocker_raw="${state_dir}/review-invalid-yes-blocker.raw.txt"
   local invalid_yes_blocker_log="${state_dir}/review-invalid-yes-blocker.log"
@@ -670,12 +674,23 @@ run_review_output_validation_smoke() {
   local invalid_yes_major_log="${state_dir}/review-invalid-yes-major.log"
   local valid_no_output="${state_dir}/review-valid-no.txt"
   local valid_no_raw="${state_dir}/review-valid-no.raw.txt"
+  local malformed_output="${state_dir}/review-malformed.txt"
+  local malformed_raw="${state_dir}/review-malformed.raw.txt"
+  local malformed_log="${state_dir}/review-malformed.log"
 
   log 'running review output validation smoke'
+
+  write_review_output_fixture "$valid_yes_empty_output" 'yes' '' '' ''
+  cp "$valid_yes_empty_output" "$valid_yes_empty_raw"
+  run_review_validation_command "$valid_yes_empty_output" "$valid_yes_empty_raw" 'yes'
 
   write_review_output_fixture "$valid_yes_output" 'yes' '' '' '- minor follow-up remains'
   cp "$valid_yes_output" "$valid_yes_raw"
   run_review_validation_command "$valid_yes_output" "$valid_yes_raw" 'yes'
+
+  write_review_output_fixture "$valid_yes_placeholder_output" 'yes' '-  NONE  ' '- No Issues' $'-   n/a\n- nothing'
+  cp "$valid_yes_placeholder_output" "$valid_yes_placeholder_raw"
+  run_review_validation_command "$valid_yes_placeholder_output" "$valid_yes_placeholder_raw" 'yes'
 
   write_review_output_fixture "$invalid_yes_blocker_output" 'yes' '- blocker still present' '' ''
   cp "$invalid_yes_blocker_output" "$invalid_yes_blocker_raw"
@@ -694,6 +709,21 @@ run_review_output_validation_smoke() {
   write_review_output_fixture "$valid_no_output" 'no' '- blocker remains' '- major remains' '- minor remains'
   cp "$valid_no_output" "$valid_no_raw"
   run_review_validation_command "$valid_no_output" "$valid_no_raw" 'no'
+
+  cat > "$malformed_output" <<'EOF'
+accept: yes
+blocker:
+- malformed because the required blank line is missing
+
+major:
+
+minor:
+EOF
+  cp "$malformed_output" "$malformed_raw"
+  if run_review_validation_command "$malformed_output" "$malformed_raw" 'yes' > "$malformed_log" 2>&1; then
+    fail 'malformed review output should fail validation'
+  fi
+  assert_file_contains "$malformed_log" 'review output format is invalid'
 }
 
 write_expected_issue_flow_prompts() {
