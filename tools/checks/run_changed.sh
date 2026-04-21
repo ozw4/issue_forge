@@ -114,7 +114,7 @@ main() {
 
   for path in "${changed_files[@]}"; do
     case "$path" in
-      *.sh|.issue_forge/project.sh)
+      *.sh)
         shell_targets+=("$path")
         ;;
     esac
@@ -131,4 +131,3 @@ main() {
 }
 
 main "$@"
-

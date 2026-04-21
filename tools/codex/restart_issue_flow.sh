@@ -61,7 +61,7 @@ if [[ -n "$dirty_status" ]]; then
   fi
 
   git reset --hard HEAD
-  git clean -fd -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+  git clean -fd "${CODEX_FLOW_CLEAN_EXCLUDE_ARGS[@]}" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC}"
 fi
 
 rm -rf "$CODEX_FLOW_CODEX_DIR"

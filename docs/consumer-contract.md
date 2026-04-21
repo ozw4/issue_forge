@@ -133,7 +133,6 @@ The flow must explicitly exclude internal paths from git operations instead of r
 
 - `:(exclude).work`
 - `:(exclude)vendor/issue_forge` when the engine root is inside the consumer repo at that logical path
-- parent directories needed to keep that untracked mount point from being removed by `git clean`, such as `:(exclude)vendor`
 
 Current operations that must honor the full exclude array include:
 
@@ -141,9 +140,12 @@ Current operations that must honor the full exclude array include:
 - `git diff --no-ext-diff --binary <base> -- . ...`
 - `git ls-files --others --exclude-standard -- . ...`
 - `git add -A -- . ...`
-- `git clean -fd -- . ...`
 
 The positive pathspec `.` stays before the exclude pathspecs.
+
+`git clean` is handled separately so the engine mount is preserved without hiding consumer-owned `vendor/` content from normal worktree operations. When `vendor/issue_forge` is inside the consumer repo, the clean command protects it with a dedicated exclude argument such as:
+
+- `git clean -fd -e vendor/issue_forge -- . :(exclude).work`
 
 Consumer git hygiene should ignore both:
 

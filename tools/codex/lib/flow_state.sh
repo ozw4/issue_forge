@@ -16,40 +16,27 @@ add_worktree_exclude_path() {
 if [[ -z "${ISSUE_FORGE_ENGINE_CONSUMER_PATH:-}" ]]; then
   ISSUE_FORGE_ENGINE_CONSUMER_PATH=''
 
-  if [[ "${ISSUE_FORGE_ENGINE_ROOT}" != "${CODEX_FLOW_REPO_ROOT}" ]]; then
-    if [[ "$(basename "${ISSUE_FORGE_ENGINE_PARENT_DIR}")" == 'vendor' ]]; then
-      ISSUE_FORGE_ENGINE_CONSUMER_PATH="$(basename "${ISSUE_FORGE_ENGINE_PARENT_DIR}")/$(basename "${ISSUE_FORGE_ENGINE_ROOT}")"
-    elif [[ "${ISSUE_FORGE_ENGINE_ROOT}" == "${CODEX_FLOW_REPO_ROOT}/"* ]]; then
-      ISSUE_FORGE_ENGINE_CONSUMER_PATH="${ISSUE_FORGE_ENGINE_ROOT#"${CODEX_FLOW_REPO_ROOT}"/}"
-    fi
+  if [[ "${ISSUE_FORGE_ENGINE_ROOT}" == "${CODEX_FLOW_REPO_ROOT}/"* ]]; then
+    ISSUE_FORGE_ENGINE_CONSUMER_PATH="${ISSUE_FORGE_ENGINE_ROOT#"${CODEX_FLOW_REPO_ROOT}"/}"
   fi
 
   readonly ISSUE_FORGE_ENGINE_CONSUMER_PATH
 fi
 
 if [[ -z "${CODEX_FLOW_WORKTREE_EXCLUDES_INITIALIZED:-}" ]]; then
-  local_parent_path=''
-  declare -a engine_path_parts=()
-  index=0
-
   declare -ag CODEX_FLOW_WORKTREE_EXCLUDE_PATHS
+  declare -ag CODEX_FLOW_CLEAN_EXCLUDE_ARGS
   CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(":(exclude)${CODEX_FLOW_WORK_ROOT}")
+  CODEX_FLOW_CLEAN_EXCLUDE_ARGS=()
 
   if [[ -n "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}" ]]; then
-    IFS='/' read -r -a engine_path_parts <<< "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}"
-    for ((index = 0; index < ${#engine_path_parts[@]} - 1; index++)); do
-      if [[ -z "${local_parent_path}" ]]; then
-        local_parent_path="${engine_path_parts[index]}"
-      else
-        local_parent_path="${local_parent_path}/${engine_path_parts[index]}"
-      fi
-      add_worktree_exclude_path "${local_parent_path}"
-    done
-
     add_worktree_exclude_path "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}"
+    CODEX_FLOW_CLEAN_EXCLUDE_ARGS=(-e "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}")
   fi
 
   readonly -a CODEX_FLOW_WORKTREE_EXCLUDE_PATHS
+  # shellcheck disable=SC2034
+  readonly -a CODEX_FLOW_CLEAN_EXCLUDE_ARGS
   readonly CODEX_FLOW_WORKTREE_EXCLUDES_INITIALIZED=1
 fi
 

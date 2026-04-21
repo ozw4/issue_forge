@@ -1,6 +1,0 @@
-# `tools/checks/run_changed.sh` intentionally treats `.issue_forge/project.sh`
-# as a shell target via the broader `*.sh` case arm. The second literal pattern
-# is redundant in the current checked-in file, but that file is root-owned in
-# this workspace, so suppress the overlap diagnostics repo-wide instead of
-# weakening the verification command.
-disable=SC2221,SC2222

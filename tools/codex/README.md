@@ -11,7 +11,7 @@ It creates a temporary consumer fixture with only:
 - `docs/README.md`
 - `vendor/issue_forge`
 
-The fixture adds `vendor/issue_forge` as an untracked symlink after the baseline commit, then verifies that the flow still works through direct vendor entrypoints and that git operations exclude both `.work/` and `vendor/issue_forge`.
+The fixture adds `vendor/issue_forge` as an untracked symlink after the baseline commit, then verifies that the flow still works through direct vendor entrypoints, excludes `.work/` and `vendor/issue_forge`, and still surfaces consumer-owned changes elsewhere under `vendor/`.
 
 Covered behavior includes:
 

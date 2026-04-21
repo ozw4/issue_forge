@@ -29,13 +29,8 @@ issue_forge_config_error() {
 
 issue_forge_resolve_absolute_directory() {
   local input_path="$1"
-  local absolute_path
 
-  if ! absolute_path="$(cd "${input_path}" 2>/dev/null && pwd)"; then
-    issue_forge_config_error "Invalid ISSUE_FORGE_CONSUMER_ROOT directory: ${input_path}"
-  fi
-
-  printf '%s\n' "${absolute_path}"
+  cd "${input_path}" 2>/dev/null && pwd
 }
 
 issue_forge_git_root_with_consumer_config() {
@@ -58,7 +53,10 @@ resolve_issue_forge_consumer_root_from_env() {
     return 1
   fi
 
-  candidate="$(issue_forge_resolve_absolute_directory "${configured_root}")"
+  if ! candidate="$(issue_forge_resolve_absolute_directory "${configured_root}")"; then
+    issue_forge_config_error "Invalid ISSUE_FORGE_CONSUMER_ROOT directory: ${configured_root}"
+  fi
+
   if [[ ! -f "${candidate}/.issue_forge/project.sh" ]]; then
     issue_forge_config_error "Invalid ISSUE_FORGE_CONSUMER_ROOT: ${candidate} does not contain .issue_forge/project.sh"
   fi
@@ -69,8 +67,8 @@ resolve_issue_forge_consumer_root_from_env() {
 resolve_issue_forge_consumer_repo_root() {
   local candidate=""
 
-  if candidate="$(resolve_issue_forge_consumer_root_from_env)"; then
-    printf '%s\n' "${candidate}"
+  if [[ -n "${ISSUE_FORGE_CONSUMER_ROOT:-}" ]]; then
+    resolve_issue_forge_consumer_root_from_env
     return 0
   fi
 
@@ -96,5 +94,10 @@ resolve_issue_forge_consumer_repo_root() {
   issue_forge_config_error 'Failed to resolve consumer repo root for issue_forge runtime. Run from the consumer repo root or set ISSUE_FORGE_CONSUMER_ROOT.'
 }
 
-issue_forge_load_consumer_config "$(resolve_issue_forge_consumer_repo_root)"
+if ! CODEX_FLOW_RESOLVED_REPO_ROOT="$(resolve_issue_forge_consumer_repo_root)"; then
+  exit 1
+fi
+
+issue_forge_load_consumer_config "${CODEX_FLOW_RESOLVED_REPO_ROOT}"
+unset CODEX_FLOW_RESOLVED_REPO_ROOT
 readonly ISSUE_FORGE_RUNTIME_CONFIG_LOADED=1

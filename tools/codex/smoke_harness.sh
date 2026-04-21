@@ -248,6 +248,10 @@ write_fixture_files() {
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
 EOF
+
+  cat > "${repo_dir}/vendor/tracked.txt" <<'EOF'
+tracked baseline
+EOF
 }
 
 set_work_ignore_fixture_state() {
@@ -562,6 +566,26 @@ EOF
   assert_file_contains "${doctor_failure_log}" '1 failure(s)'
 
   mv "${original_project_config}" "${repo_dir}/.issue_forge/project.sh"
+}
+
+run_invalid_consumer_root_smoke() {
+  local invalid_root="${temp_root}/invalid-consumer-root"
+  local invalid_consumer_root_log="${state_dir}/invalid-consumer-root.log"
+
+  log 'running invalid ISSUE_FORGE_CONSUMER_ROOT smoke'
+  mkdir -p "${invalid_root}"
+
+  if (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      ISSUE_FORGE_CONSUMER_ROOT="${invalid_root}" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
+  ) > "${invalid_consumer_root_log}" 2>&1; then
+    fail 'doctor.sh should fail when ISSUE_FORGE_CONSUMER_ROOT does not contain .issue_forge/project.sh'
+  fi
+
+  assert_file_contains "${invalid_consumer_root_log}" 'Invalid ISSUE_FORGE_CONSUMER_ROOT'
+  assert_file_not_contains "${invalid_consumer_root_log}" "loaded consumer config via current runtime path: ${repo_dir}/.issue_forge/project.sh"
 }
 
 run_run_codex_smoke() {
@@ -904,7 +928,7 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'run_issue_flow'
   assert_review_material_excludes_engine_path
@@ -917,6 +941,7 @@ run_restart_issue_flow_smoke() {
 
   log 'running restart_issue_flow.sh smoke'
   printf 'restart dirty change\n' >> "${repo_dir}/smoke-target.txt"
+  printf 'restart untracked vendor change\n' > "${repo_dir}/vendor/restart-untracked.txt"
   clear_command_logs
   reset_flow_counters
   previous_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
@@ -938,10 +963,14 @@ run_restart_issue_flow_smoke() {
     fail 'restart_issue_flow.sh should discard dirty tracked changes outside .work'
   fi
 
+  if [[ -e "${repo_dir}/vendor/restart-untracked.txt" ]]; then
+    fail 'restart_issue_flow.sh should clean unrelated untracked files under vendor/'
+  fi
+
   assert_vendor_engine_symlink_present
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
   assert_file_contains "${state_dir}/git.log" 'reset --hard HEAD'
-  assert_file_contains "${state_dir}/git.log" 'clean -fd -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
+  assert_file_contains "${state_dir}/git.log" 'clean -fd -e vendor/issue_forge -- . :(exclude).work'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'restart_issue_flow'
   assert_review_material_excludes_engine_path
@@ -980,12 +1009,54 @@ run_continue_after_review_smoke() {
     fail 'continue_after_review.sh should create the intermediate review-feedback commit'
   fi
 
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'continue_after_review'
   assert_review_material_excludes_engine_path
   assert_commit_excludes_internal_paths HEAD
   assert_commit_excludes_internal_paths HEAD~1
+}
+
+run_vendor_worktree_visibility_smoke() {
+  local status_log="${state_dir}/vendor-visibility.status.txt"
+  local review_diff_log="${state_dir}/vendor-visibility.review.diff"
+  local review_untracked_log="${state_dir}/vendor-visibility.review.untracked.txt"
+  local staged_log="${state_dir}/vendor-visibility.staged.txt"
+
+  log 'running vendor visibility smoke'
+  printf 'tracked dirty change\n' >> "${repo_dir}/vendor/tracked.txt"
+  printf 'untracked vendor change\n' > "${repo_dir}/vendor/other.txt"
+  clear_command_logs
+
+  (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" bash -lc '
+set -euo pipefail
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/flow_state.sh
+source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
+source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
+review_diff="'"${review_diff_log}"'"
+review_untracked="'"${review_untracked_log}"'"
+status_outside_work > "'"${status_log}"'"
+generate_review_material
+stage_issue_flow_changes
+git diff --cached --name-only > "'"${staged_log}"'"
+'
+  )
+
+  assert_file_contains "${status_log}" 'vendor/other.txt'
+  assert_file_contains "${status_log}" 'vendor/tracked.txt'
+  assert_file_not_contains "${status_log}" 'vendor/issue_forge'
+  assert_file_contains "${review_diff_log}" 'vendor/other.txt'
+  assert_file_contains "${review_diff_log}" 'vendor/tracked.txt'
+  assert_file_not_contains "${review_diff_log}" 'vendor/issue_forge'
+  assert_file_contains "${review_untracked_log}" 'vendor/other.txt'
+  assert_file_not_contains "${review_untracked_log}" 'vendor/issue_forge'
+  assert_file_contains "${staged_log}" 'vendor/other.txt'
+  assert_file_contains "${staged_log}" 'vendor/tracked.txt'
+  assert_file_not_contains "${staged_log}" 'vendor/issue_forge'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
 }
 
 cleanup() {
@@ -1002,12 +1073,14 @@ main() {
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
   run_doctor_smoke
+  run_invalid_consumer_root_smoke
   run_run_codex_smoke
   run_codex_profile_smoke
   run_review_output_validation_smoke
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
+  run_vendor_worktree_visibility_smoke
   log 'all smoke scenarios passed'
 }
 

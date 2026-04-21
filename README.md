@@ -83,7 +83,7 @@ consumer repo では次を ignore する運用を推奨します。
 vendor/issue_forge
 ```
 
-ただし flow 自体は `.gitignore` に依存せず、`.work` と consumer repo 内の `vendor/issue_forge` を `git status`、`git diff`、`git add`、`git clean` から明示的に除外します。
+ただし flow 自体は `.gitignore` に依存せず、`.work` と consumer repo 内の `vendor/issue_forge` を明示的に保護します。consumer-owned な他の `vendor/` 配下ファイルは `git status`、`git diff`、`git add`、review material に見える必要があります。
 
 ## Required commands
 
