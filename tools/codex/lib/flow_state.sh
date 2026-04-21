@@ -1,5 +1,58 @@
 #!/usr/bin/env bash
 
+add_worktree_exclude_path() {
+  local relative_path="$1"
+  local existing_path
+
+  for existing_path in "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]:-}"; do
+    if [[ "${existing_path}" == ":(exclude)${relative_path}" ]]; then
+      return 0
+    fi
+  done
+
+  CODEX_FLOW_WORKTREE_EXCLUDE_PATHS+=(":(exclude)${relative_path}")
+}
+
+if [[ -z "${ISSUE_FORGE_ENGINE_CONSUMER_PATH:-}" ]]; then
+  ISSUE_FORGE_ENGINE_CONSUMER_PATH=''
+
+  if [[ "${ISSUE_FORGE_ENGINE_ROOT}" != "${CODEX_FLOW_REPO_ROOT}" ]]; then
+    if [[ "$(basename "${ISSUE_FORGE_ENGINE_PARENT_DIR}")" == 'vendor' ]]; then
+      ISSUE_FORGE_ENGINE_CONSUMER_PATH="$(basename "${ISSUE_FORGE_ENGINE_PARENT_DIR}")/$(basename "${ISSUE_FORGE_ENGINE_ROOT}")"
+    elif [[ "${ISSUE_FORGE_ENGINE_ROOT}" == "${CODEX_FLOW_REPO_ROOT}/"* ]]; then
+      ISSUE_FORGE_ENGINE_CONSUMER_PATH="${ISSUE_FORGE_ENGINE_ROOT#"${CODEX_FLOW_REPO_ROOT}"/}"
+    fi
+  fi
+
+  readonly ISSUE_FORGE_ENGINE_CONSUMER_PATH
+fi
+
+if [[ -z "${CODEX_FLOW_WORKTREE_EXCLUDES_INITIALIZED:-}" ]]; then
+  local_parent_path=''
+  declare -a engine_path_parts=()
+  index=0
+
+  declare -ag CODEX_FLOW_WORKTREE_EXCLUDE_PATHS
+  CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(":(exclude)${CODEX_FLOW_WORK_ROOT}")
+
+  if [[ -n "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}" ]]; then
+    IFS='/' read -r -a engine_path_parts <<< "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}"
+    for ((index = 0; index < ${#engine_path_parts[@]} - 1; index++)); do
+      if [[ -z "${local_parent_path}" ]]; then
+        local_parent_path="${engine_path_parts[index]}"
+      else
+        local_parent_path="${local_parent_path}/${engine_path_parts[index]}"
+      fi
+      add_worktree_exclude_path "${local_parent_path}"
+    done
+
+    add_worktree_exclude_path "${ISSUE_FORGE_ENGINE_CONSUMER_PATH}"
+  fi
+
+  readonly -a CODEX_FLOW_WORKTREE_EXCLUDE_PATHS
+  readonly CODEX_FLOW_WORKTREE_EXCLUDES_INITIALIZED=1
+fi
+
 if [[ -z "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC:-}" ]]; then
   readonly CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC=":(exclude)${CODEX_FLOW_WORK_ROOT}"
 fi
@@ -12,14 +65,11 @@ require_command() {
 }
 
 enter_repo_root() {
-  local repo_root
-
-  repo_root="$(git rev-parse --show-toplevel)"
-  cd "$repo_root"
+  cd "$CODEX_FLOW_REPO_ROOT" || exit 1
 }
 
 status_outside_work() {
-  git status --porcelain --untracked-files=all -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC"
+  git status --porcelain --untracked-files=all -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
 }
 
 ensure_clean_worktree() {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 
 declare -a failures=()
 declare -a warnings=()
@@ -59,7 +60,7 @@ check_github_auth() {
     return 0
   fi
 
-  record_failure 'GitHub CLI is not authenticated (`gh auth status` failed)'
+  record_failure "GitHub CLI is not authenticated (\`gh auth status\` failed)"
   return 1
 }
 

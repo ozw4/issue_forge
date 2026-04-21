@@ -94,5 +94,6 @@ bootstrap_issue_branch() {
   base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
   write_current_issue_branch_state "$issue_number" "$branch_name" "$base_commit"
 
+  # shellcheck disable=SC2034
   CODEX_FLOW_BOOTSTRAP_BRANCH_NAME="$branch_name"
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# shellcheck disable=SC2034
+
 readonly CODEX_FLOW_WORK_DIR='.work'
 readonly CODEX_FLOW_ISSUE_DIR='.work/issues'
 readonly CODEX_FLOW_CODEX_DIR='.work/codex'

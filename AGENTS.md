@@ -13,9 +13,9 @@
 
 ## この repo の位置づけ
 
-- この repo は `issue_forge` の shared engine であると同時に、v1 contract の first consumer です。
-- consumer-owned artifacts はこの repo 自身が持ちます。少なくとも `AGENTS.md`、`docs/README.md`、`tools/checks/run_changed.sh`、`.issue_forge/project.sh`、`tools/codex/prompts/*.tmpl` は checked-in の実体を保ちます。
-- `tools/codex/` と `tools/issue/` の stable entrypoint path は consumer contract の一部です。互換性を壊す rename や relocation は、contract と smoke coverage を同時に更新する場合を除いて禁止です。
+- この repo は `issue_forge` の shared engine であると同時に、self-hosting する first consumer です。
+- external consumer contract は `vendor/issue_forge/tools/...` を直接呼ぶ形です。consumer repo に `./tools/codex/*.sh` や `./tools/issue/*.sh` の wrapper / shim は要求しません。
+- この repo 自身は engine 開発と regression coverage のために `tools/codex/`、`tools/issue/`、`tools/checks/run_changed.sh`、`tools/codex/prompts/*.tmpl` を checked-in で持ち続けます。
 
 ## 実装ルール
 
@@ -24,7 +24,10 @@
 - 変更は issue scope に限定し、最小差分で行うこと。
 - fallback や互換レイヤーは原則追加しないこと。
 - 異常系は握りつぶさず、根本原因が分かる具体的なメッセージで即時失敗すること。
+- engine root と consumer root を混同しないこと。`ISSUE_FORGE_ENGINE_ROOT` と `CODEX_FLOW_REPO_ROOT` は別概念として扱います。
 - `.work/` レイアウト、history 命名、branch 命名、review 出力フォーマットは contract を更新しない限り維持すること。
+- default prompts は engine-owned の `vendor/issue_forge/tools/codex/prompts/` です。consumer-specific prompts は `CODEX_FLOW_PROMPTS_DIR` で明示 override する場合のみ使います。
+- default checks hook は `./.issue_forge/checks/run_changed.sh` です。
 - issue の要求が docs と衝突する場合は docs を優先すること。
 
 ## チェックとレビュー
@@ -36,6 +39,5 @@
 
 ## ドキュメント更新ルール
 
-- runtime behavior を変えた場合は、必要に応じて `README.md`、`docs/README.md`、`docs/consumer-contract.md`、`tools/codex/README.md`、smoke harness / tests を同じ change set で更新すること。
+- runtime behavior を変えた場合は、必要に応じて `README.md`、`docs/README.md`、`docs/consumer-contract.md`、`docs/codex_working_rules.md`、`tools/codex/README.md`、smoke harness / tests を同じ change set で更新すること。
 - docs だけを変更する場合も、checked-in behavior と矛盾しないこと。
-

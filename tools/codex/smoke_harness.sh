@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-readonly REAL_GIT="$(command -v git)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly REPO_ROOT
+REAL_GIT="$(command -v git)"
+readonly REAL_GIT
 readonly ISSUE_NUMBER=40
 readonly ISSUE_TITLE='Regression Harness Issue'
 readonly ISSUE_URL='https://example.test/issues/40'
+readonly FIXTURE_ENGINE_PATH='vendor/issue_forge'
+readonly FIXTURE_ENGINE_CODEX_PATH="${FIXTURE_ENGINE_PATH}/tools/codex"
+readonly FIXTURE_ENGINE_ISSUE_PATH="${FIXTURE_ENGINE_PATH}/tools/issue"
 
 log() {
   printf '[smoke] %s\n' "$1"
@@ -62,13 +68,19 @@ assert_file_not_contains() {
   fi
 }
 
-assert_commit_excludes_work_paths() {
+assert_commit_excludes_internal_paths() {
   local commit_ref="$1"
   local changed_paths
 
   changed_paths="$("${REAL_GIT}" -C "${repo_dir}" show --pretty= --name-only "$commit_ref")"
   if printf '%s\n' "$changed_paths" | grep -Eq '^\.work(/|$)'; then
     printf '[smoke] expected commit %s to exclude .work paths\n' "$commit_ref" >&2
+    printf '%s\n' "$changed_paths" >&2
+    exit 1
+  fi
+
+  if printf '%s\n' "$changed_paths" | grep -Eq '^vendor/issue_forge(/|$)'; then
+    printf '[smoke] expected commit %s to exclude vendor/issue_forge paths\n' "$commit_ref" >&2
     printf '%s\n' "$changed_paths" >&2
     exit 1
   fi
@@ -90,6 +102,21 @@ assert_source_checks_command_executable() {
   if [[ ! -x "${REPO_ROOT}/tools/checks/run_changed.sh" ]]; then
     fail 'tools/checks/run_changed.sh must be executable'
   fi
+}
+
+assert_vendor_engine_symlink_present() {
+  if [[ ! -L "${repo_dir}/${FIXTURE_ENGINE_PATH}" ]]; then
+    fail "expected vendor engine symlink to exist: ${repo_dir}/${FIXTURE_ENGINE_PATH}"
+  fi
+}
+
+assert_review_material_excludes_engine_path() {
+  assert_file_not_contains "${repo_dir}/.work/codex/review.diff" "${FIXTURE_ENGINE_PATH}"
+  assert_file_not_contains "${repo_dir}/.work/codex/review.untracked.txt" "${FIXTURE_ENGINE_PATH}"
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-01.txt" "${FIXTURE_ENGINE_PATH}"
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-02.txt" "${FIXTURE_ENGINE_PATH}"
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-untracked.round-01.txt" "${FIXTURE_ENGINE_PATH}"
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review-untracked.round-02.txt" "${FIXTURE_ENGINE_PATH}"
 }
 
 write_review_output_fixture() {
@@ -124,15 +151,18 @@ run_review_validation_command() {
   (
     set -euo pipefail
     cd "${repo_dir}"
-    # shellcheck source=tools/codex/lib/config.sh
-    source tools/codex/lib/config.sh
-    # shellcheck source=tools/codex/lib/checks_review_helpers.sh
-    source tools/codex/lib/checks_review_helpers.sh
+    # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/config.sh
+    # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
+    # shellcheck disable=SC2317
     log_fail_with_path() {
       printf '[flow] %s\n' "$1" >&2
       printf '[flow] see log: %s\n' "$2" >&2
     }
+    # shellcheck disable=SC2034
     review_output="${review_output_path}"
+    # shellcheck disable=SC2034
     review_raw_output="${review_raw_path}"
 
     ensure_valid_review_output
@@ -156,60 +186,46 @@ run_review_validation_command() {
 }
 
 copy_flow_scripts() {
-  mkdir -p     "${repo_dir}/docs"     "${repo_dir}/tools/codex/lib"     "${repo_dir}/tools/codex/prompts"     "${repo_dir}/tools/issue"     "${repo_dir}/tools/checks"     "${repo_dir}/.issue_forge"
+  mkdir -p "${repo_dir}/docs" "${repo_dir}/.issue_forge/checks" "${repo_dir}/vendor"
 
-  cp "${REPO_ROOT}/AGENTS.md" "${repo_dir}/AGENTS.md"
-  cp "${REPO_ROOT}/README.md" "${repo_dir}/README.md"
-  cp "${REPO_ROOT}/.gitignore" "${repo_dir}/.gitignore"
-  cp "${REPO_ROOT}/.issue_forge/project.sh" "${repo_dir}/.issue_forge/project.sh"
-  cp "${REPO_ROOT}/docs/README.md" "${repo_dir}/docs/README.md"
-  cp "${REPO_ROOT}/docs/consumer-contract.md" "${repo_dir}/docs/consumer-contract.md"
-  cp "${REPO_ROOT}/docs/codex_working_rules.md" "${repo_dir}/docs/codex_working_rules.md"
-  cp "${REPO_ROOT}/tools/checks/run_changed.sh" "${repo_dir}/tools/checks/run_changed.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/checks_review_helpers.sh" "${repo_dir}/tools/codex/lib/checks_review_helpers.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/codex_profiles.sh" "${repo_dir}/tools/codex/lib/codex_profiles.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/config.sh" "${repo_dir}/tools/codex/lib/config.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/consumer_config.sh" "${repo_dir}/tools/codex/lib/consumer_config.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/engine_defaults.sh" "${repo_dir}/tools/codex/lib/engine_defaults.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/flow_state.sh" "${repo_dir}/tools/codex/lib/flow_state.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/history_helpers.sh" "${repo_dir}/tools/codex/lib/history_helpers.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/issue_bootstrap.sh" "${repo_dir}/tools/codex/lib/issue_bootstrap.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/prompt_templates.sh" "${repo_dir}/tools/codex/lib/prompt_templates.sh"
-  cp "${REPO_ROOT}/tools/codex/lib/publish_helpers.sh" "${repo_dir}/tools/codex/lib/publish_helpers.sh"
-  cp "${REPO_ROOT}/tools/codex/prompts/implementation.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/implementation.prompt.md.tmpl"
-  cp "${REPO_ROOT}/tools/codex/prompts/fix-from-checks.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/fix-from-checks.prompt.md.tmpl"
-  cp "${REPO_ROOT}/tools/codex/prompts/review.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/review.prompt.md.tmpl"
-  cp "${REPO_ROOT}/tools/codex/prompts/fix-from-review.prompt.md.tmpl" "${repo_dir}/tools/codex/prompts/fix-from-review.prompt.md.tmpl"
-  cp "${REPO_ROOT}/tools/codex/continue_after_review.sh" "${repo_dir}/tools/codex/continue_after_review.sh"
-  cp "${REPO_ROOT}/tools/codex/doctor.sh" "${repo_dir}/tools/codex/doctor.sh"
-  cp "${REPO_ROOT}/tools/codex/make_pr_only.sh" "${repo_dir}/tools/codex/make_pr_only.sh"
-  cp "${REPO_ROOT}/tools/codex/restart_issue_flow.sh" "${repo_dir}/tools/codex/restart_issue_flow.sh"
-  cp "${REPO_ROOT}/tools/codex/run_codex.sh" "${repo_dir}/tools/codex/run_codex.sh"
-  cp "${REPO_ROOT}/tools/codex/run_issue_flow.sh" "${repo_dir}/tools/codex/run_issue_flow.sh"
-  cp "${REPO_ROOT}/tools/codex/smoke_harness.sh" "${repo_dir}/tools/codex/smoke_harness.sh"
-  cp "${REPO_ROOT}/tools/codex/README.md" "${repo_dir}/tools/codex/README.md"
-  cp "${REPO_ROOT}/tools/issue/start_from_issue.sh" "${repo_dir}/tools/issue/start_from_issue.sh"
+  cp "${REPO_ROOT}/tools/checks/run_changed.sh" "${repo_dir}/.issue_forge/checks/run_changed.sh"
+  chmod +x "${repo_dir}/.issue_forge/checks/run_changed.sh"
 
-  chmod +x \
-    "${repo_dir}/tools/checks/run_changed.sh" \
-    "${repo_dir}/tools/codex/lib/checks_review_helpers.sh" \
-    "${repo_dir}/tools/codex/lib/codex_profiles.sh" \
-    "${repo_dir}/tools/codex/lib/config.sh" \
-    "${repo_dir}/tools/codex/lib/consumer_config.sh" \
-    "${repo_dir}/tools/codex/lib/engine_defaults.sh" \
-    "${repo_dir}/tools/codex/lib/flow_state.sh" \
-    "${repo_dir}/tools/codex/lib/history_helpers.sh" \
-    "${repo_dir}/tools/codex/lib/issue_bootstrap.sh" \
-    "${repo_dir}/tools/codex/lib/prompt_templates.sh" \
-    "${repo_dir}/tools/codex/lib/publish_helpers.sh" \
-    "${repo_dir}/tools/codex/continue_after_review.sh" \
-    "${repo_dir}/tools/codex/doctor.sh" \
-    "${repo_dir}/tools/codex/make_pr_only.sh" \
-    "${repo_dir}/tools/codex/restart_issue_flow.sh" \
-    "${repo_dir}/tools/codex/run_codex.sh" \
-    "${repo_dir}/tools/codex/run_issue_flow.sh" \
-    "${repo_dir}/tools/codex/smoke_harness.sh" \
-    "${repo_dir}/tools/issue/start_from_issue.sh"
+  cat > "${repo_dir}/AGENTS.md" <<'EOF'
+# Fixture AGENTS
+
+Use the consumer repo docs first.
+EOF
+
+  cat > "${repo_dir}/README.md" <<'EOF'
+# Smoke Fixture Consumer
+
+This fixture exercises issue_forge through `vendor/issue_forge`.
+EOF
+
+  cat > "${repo_dir}/docs/README.md" <<'EOF'
+# Fixture Docs
+
+Read `AGENTS.md` first.
+EOF
+
+  cat > "${repo_dir}/.issue_forge/project.sh" <<'EOF'
+# Intentionally empty.
+# External consumers rely on issue_forge defaults for base ref, prompts, and checks.
+EOF
+
+  cat > "${repo_dir}/.gitignore" <<'EOF'
+# Intentionally empty for smoke coverage.
+EOF
+}
+
+create_fixture_vendor_symlink() {
+  ln -s "${REPO_ROOT}" "${repo_dir}/${FIXTURE_ENGINE_PATH}"
+  assert_vendor_engine_symlink_present
+
+  if "${REAL_GIT}" -C "${repo_dir}" ls-files --error-unmatch "${FIXTURE_ENGINE_PATH}" >/dev/null 2>&1; then
+    fail 'vendor/issue_forge should remain untracked in the fixture consumer repo'
+  fi
 }
 
 clear_command_logs() {
@@ -232,14 +248,6 @@ write_fixture_files() {
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
 EOF
-}
-
-remove_work_ignore_from_fixture_repo() {
-  local filtered_gitignore
-
-  filtered_gitignore="$(mktemp)"
-  sed '/^\.work\/$/d' "${repo_dir}/.gitignore" > "${filtered_gitignore}"
-  mv "${filtered_gitignore}" "${repo_dir}/.gitignore"
 }
 
 set_work_ignore_fixture_state() {
@@ -455,13 +463,13 @@ create_fixture_repo() {
 
   copy_flow_scripts
   write_fixture_files
-  remove_work_ignore_from_fixture_repo
   write_stub_binaries
 
   "${REAL_GIT}" -C "${repo_dir}" add .
   "${REAL_GIT}" -C "${repo_dir}" commit -m 'fixture: baseline' >/dev/null
   "${REAL_GIT}" -C "${repo_dir}" push -u origin main >/dev/null
   "${REAL_GIT}" -C "${repo_dir}" fetch origin main >/dev/null
+  create_fixture_vendor_symlink
 }
 
 run_start_from_issue_smoke() {
@@ -469,9 +477,10 @@ run_start_from_issue_smoke() {
 
   (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" ./tools/issue/start_from_issue.sh "${ISSUE_NUMBER}"
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_ISSUE_PATH}/start_from_issue.sh" "${ISSUE_NUMBER}"
   )
 
+  assert_vendor_engine_symlink_present
   assert_equals "${ISSUE_NUMBER}" "$(< "${repo_dir}/.work/current_issue")" 'current issue file'
   assert_file_exists "${repo_dir}/.work/base_commit"
   assert_equals "issue/${ISSUE_NUMBER}-regression-harness-issue" "$(< "${repo_dir}/.work/current_branch")" 'current branch file'
@@ -496,7 +505,7 @@ run_make_pr_only_smoke() {
 
   pr_url="$({
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" ./tools/codex/make_pr_only.sh "${ISSUE_NUMBER}"
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/make_pr_only.sh" "${ISSUE_NUMBER}"
   })"
 
   assert_equals "https://example.test/pr/${ISSUE_NUMBER}" "${pr_url}" 'make_pr_only output'
@@ -514,14 +523,12 @@ run_doctor_smoke() {
   local doctor_warning_log="${state_dir}/doctor-warning.log"
   local doctor_failure_log="${state_dir}/doctor-failure.log"
   local original_project_config
-  local invalid_project_config
-
   log 'running doctor.sh smoke'
 
   set_work_ignore_fixture_state 'enabled'
   if ! (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
   ) > "${doctor_success_log}" 2>&1; then
     fail 'doctor.sh should succeed when requirements are satisfied'
   fi
@@ -532,7 +539,7 @@ run_doctor_smoke() {
   set_work_ignore_fixture_state 'disabled'
   if ! (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
   ) > "${doctor_warning_log}" 2>&1; then
     fail 'doctor.sh should exit 0 when only warning-level findings exist'
   fi
@@ -540,14 +547,14 @@ run_doctor_smoke() {
   assert_file_contains "${doctor_warning_log}" '0 failure(s)'
 
   original_project_config="$(mktemp)"
-  invalid_project_config="$(mktemp)"
   cp "${repo_dir}/.issue_forge/project.sh" "${original_project_config}"
-  sed "s|^CODEX_FLOW_BASE_REF='origin/main'$|CODEX_FLOW_BASE_REF='origin/missing'|" "${original_project_config}" > "${invalid_project_config}"
-  mv "${invalid_project_config}" "${repo_dir}/.issue_forge/project.sh"
+  cat > "${repo_dir}/.issue_forge/project.sh" <<'EOF'
+CODEX_FLOW_BASE_REF='origin/missing'
+EOF
 
   if (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" ./tools/codex/doctor.sh
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
   ) > "${doctor_failure_log}" 2>&1; then
     fail 'doctor.sh should fail when the configured bootstrap base ref does not resolve'
   fi
@@ -566,10 +573,10 @@ run_run_codex_smoke() {
   printf 'read prompt\n' > "${read_prompt}"
 
   write_output="$(
-    PATH="${stub_dir}:$PATH" "${repo_dir}/tools/codex/run_codex.sh" write "${write_prompt}"
+    PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" write "${write_prompt}"
   )"
   read_output="$(
-    PATH="${stub_dir}:$PATH" "${repo_dir}/tools/codex/run_codex.sh" read "${read_prompt}"
+    PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" read "${read_prompt}"
   )"
 
   assert_equals 'stub codex ok' "${write_output}" 'write mode stdout'
@@ -578,7 +585,7 @@ run_run_codex_smoke() {
   assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium'
 
   invalid_mode_log="${state_dir}/invalid-mode.log"
-  if PATH="${stub_dir}:$PATH" "${repo_dir}/tools/codex/run_codex.sh" invalid "${write_prompt}" > "${invalid_mode_log}" 2>&1; then
+  if PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" invalid "${write_prompt}" > "${invalid_mode_log}" 2>&1; then
     fail 'expected invalid run_codex.sh mode to fail'
   fi
   assert_file_contains "${invalid_mode_log}" 'Invalid mode: invalid'
@@ -591,8 +598,8 @@ run_codex_profile_smoke() {
     (
       cd "${repo_dir}"
       bash -lc 'set -euo pipefail
-source tools/codex/lib/config.sh
-source tools/codex/lib/codex_profiles.sh
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
 printf "write-profile=%s\n" "$(resolve_codex_profile_for_mode write)"
 printf "write-sandbox=%s\n" "$(resolve_codex_profile_sandbox "$CODEX_FLOW_WRITE_PROFILE")"
 printf "write-reasoning=%s\n" "$(resolve_codex_profile_reasoning "$CODEX_FLOW_WRITE_PROFILE")"
@@ -609,8 +616,8 @@ printf "read-reasoning=%s\n" "$(resolve_codex_profile_reasoning "$CODEX_FLOW_REA
   if (
     cd "${repo_dir}"
     bash -lc 'set -euo pipefail
-source tools/codex/lib/config.sh
-source tools/codex/lib/codex_profiles.sh
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
 resolve_codex_profile_sandbox invalid-profile
 '
   ) > "${invalid_profile_log}" 2>&1; then
@@ -630,7 +637,7 @@ readonly CODEX_FLOW_PROFILE_WRITE_SANDBOX=danger-full-access
 readonly CODEX_FLOW_PROFILE_WRITE_REASONING=xhigh
 readonly CODEX_FLOW_PROFILE_READ_SANDBOX=danger-full-access
 readonly CODEX_FLOW_PROFILE_READ_REASONING=medium
-source tools/codex/lib/codex_profiles.sh
+source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
 resolve_codex_profile_for_mode write
 '
   ) > "${missing_profile_log}" 2>&1; then
@@ -650,7 +657,7 @@ readonly CODEX_FLOW_PROFILE_WRITE_SANDBOX=
 readonly CODEX_FLOW_PROFILE_WRITE_REASONING=xhigh
 readonly CODEX_FLOW_PROFILE_READ_SANDBOX=danger-full-access
 readonly CODEX_FLOW_PROFILE_READ_REASONING=medium
-source tools/codex/lib/codex_profiles.sh
+source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
 resolve_codex_profile_sandbox write
 '
   ) > "${incomplete_profile_log}" 2>&1; then
@@ -849,7 +856,7 @@ run_issue_flow_smoke() {
     PATH="${stub_dir}:$PATH" \
       SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
       SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
-      ./tools/codex/run_issue_flow.sh "${ISSUE_NUMBER}"
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_flow.sh" "${ISSUE_NUMBER}"
   )
 
   write_expected_issue_flow_prompts
@@ -897,10 +904,11 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'run_issue_flow'
-  assert_commit_excludes_work_paths HEAD
+  assert_review_material_excludes_engine_path
+  assert_commit_excludes_internal_paths HEAD
 }
 
 run_restart_issue_flow_smoke() {
@@ -918,7 +926,7 @@ run_restart_issue_flow_smoke() {
     PATH="${stub_dir}:$PATH" \
       SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
       SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
-      ./tools/codex/restart_issue_flow.sh --hard
+      "./${FIXTURE_ENGINE_CODEX_PATH}/restart_issue_flow.sh" --hard
   )
 
   current_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
@@ -930,11 +938,13 @@ run_restart_issue_flow_smoke() {
     fail 'restart_issue_flow.sh should discard dirty tracked changes outside .work'
   fi
 
+  assert_vendor_engine_symlink_present
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
   assert_file_contains "${state_dir}/git.log" 'reset --hard HEAD'
-  assert_file_contains "${state_dir}/git.log" 'clean -fd -- . :(exclude).work'
+  assert_file_contains "${state_dir}/git.log" 'clean -fd -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'restart_issue_flow'
+  assert_review_material_excludes_engine_path
 }
 
 run_continue_after_review_smoke() {
@@ -953,7 +963,7 @@ run_continue_after_review_smoke() {
     PATH="${stub_dir}:$PATH" \
       SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
       SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
-      ./tools/codex/continue_after_review.sh
+      "./${FIXTURE_ENGINE_CODEX_PATH}/continue_after_review.sh"
   )
 
   current_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
@@ -970,11 +980,12 @@ run_continue_after_review_smoke() {
     fail 'continue_after_review.sh should create the intermediate review-feedback commit'
   fi
 
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work'
+  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor :(exclude)vendor/issue_forge'
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'continue_after_review'
-  assert_commit_excludes_work_paths HEAD
-  assert_commit_excludes_work_paths HEAD~1
+  assert_review_material_excludes_engine_path
+  assert_commit_excludes_internal_paths HEAD
+  assert_commit_excludes_internal_paths HEAD~1
 }
 
 cleanup() {

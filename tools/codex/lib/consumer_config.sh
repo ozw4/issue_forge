@@ -32,6 +32,19 @@ validate_consumer_project_config() {
   fi
 }
 
+apply_consumer_project_defaults() {
+  : "${CODEX_FLOW_BASE_BRANCH:=main}"
+  : "${CODEX_FLOW_BASE_REF:=origin/${CODEX_FLOW_BASE_BRANCH}}"
+  : "${CODEX_FLOW_BRANCH_PREFIX:=issue/}"
+  : "${CODEX_FLOW_CHECKS_COMMAND:=./.issue_forge/checks/run_changed.sh}"
+  : "${CODEX_FLOW_PROMPTS_DIR:=${ISSUE_FORGE_ENGINE_ROOT}/tools/codex/prompts}"
+  : "${CODEX_FLOW_PR_DRAFT_DEFAULT:=1}"
+  : "${CODEX_FLOW_PROFILE_WRITE_SANDBOX:=danger-full-access}"
+  : "${CODEX_FLOW_PROFILE_WRITE_REASONING:=xhigh}"
+  : "${CODEX_FLOW_PROFILE_READ_SANDBOX:=danger-full-access}"
+  : "${CODEX_FLOW_PROFILE_READ_REASONING:=medium}"
+}
+
 issue_forge_load_consumer_config() {
   local repo_root="${1:?repo root is required}"
   local config_file="${repo_root}/.issue_forge/project.sh"
@@ -40,9 +53,11 @@ issue_forge_load_consumer_config() {
     issue_forge_consumer_config_error "Missing consumer config: ${config_file}"
   fi
 
+  # shellcheck disable=SC2034
   readonly CODEX_FLOW_REPO_ROOT="${repo_root}"
 
   # shellcheck source=/dev/null
   source "${config_file}"
+  apply_consumer_project_defaults
   validate_consumer_project_config
 }

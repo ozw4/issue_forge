@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 # shellcheck source=tools/codex/lib/config.sh
 source "${SCRIPT_DIR}/lib/config.sh"
-readonly REPO_ROOT="${CODEX_FLOW_REPO_ROOT}"
 # shellcheck source=tools/codex/lib/history_helpers.sh
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
@@ -29,7 +29,7 @@ log_fail_with_path() {
 
 run_implementation_phase() {
   log_info 'codex implementation'
-  ./tools/codex/run_codex.sh write "$implement_prompt" > "$implementation_log" 2>&1
+  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$implement_prompt" > "$implementation_log" 2>&1
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
 
   if [[ -z "$(status_outside_work)" ]]; then
@@ -53,8 +53,8 @@ issue_number="$(resolve_numeric_issue_number "${1:-}")"
 
 issue_file="$(require_issue_file "$issue_number")"
 
-current_branch="$(resolve_current_branch_from_state "Missing ${CODEX_FLOW_CURRENT_BRANCH_FILE}. Run tools/issue/start_from_issue.sh first.")"
-resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first." >/dev/null
+current_branch="$(resolve_current_branch_from_state "Missing ${CODEX_FLOW_CURRENT_BRANCH_FILE}. Run the issue bootstrap entrypoint first.")"
+resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first." >/dev/null
 
 ensure_clean_worktree 'Working tree must be clean before running the issue flow.'
 mkdir -p "$CODEX_FLOW_CODEX_DIR"

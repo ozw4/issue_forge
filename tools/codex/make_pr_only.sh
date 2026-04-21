@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 # shellcheck source=tools/codex/lib/config.sh
 source "${SCRIPT_DIR}/lib/config.sh"
-readonly REPO_ROOT="${CODEX_FLOW_REPO_ROOT}"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh

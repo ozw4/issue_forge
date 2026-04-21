@@ -1,12 +1,23 @@
 # Codex Flow Smoke Harness
 
-`smoke_harness.sh` is a network-independent regression guard for `tools/codex/` and `tools/issue/`.
+`smoke_harness.sh` is a network-independent regression guard for the checked-in shell contract.
 
-It creates a temporary local git fixture, stubs `gh` and `codex`, wraps `git` to log invocations while delegating to the local binary, and verifies:
+It creates a temporary consumer fixture with only:
 
-- `tools/issue/start_from_issue.sh` writes `.work/current_issue`, `.work/current_branch`, and the issue markdown file
-- `tools/codex/run_codex.sh` keeps the current `codex exec` defaults for `write` and `read`
-- `tools/codex/run_issue_flow.sh` keeps the current `.work/codex/*` filenames, history round naming, and review accept/format path
+- `.issue_forge/project.sh`
+- `.issue_forge/checks/run_changed.sh`
+- `AGENTS.md`
+- `README.md`
+- `docs/README.md`
+- `vendor/issue_forge`
+
+The fixture adds `vendor/issue_forge` as an untracked symlink after the baseline commit, then verifies that the flow still works through direct vendor entrypoints and that git operations exclude both `.work/` and `vendor/issue_forge`.
+
+Covered behavior includes:
+
+- the direct vendor issue bootstrap entrypoint writes `.work/current_issue`, `.work/current_branch`, and the issue markdown file
+- the direct vendor Codex execution entrypoint keeps the current `codex exec` defaults for `write` and `read`
+- the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
 
 Manual run:
 

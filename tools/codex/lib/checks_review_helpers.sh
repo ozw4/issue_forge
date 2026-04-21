@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# shellcheck disable=SC2154
+
 append_untracked_file_diff() {
   local path="$1"
   local status
@@ -20,9 +22,9 @@ generate_review_material() {
   local path
   local base_commit
 
-  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first.")"
+  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
-  git diff --no-ext-diff --binary "$base_commit" -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC" > "$review_diff"
+  git diff --no-ext-diff --binary "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$review_diff"
   : > "$review_untracked"
 
   while IFS= read -r path; do
@@ -33,7 +35,7 @@ generate_review_material() {
     has_material=1
     printf '%s\n' "$path" >> "$review_untracked"
     append_untracked_file_diff "$path"
-  done < <(git ls-files --others --exclude-standard -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC")
+  done < <(git ls-files --others --exclude-standard -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}")
 
   if [[ -s "$review_diff" ]]; then
     has_material=1
@@ -52,7 +54,7 @@ run_checks_round() {
 
   checks_run_round=$((checks_run_round + 1))
   round="$checks_run_round"
-  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run tools/issue/start_from_issue.sh first.")"
+  base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
   set +e
   "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
@@ -69,7 +71,7 @@ run_fix_from_checks_round() {
 
   fix_checks_round=$((fix_checks_round + 1))
   log_info "codex fix from checks (round ${fix_round})"
-  ./tools/codex/run_codex.sh write "$fix_checks_prompt" > "$fix_checks_log" 2>&1
+  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$fix_checks_prompt" > "$fix_checks_log" 2>&1
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
 }
 
@@ -121,7 +123,7 @@ run_review_round() {
   archive_round_file "$review_untracked" "review-untracked" "$review_run_round" ".txt"
   before_status="$(status_outside_work)"
   log_info "codex review"
-  ./tools/codex/run_codex.sh read "$review_prompt" > "$review_raw_output" 2>&1
+  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$review_prompt" > "$review_raw_output" 2>&1
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   after_status="$(status_outside_work)"
 
@@ -296,7 +298,7 @@ run_fix_from_review_round() {
 
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  ./tools/codex/run_codex.sh write "$fix_review_prompt" > "$fix_review_log" 2>&1
+  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$fix_review_prompt" > "$fix_review_log" 2>&1
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
 }
 

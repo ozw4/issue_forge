@@ -18,7 +18,7 @@ current_pr_url_for_branch() {
 }
 
 stage_issue_flow_changes() {
-  git add -A -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC"
+  git add -A -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
 
   if git diff --cached --quiet; then
     printf 'No staged changes available for commit.\n' >&2
@@ -59,7 +59,7 @@ create_issue_pr_for_branch() {
   fi
 
   pr_body_file="$(mktemp)"
-  trap "rm -f \"$pr_body_file\"" EXIT
+  trap 'rm -f "$pr_body_file"' RETURN
   printf 'Closes #%s\n' "$issue_number" > "$pr_body_file"
 
   if [[ "$CODEX_FLOW_PR_DRAFT_DEFAULT" -eq 1 ]]; then
@@ -75,6 +75,8 @@ create_issue_pr_for_branch() {
       --body-file "$pr_body_file"
   )"
 
+  trap - RETURN
+  rm -f "$pr_body_file"
   printf '%s\n' "$pr_url"
 }
 
