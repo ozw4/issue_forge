@@ -1030,7 +1030,7 @@ run_vendor_worktree_visibility_smoke() {
 
   (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" bash -lc '
+    PATH="${stub_dir}:$PATH" bash -c '
 set -euo pipefail
 source vendor/issue_forge/tools/codex/lib/config.sh
 source vendor/issue_forge/tools/codex/lib/flow_state.sh
