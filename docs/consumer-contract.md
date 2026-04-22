@@ -156,9 +156,13 @@ Current operations that must honor the full exclude array include:
 - `git status --porcelain --untracked-files=all -- . ...`
 - `git diff --no-ext-diff --binary <base> -- . ...`
 - `git ls-files --others --exclude-standard -- . ...`
-- `git add -A -- . ...`
+- `git diff --name-only -z -- . ...`
+- `git diff --name-only -z --cached -- . ...`
+- `git ls-files --others --exclude-standard -z -- . ...`
 
-The positive pathspec `.` stays before the exclude pathspecs.
+The positive pathspec `.` stays before the exclude pathspecs for those discovery commands.
+
+Staging then passes only the concrete returned paths to `git add -A --pathspec-from-file=<tmp> --pathspec-file-nul`. The staging pathspec file must not include `:(exclude)...` entries, so ignored managed paths such as `.work` and `vendor/issue_forge` are never passed back to `git add` directly.
 
 `git clean` is handled separately so the engine mount is preserved without hiding consumer-owned `vendor/` content from normal worktree operations. When `vendor/issue_forge` is inside the consumer repo, the clean command protects it with a dedicated exclude argument such as:
 

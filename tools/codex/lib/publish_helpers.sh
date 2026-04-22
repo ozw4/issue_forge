@@ -18,7 +18,23 @@ current_pr_url_for_branch() {
 }
 
 stage_issue_flow_changes() {
-  git add -A -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+  local pathspec_file
+
+  pathspec_file="$(mktemp "${TMPDIR:-/tmp}/issue-forge-stage-pathspec.XXXXXX")"
+  trap 'rm -f "$pathspec_file"' RETURN
+
+  {
+    git diff --name-only -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+    git diff --name-only -z --cached -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+    git ls-files --others --exclude-standard -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+  } > "$pathspec_file"
+
+  if [[ -s "$pathspec_file" ]]; then
+    git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
+  fi
+
+  trap - RETURN
+  rm -f "$pathspec_file"
 
   if git diff --cached --quiet; then
     printf 'No staged changes available for commit.\n' >&2

@@ -56,7 +56,7 @@ assert_file_contains() {
   local path="$1"
   local pattern="$2"
 
-  if ! grep -Fq "$pattern" "$path"; then
+  if ! grep -Fq -- "$pattern" "$path"; then
     printf '[smoke] expected %s to contain: %s\n' "$path" "$pattern" >&2
     exit 1
   fi
@@ -70,7 +70,7 @@ assert_file_not_contains() {
     fail "expected file to exist: $path"
   fi
 
-  if grep -Fq "$pattern" "$path"; then
+  if grep -Fq -- "$pattern" "$path"; then
     printf '[smoke] expected %s to not contain: %s\n' "$path" "$pattern" >&2
     exit 1
   fi
@@ -83,7 +83,7 @@ assert_fixed_line_count() {
   local message="$4"
   local actual_count
 
-  actual_count="$(grep -Fxc "$pattern" "$path" || true)"
+  actual_count="$(grep -Fxc -- "$pattern" "$path" || true)"
   assert_equals "${expected_count}" "${actual_count}" "${message}"
 }
 
@@ -101,6 +101,41 @@ assert_commit_excludes_internal_paths() {
   if printf '%s\n' "$changed_paths" | grep -Eq '^vendor/issue_forge(/|$)'; then
     printf '[smoke] expected commit %s to exclude vendor/issue_forge paths\n' "$commit_ref" >&2
     printf '%s\n' "$changed_paths" >&2
+    exit 1
+  fi
+}
+
+assert_commit_includes_path() {
+  local commit_ref="$1"
+  local expected_path="$2"
+  local changed_paths
+
+  changed_paths="$("${REAL_GIT}" -C "${repo_dir}" show --pretty= --name-only "$commit_ref")"
+  if ! printf '%s\n' "$changed_paths" | grep -Fxq "$expected_path"; then
+    printf '[smoke] expected commit %s to include %s\n' "$commit_ref" "$expected_path" >&2
+    printf '%s\n' "$changed_paths" >&2
+    exit 1
+  fi
+}
+
+assert_diff_file_excludes_path_regex() {
+  local path="$1"
+  local path_regex="$2"
+  local label="$3"
+
+  if grep -Eq "^(diff --git a/${path_regex}(/| )|--- a/${path_regex}(/|$)|\\+\\+\\+ b/${path_regex}(/|$))" "$path"; then
+    printf '[smoke] expected %s to exclude diff entries for %s\n' "$path" "$label" >&2
+    exit 1
+  fi
+}
+
+assert_path_list_excludes_path_regex() {
+  local path="$1"
+  local path_regex="$2"
+  local label="$3"
+
+  if grep -Eq "^${path_regex}(/|$)" "$path"; then
+    printf '[smoke] expected %s to exclude path entries for %s\n' "$path" "$label" >&2
     exit 1
   fi
 }
@@ -153,12 +188,23 @@ assert_vendor_engine_symlink_present() {
 }
 
 assert_review_material_excludes_engine_path() {
-  assert_file_not_contains "${repo_dir}/.work/codex/review.diff" "${FIXTURE_ENGINE_PATH}"
-  assert_file_not_contains "${repo_dir}/.work/codex/review.untracked.txt" "${FIXTURE_ENGINE_PATH}"
-  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-01.txt" "${FIXTURE_ENGINE_PATH}"
-  assert_file_not_contains "${repo_dir}/.work/codex/history/review-diff.round-02.txt" "${FIXTURE_ENGINE_PATH}"
-  assert_file_not_contains "${repo_dir}/.work/codex/history/review-untracked.round-01.txt" "${FIXTURE_ENGINE_PATH}"
-  assert_file_not_contains "${repo_dir}/.work/codex/history/review-untracked.round-02.txt" "${FIXTURE_ENGINE_PATH}"
+  assert_diff_file_excludes_path_regex "${repo_dir}/.work/codex/review.diff" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${repo_dir}/.work/codex/review.untracked.txt" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_diff_file_excludes_path_regex "${repo_dir}/.work/codex/history/review-diff.round-01.txt" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_diff_file_excludes_path_regex "${repo_dir}/.work/codex/history/review-diff.round-02.txt" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${repo_dir}/.work/codex/history/review-untracked.round-01.txt" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${repo_dir}/.work/codex/history/review-untracked.round-02.txt" 'vendor/issue_forge' 'vendor/issue_forge'
+}
+
+assert_staging_uses_concrete_pathspecs() {
+  local command_log="$1"
+
+  assert_file_contains "${command_log}" 'diff --name-only -z -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_file_contains "${command_log}" 'diff --name-only -z --cached -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_file_contains "${command_log}" 'ls-files --others --exclude-standard -z -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_file_contains "${command_log}" 'add -A --pathspec-from-file='
+  assert_file_contains "${command_log}" '--pathspec-file-nul'
+  assert_file_not_contains "${command_log}" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
 }
 
 write_review_output_fixture() {
@@ -268,6 +314,15 @@ create_fixture_vendor_symlink() {
   if "${REAL_GIT}" -C "${repo_dir}" ls-files --error-unmatch "${FIXTURE_ENGINE_PATH}" >/dev/null 2>&1; then
     fail 'vendor/issue_forge should remain untracked in the fixture consumer repo'
   fi
+}
+
+configure_fixture_gitignore_for_managed_paths() {
+  cat > "${repo_dir}/.gitignore" <<'EOF'
+.work
+.work/
+vendor/issue_forge
+vendor/issue_forge/
+EOF
 }
 
 create_init_fixture_repo() {
@@ -1008,6 +1063,10 @@ EOF
 
 run_issue_flow_smoke() {
   log 'running run_issue_flow.sh smoke'
+  configure_fixture_gitignore_for_managed_paths
+  assert_init_gitignore_configured "${repo_dir}/.gitignore"
+  "${REAL_GIT}" -C "${repo_dir}" add .gitignore
+  "${REAL_GIT}" -C "${repo_dir}" commit -m 'fixture: ignore managed paths' >/dev/null
   clear_command_logs
 
   (
@@ -1063,10 +1122,11 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'run_issue_flow'
   assert_review_material_excludes_engine_path
+  assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
 }
 
@@ -1109,6 +1169,8 @@ run_restart_issue_flow_smoke() {
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'restart_issue_flow'
   assert_review_material_excludes_engine_path
+  assert_commit_includes_path HEAD 'smoke-target.txt'
+  assert_commit_excludes_internal_paths HEAD
 }
 
 run_continue_after_review_smoke() {
@@ -1144,10 +1206,11 @@ run_continue_after_review_smoke() {
     fail 'continue_after_review.sh should create the intermediate review-feedback commit'
   fi
 
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
   assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
   assert_fixed_base_commit_usage 'continue_after_review'
   assert_review_material_excludes_engine_path
+  assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
   assert_commit_excludes_internal_paths HEAD~1
 }
@@ -1182,16 +1245,20 @@ git diff --cached --name-only > "'"${staged_log}"'"
 
   assert_file_contains "${status_log}" 'vendor/other.txt'
   assert_file_contains "${status_log}" 'vendor/tracked.txt'
-  assert_file_not_contains "${status_log}" 'vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${status_log}" '\.work' '.work'
+  assert_path_list_excludes_path_regex "${status_log}" 'vendor/issue_forge' 'vendor/issue_forge'
   assert_file_contains "${review_diff_log}" 'vendor/other.txt'
   assert_file_contains "${review_diff_log}" 'vendor/tracked.txt'
-  assert_file_not_contains "${review_diff_log}" 'vendor/issue_forge'
+  assert_diff_file_excludes_path_regex "${review_diff_log}" '\.work' '.work'
+  assert_diff_file_excludes_path_regex "${review_diff_log}" 'vendor/issue_forge' 'vendor/issue_forge'
   assert_file_contains "${review_untracked_log}" 'vendor/other.txt'
-  assert_file_not_contains "${review_untracked_log}" 'vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${review_untracked_log}" '\.work' '.work'
+  assert_path_list_excludes_path_regex "${review_untracked_log}" 'vendor/issue_forge' 'vendor/issue_forge'
   assert_file_contains "${staged_log}" 'vendor/other.txt'
   assert_file_contains "${staged_log}" 'vendor/tracked.txt'
-  assert_file_not_contains "${staged_log}" 'vendor/issue_forge'
-  assert_file_contains "${state_dir}/git.log" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
+  assert_path_list_excludes_path_regex "${staged_log}" '\.work' '.work'
+  assert_path_list_excludes_path_regex "${staged_log}" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
 }
 
 cleanup() {
