@@ -68,6 +68,17 @@ assert_file_not_contains() {
   fi
 }
 
+assert_fixed_line_count() {
+  local path="$1"
+  local pattern="$2"
+  local expected_count="$3"
+  local message="$4"
+  local actual_count
+
+  actual_count="$(grep -Fxc "$pattern" "$path" || true)"
+  assert_equals "${expected_count}" "${actual_count}" "${message}"
+}
+
 assert_commit_excludes_internal_paths() {
   local commit_ref="$1"
   local changed_paths
@@ -96,6 +107,29 @@ assert_files_equal() {
     diff -u "$expected" "$actual" >&2 || true
     exit 1
   fi
+}
+
+assert_init_gitignore_configured() {
+  local path="$1"
+
+  assert_file_exists "${path}"
+  assert_fixed_line_count "${path}" '.work' '1' "${path} .work entry count"
+  assert_fixed_line_count "${path}" '.work/' '1' "${path} .work/ entry count"
+  assert_fixed_line_count "${path}" 'vendor/issue_forge' '1' "${path} vendor/issue_forge entry count"
+  assert_fixed_line_count "${path}" 'vendor/issue_forge/' '1' "${path} vendor/issue_forge/ entry count"
+}
+
+assert_default_consumer_project_file() {
+  local path="$1"
+  local expected_contents
+
+  expected_contents="$(mktemp)"
+  cat > "${expected_contents}" <<'EOF'
+# issue_forge consumer config.
+# Defaults are supplied by vendor/issue_forge.
+EOF
+  assert_files_equal "${expected_contents}" "${path}" 'default consumer project config'
+  rm -f "${expected_contents}"
 }
 
 assert_source_checks_command_executable() {
@@ -225,6 +259,20 @@ create_fixture_vendor_symlink() {
 
   if "${REAL_GIT}" -C "${repo_dir}" ls-files --error-unmatch "${FIXTURE_ENGINE_PATH}" >/dev/null 2>&1; then
     fail 'vendor/issue_forge should remain untracked in the fixture consumer repo'
+  fi
+}
+
+create_init_fixture_repo() {
+  local fixture_repo="$1"
+
+  mkdir -p "${fixture_repo}/vendor"
+  "${REAL_GIT}" init --initial-branch=main "${fixture_repo}" >/dev/null
+  "${REAL_GIT}" -C "${fixture_repo}" config user.name 'Smoke Harness'
+  "${REAL_GIT}" -C "${fixture_repo}" config user.email 'smoke@example.test'
+  ln -s "${REPO_ROOT}" "${fixture_repo}/${FIXTURE_ENGINE_PATH}"
+
+  if [[ ! -L "${fixture_repo}/${FIXTURE_ENGINE_PATH}" ]]; then
+    fail "expected vendor engine symlink to exist: ${fixture_repo}/${FIXTURE_ENGINE_PATH}"
   fi
 }
 
@@ -474,6 +522,73 @@ create_fixture_repo() {
   "${REAL_GIT}" -C "${repo_dir}" push -u origin main >/dev/null
   "${REAL_GIT}" -C "${repo_dir}" fetch origin main >/dev/null
   create_fixture_vendor_symlink
+}
+
+run_consumer_init_smoke() {
+  local missing_repo="${temp_root}/init-missing"
+  local existing_repo="${temp_root}/init-existing"
+  local first_log="${state_dir}/consumer-init-first.log"
+  local second_log="${state_dir}/consumer-init-second.log"
+  local existing_log="${state_dir}/consumer-init-existing.log"
+
+  log 'running consumer init smoke'
+
+  create_init_fixture_repo "${missing_repo}"
+
+  if ! (
+    cd "${missing_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh"
+  ) > "${first_log}" 2>&1; then
+    fail 'consumer init should succeed for a direct-vendor consumer fixture with missing local files'
+  fi
+
+  assert_init_gitignore_configured "${missing_repo}/.gitignore"
+  assert_file_exists "${missing_repo}/.issue_forge/project.sh"
+  assert_default_consumer_project_file "${missing_repo}/.issue_forge/project.sh"
+  assert_file_contains "${first_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_contains "${first_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
+  assert_file_contains "${first_log}" 'warning: missing docs/README.md'
+
+  printf '# preserve existing consumer config\n' >> "${missing_repo}/.issue_forge/project.sh"
+
+  if ! (
+    cd "${missing_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh"
+  ) > "${second_log}" 2>&1; then
+    fail 'consumer init should succeed on idempotent rerun'
+  fi
+
+  assert_init_gitignore_configured "${missing_repo}/.gitignore"
+  assert_file_contains "${missing_repo}/.issue_forge/project.sh" '# preserve existing consumer config'
+  assert_file_contains "${second_log}" '.gitignore is already configured'
+  assert_file_contains "${second_log}" '.issue_forge/project.sh already exists'
+  assert_file_contains "${second_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_contains "${second_log}" 'warning: missing docs/README.md'
+
+  create_init_fixture_repo "${existing_repo}"
+  mkdir -p "${existing_repo}/.issue_forge/checks" "${existing_repo}/docs"
+  cat > "${existing_repo}/.issue_forge/checks/run_changed.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+EOF
+  chmod +x "${existing_repo}/.issue_forge/checks/run_changed.sh"
+  cat > "${existing_repo}/docs/README.md" <<'EOF'
+# Existing consumer docs
+EOF
+
+  if ! (
+    cd "${existing_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh"
+  ) > "${existing_log}" 2>&1; then
+    fail 'consumer init should succeed when checks and docs already exist'
+  fi
+
+  assert_init_gitignore_configured "${existing_repo}/.gitignore"
+  assert_file_exists "${existing_repo}/.issue_forge/project.sh"
+  assert_default_consumer_project_file "${existing_repo}/.issue_forge/project.sh"
+  assert_file_not_contains "${existing_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${existing_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${existing_log}" 'warning: missing docs/README.md'
 }
 
 run_start_from_issue_smoke() {
@@ -1069,6 +1184,7 @@ main() {
   trap cleanup EXIT
   assert_source_checks_command_executable
   create_fixture_repo
+  run_consumer_init_smoke
   run_start_from_issue_smoke
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke

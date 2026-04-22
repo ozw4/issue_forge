@@ -23,12 +23,12 @@
 
 ## この repo で特に重視すること
 
-- external consumer entrypoints は `vendor/issue_forge/tools/issue/start_from_issue.sh` と `vendor/issue_forge/tools/codex/*.sh` です。
+- external consumer entrypoints は `vendor/issue_forge/tools/consumer/init.sh`、`vendor/issue_forge/tools/issue/start_from_issue.sh`、`vendor/issue_forge/tools/codex/*.sh` です。
 - external consumers は `./tools/codex` や `./tools/issue` の shim を持つ必要がありません。
-- minimal consumer-owned files は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`docs/README.md`、`vendor/issue_forge` です。
+- minimal consumer-owned files は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`docs/README.md`、`vendor/issue_forge` です。`tools/consumer/init.sh` は `.gitignore` を更新し、`.issue_forge/project.sh` を初期化できますが、checks と docs は作りません。
 - `.work/current_issue`、`.work/current_branch`、`.work/issues/<issue>.md`、`.work/codex/*` の path と命名は維持します。
 - review output の厳密フォーマットを維持します。
-- consumer git hygiene として `.work/` と `vendor/issue_forge` を ignore することを推奨します。
+- consumer git hygiene として `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を ignore することを推奨します。
 - この repo 自体は self-hosting のため `tools/codex/` と `tools/issue/` の checked-in entrypoint を持ち続けます。
 
 ## 読み分け

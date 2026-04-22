@@ -7,6 +7,7 @@
 次は contract surface なので、理由なく変えません。
 
 - external consumer entrypoints:
+  - `vendor/issue_forge/tools/consumer/init.sh`
   - `vendor/issue_forge/tools/issue/start_from_issue.sh`
   - `vendor/issue_forge/tools/codex/doctor.sh`
   - `vendor/issue_forge/tools/codex/run_issue_flow.sh`
