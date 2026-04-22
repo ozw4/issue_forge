@@ -44,6 +44,14 @@ assert_file_exists() {
   fi
 }
 
+assert_path_not_exists() {
+  local path="$1"
+
+  if [[ -e "$path" ]]; then
+    fail "expected path to not exist: $path"
+  fi
+}
+
 assert_file_contains() {
   local path="$1"
   local pattern="$2"
@@ -526,10 +534,10 @@ create_fixture_repo() {
 
 run_consumer_init_smoke() {
   local missing_repo="${temp_root}/init-missing"
-  local existing_repo="${temp_root}/init-existing"
+  local readme_repo="${temp_root}/init-readme"
   local first_log="${state_dir}/consumer-init-first.log"
   local second_log="${state_dir}/consumer-init-second.log"
-  local existing_log="${state_dir}/consumer-init-existing.log"
+  local readme_log="${state_dir}/consumer-init-readme.log"
 
   log 'running consumer init smoke'
 
@@ -547,7 +555,10 @@ run_consumer_init_smoke() {
   assert_default_consumer_project_file "${missing_repo}/.issue_forge/project.sh"
   assert_file_contains "${first_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
   assert_file_contains "${first_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
-  assert_file_contains "${first_log}" 'warning: missing docs/README.md'
+  assert_file_contains "${first_log}" 'warning: missing README.md'
+  assert_file_not_contains "${first_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${missing_repo}/README.md"
+  assert_path_not_exists "${missing_repo}/docs/README.md"
 
   printf '# preserve existing consumer config\n' >> "${missing_repo}/.issue_forge/project.sh"
 
@@ -563,32 +574,37 @@ run_consumer_init_smoke() {
   assert_file_contains "${second_log}" '.gitignore is already configured'
   assert_file_contains "${second_log}" '.issue_forge/project.sh already exists'
   assert_file_contains "${second_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
-  assert_file_contains "${second_log}" 'warning: missing docs/README.md'
+  assert_file_contains "${second_log}" 'warning: missing README.md'
+  assert_file_not_contains "${second_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${missing_repo}/README.md"
+  assert_path_not_exists "${missing_repo}/docs/README.md"
 
-  create_init_fixture_repo "${existing_repo}"
-  mkdir -p "${existing_repo}/.issue_forge/checks" "${existing_repo}/docs"
-  cat > "${existing_repo}/.issue_forge/checks/run_changed.sh" <<'EOF'
+  create_init_fixture_repo "${readme_repo}"
+  mkdir -p "${readme_repo}/.issue_forge/checks"
+  cat > "${readme_repo}/.issue_forge/checks/run_changed.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 EOF
-  chmod +x "${existing_repo}/.issue_forge/checks/run_changed.sh"
-  cat > "${existing_repo}/docs/README.md" <<'EOF'
-# Existing consumer docs
+  chmod +x "${readme_repo}/.issue_forge/checks/run_changed.sh"
+  cat > "${readme_repo}/README.md" <<'EOF'
+# Existing consumer README
 EOF
 
   if ! (
-    cd "${existing_repo}"
+    cd "${readme_repo}"
     "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh"
-  ) > "${existing_log}" 2>&1; then
-    fail 'consumer init should succeed when checks and docs already exist'
+  ) > "${readme_log}" 2>&1; then
+    fail 'consumer init should succeed when checks exist, README exists, and docs/README.md is missing'
   fi
 
-  assert_init_gitignore_configured "${existing_repo}/.gitignore"
-  assert_file_exists "${existing_repo}/.issue_forge/project.sh"
-  assert_default_consumer_project_file "${existing_repo}/.issue_forge/project.sh"
-  assert_file_not_contains "${existing_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
-  assert_file_not_contains "${existing_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
-  assert_file_not_contains "${existing_log}" 'warning: missing docs/README.md'
+  assert_init_gitignore_configured "${readme_repo}/.gitignore"
+  assert_file_exists "${readme_repo}/.issue_forge/project.sh"
+  assert_default_consumer_project_file "${readme_repo}/.issue_forge/project.sh"
+  assert_file_not_contains "${readme_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${readme_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${readme_log}" 'warning: missing README.md'
+  assert_file_not_contains "${readme_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${readme_repo}/docs/README.md"
 }
 
 run_start_from_issue_smoke() {
@@ -877,16 +893,17 @@ write_expected_issue_flow_prompts() {
   mkdir -p "${expected_prompt_dir}"
 
   cat > "${expected_prompt_dir}/implementation.prompt.md" <<EOF
-Read AGENTS.md and docs/README.md first.
+Read AGENTS.md if present, then README.md, then docs/README.md if present.
 Then read .work/issues/${ISSUE_NUMBER}.md.
 
 You are the implementation session for issue #${ISSUE_NUMBER}.
 
 Priority order:
-1. AGENTS.md
-2. docs/README.md and source-of-truth docs
-3. the GitHub issue body
-4. this prompt
+1. AGENTS.md if present
+2. README.md
+3. docs/README.md if present and source-of-truth docs
+4. the GitHub issue body and provided .work artifacts
+5. this prompt
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.
@@ -902,16 +919,17 @@ Make the required changes, then stop.
 EOF
 
   cat > "${expected_prompt_dir}/fix-from-checks.prompt.md" <<EOF
-Read AGENTS.md and docs/README.md first.
+Read AGENTS.md if present, then README.md, then docs/README.md if present.
 Then read .work/issues/${ISSUE_NUMBER}.md and .work/codex/checks.log.
 
 You are continuing the implementation session for issue #${ISSUE_NUMBER}.
 
 Priority order:
-1. AGENTS.md
-2. docs/README.md and source-of-truth docs
-3. the GitHub issue body
-4. this prompt
+1. AGENTS.md if present
+2. README.md
+3. docs/README.md if present and source-of-truth docs
+4. the GitHub issue body and provided .work artifacts
+5. this prompt
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.
@@ -925,16 +943,17 @@ Rules:
 EOF
 
   cat > "${expected_prompt_dir}/review.prompt.md" <<EOF
-Read AGENTS.md and docs/README.md first.
+Read AGENTS.md if present, then README.md, then docs/README.md if present.
 Then read .work/issues/${ISSUE_NUMBER}.md, .work/codex/review.diff, and .work/codex/review.untracked.txt.
 
 You are the review session for issue #${ISSUE_NUMBER}.
 
 Priority order:
-1. AGENTS.md
-2. docs/README.md and source-of-truth docs
-3. the GitHub issue body
-4. this prompt
+1. AGENTS.md if present
+2. README.md
+3. docs/README.md if present and source-of-truth docs
+4. the GitHub issue body and provided .work artifacts
+5. this prompt
 
 Review only the provided review material.
 
@@ -962,16 +981,17 @@ minor:
 EOF
 
   cat > "${expected_prompt_dir}/fix-from-review.prompt.md" <<EOF
-Read AGENTS.md and docs/README.md first.
+Read AGENTS.md if present, then README.md, then docs/README.md if present.
 Then read .work/issues/${ISSUE_NUMBER}.md and .work/codex/review.txt.
 
 You are continuing the implementation session for issue #${ISSUE_NUMBER}.
 
 Priority order:
-1. AGENTS.md
-2. docs/README.md and source-of-truth docs
-3. the GitHub issue body
-4. this prompt
+1. AGENTS.md if present
+2. README.md
+3. docs/README.md if present and source-of-truth docs
+4. the GitHub issue body and provided .work artifacts
+5. this prompt
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.

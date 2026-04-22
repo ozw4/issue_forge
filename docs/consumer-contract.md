@@ -18,7 +18,7 @@ External consumer-facing entrypoints are:
 
 | Path | Arguments | Role |
 | --- | --- | --- |
-| `vendor/issue_forge/tools/consumer/init.sh` | `[consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, and warn about missing consumer-owned checks/docs files |
+| `vendor/issue_forge/tools/consumer/init.sh` | `[consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, and warn about missing consumer-owned checks/README files |
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR creation |
@@ -31,16 +31,16 @@ For this repository only, self-hosting entrypoints under `tools/codex/` and `too
 
 ## 3. Minimal Consumer-Owned Files
 
-External consumers must provide these files:
+Consumer-owned paths are:
 
 | Path | Required | Notes |
 | --- | --- | --- |
 | `.issue_forge/project.sh` | yes | May be empty; engine applies defaults before validation; `tools/consumer/init.sh` creates a minimal default file when missing |
 | `.issue_forge/checks/run_changed.sh` | yes | Default checks hook path; must be executable; `tools/consumer/init.sh` only warns when it is missing |
 | `AGENTS.md` | yes | Consumer-owned repo instructions |
-| `docs/README.md` | yes | Consumer-owned docs entrypoint; `tools/consumer/init.sh` only warns when it is missing |
+| `README.md` | recommended | Primary consumer documentation entrypoint; `tools/consumer/init.sh` warns when it is missing but does not create it |
+| `docs/README.md` | optional | Optional consumer docs index for additional source-of-truth docs; `tools/consumer/init.sh` does not warn when it is missing and does not create it |
 | `vendor/issue_forge` | yes | Bind-mounted or symlinked engine root; not committed by the consumer repo |
-| `README.md` | recommended | Consumer repo overview; not required by engine logic but expected by smoke fixture and normal repo hygiene |
 
 First-time consumer initialization may be done by running:
 
@@ -53,8 +53,9 @@ That command:
 - updates consumer `.gitignore` with `.work`, `.work/`, `vendor/issue_forge`, and `vendor/issue_forge/`
 - creates `.issue_forge/project.sh` when it is missing
 - warns about missing `.issue_forge/checks/run_changed.sh`
-- warns about missing `docs/README.md`
-- does not create checks or docs files
+- warns about missing `README.md`
+- does not warn about missing `docs/README.md`
+- does not create checks, `README.md`, or `docs/README.md`
 - does not stage or commit changes
 
 Optional consumer overrides:
@@ -233,4 +234,4 @@ Regression coverage for the direct vendor contract lives in:
 - `tests/test_codex_smoke_harness.py`
 
 The smoke harness must prove that a fixture consumer with no `tools/codex` and no `tools/issue` can run the full flow through `./vendor/issue_forge/tools/...`.
-It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, warning-only behavior for missing checks/docs, and idempotent reruns.
+It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, warning-only behavior for missing checks/`README.md`, no warning for missing `docs/README.md`, and idempotent reruns.

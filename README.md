@@ -14,11 +14,13 @@ consumer repo では最初に次を実行できます。
 ./vendor/issue_forge/tools/consumer/init.sh
 ```
 
-この init script は consumer の `.gitignore` に `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を追記し、`.issue_forge/project.sh` が無ければ作成します。`.issue_forge/checks/run_changed.sh` と `docs/README.md` が無い場合は warning を出しますが、それらの file は作成せず、`git add` や commit もしません。
+この init script は consumer の `.gitignore` に `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を追記し、`.issue_forge/project.sh` が無ければ作成します。`.issue_forge/checks/run_changed.sh` と `README.md` が無い場合は warning を出します。`README.md` と `docs/README.md` は作成せず、`docs/README.md` が無くても warning は出しません。`git add` や commit もしません。
 
 ## Consumer layout
 
-最小 consumer-owned files は次です。
+`README.md` は consumer docs の primary entrypoint です。`docs/README.md` は追加の docs index が必要な場合だけ optional です。
+
+基本的な consumer-owned layout は次です。
 
 ```text
 <consumer-repo>/

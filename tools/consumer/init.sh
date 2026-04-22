@@ -143,8 +143,8 @@ warn_for_missing_consumer_files() {
     note 'issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
   fi
 
-  if [[ ! -e "${consumer_root}/docs/README.md" ]]; then
-    warn 'missing docs/README.md'
+  if [[ ! -e "${consumer_root}/README.md" ]]; then
+    warn 'missing README.md'
   fi
 }
 
