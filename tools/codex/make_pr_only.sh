@@ -24,12 +24,12 @@ enter_repo_root
 issue_number="$(resolve_numeric_issue_number "${1:-}")"
 
 current_branch="$(resolve_current_branch_from_state "Missing ${CODEX_FLOW_CURRENT_BRANCH_FILE}.")"
+resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first." >/dev/null
 
 require_flow_base_ref
 
-pr_url="$(current_pr_url_for_branch "$current_branch")"
-if [[ -z "$pr_url" ]]; then
-  pr_url="$(create_issue_pr_for_branch "$issue_number" "$current_branch")"
-fi
+issue_file="$(require_issue_file "$issue_number")"
+issue_title="$(read_issue_title_from_issue_file "$issue_file")"
+sync_issue_pr_for_branch "$issue_number" "$current_branch" "$issue_title" pr_url pr_action
 
 printf '%s\n' "$pr_url"

@@ -11,7 +11,7 @@
 2. `docs/consumer-contract.md`
    - direct vendor invocation contract
    - minimal consumer-owned files
-   - config defaults、`.work` invariants、review format invariants
+   - config defaults、PR body/title sync、`.work` invariants、review format invariants
 3. `docs/codex_working_rules.md`
    - 実装時の具体的な working rules
    - smoke fixture と git exclusion の注意点
@@ -29,6 +29,7 @@
 - typical consumer-owned paths は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`README.md`、optional `docs/README.md`、`vendor/issue_forge` です。`tools/consumer/init.sh` は `.gitignore` を更新し、`.issue_forge/project.sh` を初期化できますが、`README.md` と `docs/README.md` は作らず、missing warning は `.issue_forge/checks/run_changed.sh` と `README.md` にだけ出します。
 - `.work/current_issue`、`.work/current_branch`、`.work/issues/<issue>.md`、`.work/codex/*` の path と命名は維持します。
 - review output の厳密フォーマットを維持します。
+- PR publish は deterministic な body を生成し、open PR がある場合は title/body だけを同期更新します。
 - consumer git hygiene として `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を ignore することを推奨します。
 - この repo 自体は self-hosting のため `tools/codex/` と `tools/issue/` の checked-in entrypoint を持ち続けます。
 

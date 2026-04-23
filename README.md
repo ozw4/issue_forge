@@ -55,6 +55,31 @@ consumer repo root から次を直接実行します。
 
 `.work/current_issue` がある場合は issue number を省略できます。
 
+## PR publishing
+
+`run_issue_flow.sh` と `make_pr_only.sh` は同じ publish helper を使い、PR body を deterministic に自動生成します。body は local issue context、saved fixed base commit、git diff、`.work/codex/checks.log`、`.work/codex/review.txt` から組み立てられます。
+
+生成される body は次の安定した形です。
+
+```text
+Closes #<issue>
+
+## Summary
+- <issue title>
+
+## Changed files
+- `<path>`
+
+## Checks
+- `.work/codex/checks.log`: <bounded summary>
+
+## Review
+- `.work/codex/review.txt`: accept: yes/no
+- findings: blocker <n>, major <n>, minor <n>
+```
+
+checks/review artifact がまだ無い `make_pr_only.sh` 経路では、その section に `not available yet` を出します。既存の open PR がある場合は `gh pr edit ... --title ... --body-file ...` で title/body だけを同期し、draft/open state、reviewers、labels は変更しません。新規 PR 作成時は従来どおり `CODEX_FLOW_PR_DRAFT_DEFAULT` を守ります。
+
 ## Defaults
 
 consumer の `.issue_forge/project.sh` は空でも構いません。default は engine 側で補完されます。

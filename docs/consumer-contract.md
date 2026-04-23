@@ -21,10 +21,10 @@ External consumer-facing entrypoints are:
 | `vendor/issue_forge/tools/consumer/init.sh` | `[consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, and warn about missing consumer-owned checks/README files |
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
-| `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR creation |
+| `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
 | `vendor/issue_forge/tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the flow |
-| `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or report the PR for the current issue branch without pushing new commits |
+| `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or sync the PR title/body for the current issue branch without pushing new commits |
 | `vendor/issue_forge/tools/codex/run_codex.sh` | `<write\|read> <prompt_file>` | Invoke `codex exec` with the mode-specific sandbox and reasoning profile |
 
 For this repository only, self-hosting entrypoints under `tools/codex/` and `tools/issue/` remain supported.
@@ -142,7 +142,44 @@ Checks behavior:
 - exit `0` means pass; non-zero enters the fix-from-checks loop
 - the checks hook must be non-interactive and validation-only
 
-## 8. Git / Worktree Exclusion Contract
+## 8. PR Publish Behavior
+
+PR publishing uses one shared engine helper for full flow publishing and `make_pr_only.sh`.
+
+When an open PR already exists for the current issue branch and configured base branch, the engine synchronizes only title/body:
+
+```bash
+gh pr edit <existing-pr-url> --title <issue-title> --body-file <generated-body>
+```
+
+It does not change draft/open state, reviewers, labels, or other PR metadata.
+
+When no open PR exists, the engine creates one with `gh pr create`, still honoring `CODEX_FLOW_PR_DRAFT_DEFAULT`.
+
+The generated PR body is deterministic and assembled from local issue/git/artifact state:
+
+```text
+Closes #<issue>
+
+## Summary
+- <issue title from .work/issues/<issue>.md>
+
+## Changed files
+- `<path>`
+
+## Checks
+- `.work/codex/checks.log`: <last non-empty line, bounded>
+
+## Review
+- `.work/codex/review.txt`: accept: yes/no
+- findings: blocker <n>, major <n>, minor <n>
+```
+
+If checks or review artifacts do not exist yet, their section says `not available yet`.
+
+Changed files come from the PR branch diff against the saved fixed base commit in `.work/base_commit`. This intentionally ignores uncommitted worktree-only state and avoids the moving-base problem when `origin/main` advances after issue bootstrap. The same worktree exclusion contract applies, so `.work/` and consumer-local `vendor/issue_forge` are not listed.
+
+## 9. Git / Worktree Exclusion Contract
 
 The flow must explicitly exclude internal paths from git operations instead of relying on `.gitignore`.
 
@@ -179,7 +216,7 @@ vendor/issue_forge/
 
 That recommendation is separate from the explicit runtime exclusions above.
 
-## 9. Stable Invariants
+## 10. Stable Invariants
 
 The following remain part of the v1 behavior contract:
 
@@ -224,7 +261,7 @@ minor:
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed
 
-## 10. Self-Hosting and Verification
+## 11. Self-Hosting and Verification
 
 This repository itself must still support:
 
@@ -239,3 +276,4 @@ Regression coverage for the direct vendor contract lives in:
 
 The smoke harness must prove that a fixture consumer with no `tools/codex` and no `tools/issue` can run the full flow through `./vendor/issue_forge/tools/...`.
 It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, warning-only behavior for missing checks/`README.md`, no warning for missing `docs/README.md`, and idempotent reruns.
+It covers PR body generation for create and existing-PR update paths, including changed files, checks, review, and missing-artifact sections.

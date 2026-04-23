@@ -207,6 +207,19 @@ assert_staging_uses_concrete_pathspecs() {
   assert_file_not_contains "${command_log}" 'add -A -- . :(exclude).work :(exclude)vendor/issue_forge'
 }
 
+assert_pr_body_common_sections() {
+  local path="$1"
+
+  assert_file_contains "${path}" "Closes #${ISSUE_NUMBER}"
+  assert_file_contains "${path}" '## Summary'
+  assert_file_contains "${path}" "${ISSUE_TITLE}"
+  assert_file_contains "${path}" '## Changed files'
+  assert_file_contains "${path}" '## Checks'
+  assert_file_contains "${path}" '## Review'
+  assert_file_not_contains "${path}" '.work/current_issue'
+  assert_file_not_contains "${path}" 'vendor/issue_forge'
+}
+
 write_review_output_fixture() {
   local path="$1"
   local accept_value="$2"
@@ -431,6 +444,44 @@ EOF
 set -euo pipefail
 printf '%s\n' "\$*" >> "${state_dir}/gh.log"
 
+copy_flag_value_to_file() {
+  local flag="\$1"
+  local destination="\$2"
+  shift 2
+  local previous=''
+  local value
+
+  for value in "\$@"; do
+    if [[ "\$previous" == "\$flag" ]]; then
+      cp "\$value" "\$destination"
+      return 0
+    fi
+    previous="\$value"
+  done
+
+  printf 'Missing required gh flag: %s\n' "\$flag" >&2
+  exit 1
+}
+
+write_flag_value_to_file() {
+  local flag="\$1"
+  local destination="\$2"
+  shift 2
+  local previous=''
+  local value
+
+  for value in "\$@"; do
+    if [[ "\$previous" == "\$flag" ]]; then
+      printf '%s\n' "\$value" > "\$destination"
+      return 0
+    fi
+    previous="\$value"
+  done
+
+  printf 'Missing required gh flag: %s\n' "\$flag" >&2
+  exit 1
+}
+
 if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
   if [[ " \$* " == *" --jq .title "* ]]; then
     printf '%s\n' "${ISSUE_TITLE}"
@@ -459,12 +510,26 @@ if [[ "\$#" -ge 2 && "\$1" == "auth" && "\$2" == "status" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
+  if [[ -f "${state_dir}/pr-url.txt" ]]; then
+    cat "${state_dir}/pr-url.txt"
+    exit 0
+  fi
+
   printf '\n'
   exit 0
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "create" ]]; then
-  printf 'https://example.test/pr/${ISSUE_NUMBER}\n'
+  copy_flag_value_to_file '--body-file' "${state_dir}/pr-create-body.txt" "\$@"
+  write_flag_value_to_file '--title' "${state_dir}/pr-create-title.txt" "\$@"
+  printf 'https://example.test/pr/${ISSUE_NUMBER}\n' > "${state_dir}/pr-url.txt"
+  cat "${state_dir}/pr-url.txt"
+  exit 0
+fi
+
+if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "edit" ]]; then
+  copy_flag_value_to_file '--body-file' "${state_dir}/pr-edit-body.txt" "\$@"
+  write_flag_value_to_file '--title' "${state_dir}/pr-edit-title.txt" "\$@"
   exit 0
 fi
 
@@ -691,6 +756,9 @@ run_make_pr_only_smoke() {
   local pr_url
 
   log 'running make_pr_only.sh smoke'
+  printf 'committed before PR-only publish\n' > "${repo_dir}/pr-only-fixture.txt"
+  "${REAL_GIT}" -C "${repo_dir}" add pr-only-fixture.txt
+  "${REAL_GIT}" -C "${repo_dir}" commit -m 'fixture: add pr-only changed file' >/dev/null
   clear_command_logs
 
   pr_url="$({
@@ -700,8 +768,12 @@ run_make_pr_only_smoke() {
 
   assert_equals "https://example.test/pr/${ISSUE_NUMBER}" "${pr_url}" 'make_pr_only output'
   assert_file_contains "${state_dir}/gh.log" "pr list --head issue/${ISSUE_NUMBER}-regression-harness-issue --base main --state open --json url --jq"
-  assert_file_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER} --json title --jq .title"
   assert_file_contains "${state_dir}/gh.log" "pr create --draft --base main --head issue/${ISSUE_NUMBER}-regression-harness-issue"
+  assert_equals "${ISSUE_TITLE}" "$(< "${state_dir}/pr-create-title.txt")" 'make_pr_only PR title'
+  assert_pr_body_common_sections "${state_dir}/pr-create-body.txt"
+  assert_file_contains "${state_dir}/pr-create-body.txt" "\`pr-only-fixture.txt\`"
+  assert_fixed_line_count "${state_dir}/pr-create-body.txt" '- not available yet' '2' 'make_pr_only missing artifact markers'
+  assert_path_not_exists "${state_dir}/pr-edit-body.txt"
 
   if grep -Fq 'push --set-upstream origin issue/' "${state_dir}/git.log"; then
     fail 'make_pr_only.sh should not push the issue branch'
@@ -1123,7 +1195,15 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
   assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
-  assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/40 --title Regression Harness Issue --body-file'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_equals "${ISSUE_TITLE}" "$(< "${state_dir}/pr-edit-title.txt")" 'run_issue_flow PR title sync'
+  assert_pr_body_common_sections "${state_dir}/pr-edit-body.txt"
+  assert_file_contains "${state_dir}/pr-edit-body.txt" "\`smoke-target.txt\`"
+  assert_file_contains "${state_dir}/pr-edit-body.txt" "\`pr-only-fixture.txt\`"
+  assert_file_contains "${state_dir}/pr-edit-body.txt" 'simulated checks pass on round 3'
+  assert_file_contains "${state_dir}/pr-edit-body.txt" 'accept: yes'
+  assert_file_contains "${state_dir}/pr-edit-body.txt" 'findings: blocker 0, major 0, minor 0'
   assert_fixed_base_commit_usage 'run_issue_flow'
   assert_review_material_excludes_engine_path
   assert_commit_includes_path HEAD 'smoke-target.txt'
@@ -1166,7 +1246,7 @@ run_restart_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
   assert_file_contains "${state_dir}/git.log" 'reset --hard HEAD'
   assert_file_contains "${state_dir}/git.log" 'clean -fd -e vendor/issue_forge -- . :(exclude).work'
-  assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/40 --title Regression Harness Issue --body-file'
   assert_fixed_base_commit_usage 'restart_issue_flow'
   assert_review_material_excludes_engine_path
   assert_commit_includes_path HEAD 'smoke-target.txt'
@@ -1207,7 +1287,7 @@ run_continue_after_review_smoke() {
   fi
 
   assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
-  assert_file_contains "${state_dir}/gh.log" 'pr create --draft --base main --head issue/40-regression-harness-issue'
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/40 --title Regression Harness Issue --body-file'
   assert_fixed_base_commit_usage 'continue_after_review'
   assert_review_material_excludes_engine_path
   assert_commit_includes_path HEAD 'smoke-target.txt'
