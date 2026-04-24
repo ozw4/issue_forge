@@ -168,14 +168,14 @@ Closes #<issue>
 - `<path>`
 
 ## Checks
-- `.work/codex/checks.log`: <last non-empty line, bounded>
+- `.work/codex/checks.log`: <last non-empty line>
 
 ## Review
 - `.work/codex/review.txt`: accept: yes/no
 - findings: blocker <n>, major <n>, minor <n>
 ```
 
-If checks or review artifacts do not exist yet, their section says `not available yet`.
+If checks or review artifacts do not exist yet, their section says `not available yet`. The summary and checks line are emitted as-is rather than byte-truncated, so UTF-8 issue titles and check output remain intact.
 
 Changed files come from the PR branch diff against the saved fixed base commit in `.work/base_commit`. This intentionally ignores uncommitted worktree-only state and avoids the moving-base problem when `origin/main` advances after issue bootstrap. The same worktree exclusion contract applies, so `.work/` and consumer-local `vendor/issue_forge` are not listed.
 

@@ -10,6 +10,8 @@ readonly REAL_GIT
 readonly ISSUE_NUMBER=40
 readonly ISSUE_TITLE='Regression Harness Issue'
 readonly ISSUE_URL='https://example.test/issues/40'
+readonly UTF8_PR_BODY_TITLE='Regression Harness Issue 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀'
+readonly UTF8_CHECKS_LINE='checks passed with emoji 🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪'
 readonly FIXTURE_ENGINE_PATH='vendor/issue_forge'
 readonly FIXTURE_ENGINE_CODEX_PATH="${FIXTURE_ENGINE_PATH}/tools/codex"
 readonly FIXTURE_ENGINE_ISSUE_PATH="${FIXTURE_ENGINE_PATH}/tools/issue"
@@ -780,6 +782,49 @@ run_make_pr_only_smoke() {
   fi
 }
 
+run_pr_body_utf8_smoke() {
+  local body_path="${state_dir}/pr-body-utf8.txt"
+  local original_issue_file="${state_dir}/issue-${ISSUE_NUMBER}.original.md"
+  local issue_file="${repo_dir}/.work/issues/${ISSUE_NUMBER}.md"
+
+  log 'running PR body UTF-8 smoke'
+  cp "${issue_file}" "${original_issue_file}"
+  mkdir -p "${repo_dir}/.work/codex"
+
+  cat > "${issue_file}" <<EOF
+# Issue #${ISSUE_NUMBER}
+
+Title: ${UTF8_PR_BODY_TITLE}
+URL: ${ISSUE_URL}
+
+## Body
+Smoke harness fixture issue body.
+EOF
+
+  printf '%s\n' "${UTF8_CHECKS_LINE}" > "${repo_dir}/.work/codex/checks.log"
+
+  (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" bash -c '
+set -euo pipefail
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/flow_state.sh
+source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
+issue_number="'"${ISSUE_NUMBER}"'"
+issue_file="$(require_issue_file "$issue_number")"
+issue_title="$(read_issue_title_from_issue_file "$issue_file")"
+branch_name="$(< "$CODEX_FLOW_CURRENT_BRANCH_FILE")"
+write_issue_pr_body_file "$issue_number" "$branch_name" "$issue_title" "'"${body_path}"'"
+'
+  )
+
+  assert_file_contains "${body_path}" "${UTF8_PR_BODY_TITLE}"
+  assert_file_contains "${body_path}" "${UTF8_CHECKS_LINE}"
+
+  mv "${original_issue_file}" "${issue_file}"
+  rm -f "${repo_dir}/.work/codex/checks.log"
+}
+
 run_doctor_smoke() {
   local doctor_success_log="${state_dir}/doctor-success.log"
   local doctor_warning_log="${state_dir}/doctor-warning.log"
@@ -1355,6 +1400,7 @@ main() {
   run_start_from_issue_smoke
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
+  run_pr_body_utf8_smoke
   run_doctor_smoke
   run_invalid_consumer_root_smoke
   run_run_codex_smoke

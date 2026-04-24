@@ -71,7 +71,7 @@ Closes #<issue>
 - `<path>`
 
 ## Checks
-- `.work/codex/checks.log`: <bounded summary>
+- `.work/codex/checks.log`: <last non-empty line>
 
 ## Review
 - `.work/codex/review.txt`: accept: yes/no

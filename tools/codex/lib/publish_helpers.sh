@@ -49,28 +49,6 @@ read_issue_title_from_issue_file() {
   printf '%s\n' "$issue_title"
 }
 
-pr_summary_from_issue_title() {
-  local issue_title="$1"
-
-  if [[ "${#issue_title}" -le 120 ]]; then
-    printf '%s\n' "$issue_title"
-    return
-  fi
-
-  printf '%s...\n' "${issue_title:0:117}"
-}
-
-shorten_pr_body_line() {
-  local value="$1"
-
-  if [[ "${#value}" -le 180 ]]; then
-    printf '%s\n' "$value"
-    return
-  fi
-
-  printf '%s...\n' "${value:0:177}"
-}
-
 write_pr_changed_files_section() {
   local base_commit="$1"
   local branch_name="$2"
@@ -131,7 +109,6 @@ write_pr_checks_section() {
     return
   fi
 
-  checks_summary="$(shorten_pr_body_line "$checks_summary")"
   printf -- "- \`%s\`: %s\n\n" "$checks_log" "$checks_summary"
 }
 
@@ -202,7 +179,6 @@ write_issue_pr_body() {
   local branch_name="$2"
   local issue_title="$3"
   local base_commit
-  local summary
 
   base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
@@ -211,11 +187,9 @@ write_issue_pr_body() {
     exit 1
   fi
 
-  summary="$(pr_summary_from_issue_title "$issue_title")"
-
   printf 'Closes #%s\n\n' "$issue_number"
   printf '## Summary\n'
-  printf -- '- %s\n\n' "$summary"
+  printf -- '- %s\n\n' "$issue_title"
   write_pr_changed_files_section "$base_commit" "$branch_name"
   write_pr_checks_section
   write_pr_review_section
