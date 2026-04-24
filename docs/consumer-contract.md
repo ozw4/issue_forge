@@ -22,6 +22,7 @@ External consumer-facing entrypoints are:
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
+| `vendor/issue_forge/tools/codex/run_issue_queue.sh` | `<issue_number> [issue_number ...]` | Strict-serial queue runner that bootstraps and runs the full existing single-issue flow for each explicit issue number |
 | `vendor/issue_forge/tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or sync the PR title/body for the current issue branch without pushing new commits |
@@ -69,6 +70,20 @@ External consumers do not need:
 - `./tools/codex/*.sh`
 - `./tools/issue/*.sh`
 - `./tools/codex/prompts/*.prompt.md.tmpl`
+
+## 3.1 Issue Queue Runner
+
+`vendor/issue_forge/tools/codex/run_issue_queue.sh <issue_number> [issue_number ...]` is a thin orchestration entrypoint for explicit issue lists.
+
+For each issue, in the input order provided, it:
+
+- deletes `.work/codex` before starting the issue so stale Codex artifacts do not mix across issues
+- calls `vendor/issue_forge/tools/issue/start_from_issue.sh <issue_number>`
+- calls `vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>`
+
+It does not sort or deduplicate issue numbers, does not fall back to `.work/current_issue`, and does not add queue persistence or resume files. If any issue fails, the queue stops immediately and does not start later issues. After a successful queue run, the existing single-issue state files such as `.work/current_issue`, `.work/current_branch`, and `.work/base_commit` reflect the last processed issue.
+
+The queue runner reuses existing bootstrap, checks, review, commit, push, and PR create/update behavior. It does not implement merge automation, approval automation, auto-merge, PR polling, or wait loops.
 
 ## 4. Runtime Roots
 

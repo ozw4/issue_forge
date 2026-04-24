@@ -47,13 +47,22 @@ consumer repo root から次を直接実行します。
 ./vendor/issue_forge/tools/issue/start_from_issue.sh 123
 ./vendor/issue_forge/tools/codex/doctor.sh
 ./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
+./vendor/issue_forge/tools/codex/run_issue_queue.sh 123 124
 ./vendor/issue_forge/tools/codex/continue_after_review.sh 123
 ./vendor/issue_forge/tools/codex/restart_issue_flow.sh --hard 123
 ./vendor/issue_forge/tools/codex/make_pr_only.sh 123
 ./vendor/issue_forge/tools/codex/run_codex.sh write .work/codex/implementation.prompt.md
 ```
 
-`.work/current_issue` がある場合は issue number を省略できます。
+single-issue entrypoint は `.work/current_issue` がある場合に issue number を省略できます。`run_issue_queue.sh` は常に明示 issue list が必要です。
+
+## Issue queue
+
+`run_issue_queue.sh <issue_number> [issue_number ...]` は、渡された issue number を入力順のまま strict serial に処理する薄い orchestrator です。各 issue について既存の `start_from_issue.sh <issue>` と `run_issue_flow.sh <issue>` を呼び、bootstrap、checks/review、commit、push、PR create/update は既存 flow に委譲します。
+
+各 issue の開始前に `.work/codex` を削除するため、古い Codex artifact や直前 issue の artifact は混ざりません。queue 完了後の `.work/current_issue`、`.work/current_branch`、`.work/base_commit` は最後に処理した issue の state になります。途中で失敗した場合はそこで停止し、後続 issue には進みません。
+
+この queue runner は merge automation、approval automation、auto-merge、PR polling、wait loop、queue persistence/resume file を追加しません。
 
 ## PR publishing
 

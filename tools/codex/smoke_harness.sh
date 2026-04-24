@@ -10,6 +10,12 @@ readonly REAL_GIT
 readonly ISSUE_NUMBER=40
 readonly ISSUE_TITLE='Regression Harness Issue'
 readonly ISSUE_URL='https://example.test/issues/40'
+readonly QUEUE_FIRST_ISSUE_NUMBER=41
+readonly QUEUE_FIRST_ISSUE_TITLE='Queue First Issue'
+readonly QUEUE_FIRST_ISSUE_URL='https://example.test/issues/41'
+readonly QUEUE_SECOND_ISSUE_NUMBER=42
+readonly QUEUE_SECOND_ISSUE_TITLE='Queue Second Issue'
+readonly QUEUE_SECOND_ISSUE_URL='https://example.test/issues/42'
 readonly UTF8_PR_BODY_TITLE='Regression Harness Issue 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀'
 readonly UTF8_CHECKS_LINE='checks passed with emoji 🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪'
 readonly FIXTURE_ENGINE_PATH='vendor/issue_forge'
@@ -87,6 +93,25 @@ assert_fixed_line_count() {
 
   actual_count="$(grep -Fxc -- "$pattern" "$path" || true)"
   assert_equals "${expected_count}" "${actual_count}" "${message}"
+}
+
+assert_line_order() {
+  local path="$1"
+  local first_pattern="$2"
+  local second_pattern="$3"
+  local message="$4"
+  local first_line
+  local second_line
+
+  first_line="$(grep -Fn -- "$first_pattern" "$path" | sed -n '1{s/:.*//;p;}' || true)"
+  second_line="$(grep -Fn -- "$second_pattern" "$path" | sed -n '1{s/:.*//;p;}' || true)"
+
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    printf '[smoke] line order assertion failed: %s\n' "$message" >&2
+    printf '[smoke] first pattern: %s\n' "$first_pattern" >&2
+    printf '[smoke] second pattern: %s\n' "$second_pattern" >&2
+    exit 1
+  fi
 }
 
 assert_commit_excludes_internal_paths() {
@@ -446,62 +471,140 @@ EOF
 set -euo pipefail
 printf '%s\n' "\$*" >> "${state_dir}/gh.log"
 
-copy_flag_value_to_file() {
+flag_value() {
   local flag="\$1"
-  local destination="\$2"
-  shift 2
+  shift
   local previous=''
   local value
 
   for value in "\$@"; do
     if [[ "\$previous" == "\$flag" ]]; then
-      cp "\$value" "\$destination"
+      printf '%s\n' "\$value"
       return 0
     fi
     previous="\$value"
   done
 
-  printf 'Missing required gh flag: %s\n' "\$flag" >&2
-  exit 1
+  return 1
+}
+
+copy_flag_value_to_file() {
+  local flag="\$1"
+  local destination="\$2"
+  shift 2
+  local value
+
+  if ! value="\$(flag_value "\$flag" "\$@")"; then
+    printf 'Missing required gh flag: %s\n' "\$flag" >&2
+    exit 1
+  fi
+
+  cp "\$value" "\$destination"
 }
 
 write_flag_value_to_file() {
   local flag="\$1"
   local destination="\$2"
   shift 2
-  local previous=''
   local value
 
-  for value in "\$@"; do
-    if [[ "\$previous" == "\$flag" ]]; then
-      printf '%s\n' "\$value" > "\$destination"
-      return 0
-    fi
-    previous="\$value"
-  done
+  if ! value="\$(flag_value "\$flag" "\$@")"; then
+    printf 'Missing required gh flag: %s\n' "\$flag" >&2
+    exit 1
+  fi
 
-  printf 'Missing required gh flag: %s\n' "\$flag" >&2
-  exit 1
+  printf '%s\n' "\$value" > "\$destination"
+}
+
+issue_title_for_number() {
+  case "\$1" in
+    ${ISSUE_NUMBER})
+      printf '%s\n' "${ISSUE_TITLE}"
+      ;;
+    ${QUEUE_FIRST_ISSUE_NUMBER})
+      printf '%s\n' "${QUEUE_FIRST_ISSUE_TITLE}"
+      ;;
+    ${QUEUE_SECOND_ISSUE_NUMBER})
+      printf '%s\n' "${QUEUE_SECOND_ISSUE_TITLE}"
+      ;;
+    *)
+      printf 'Unsupported fixture issue number: %s\n' "\$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+issue_url_for_number() {
+  case "\$1" in
+    ${ISSUE_NUMBER})
+      printf '%s\n' "${ISSUE_URL}"
+      ;;
+    ${QUEUE_FIRST_ISSUE_NUMBER})
+      printf '%s\n' "${QUEUE_FIRST_ISSUE_URL}"
+      ;;
+    ${QUEUE_SECOND_ISSUE_NUMBER})
+      printf '%s\n' "${QUEUE_SECOND_ISSUE_URL}"
+      ;;
+    *)
+      printf 'Unsupported fixture issue number: %s\n' "\$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+issue_number_for_branch() {
+  local branch="\$1"
+  local issue_number
+
+  issue_number="\${branch#issue/}"
+  issue_number="\${issue_number%%-*}"
+
+  if [[ -z "\$issue_number" || "\$issue_number" == "\$branch" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+
+  printf '%s\n' "\$issue_number"
+}
+
+pr_state_file_for_branch() {
+  local branch="\$1"
+  local issue_number
+
+  issue_number="\$(issue_number_for_branch "\$branch")"
+  printf '%s/pr-url.%s.txt\n' "${state_dir}" "\$issue_number"
+}
+
+pr_url_for_branch() {
+  local branch="\$1"
+  local issue_number
+
+  issue_number="\$(issue_number_for_branch "\$branch")"
+  printf 'https://example.test/pr/%s\n' "\$issue_number"
 }
 
 if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
+  issue_number="\$3"
+  issue_title="\$(issue_title_for_number "\$issue_number")"
+  issue_url="\$(issue_url_for_number "\$issue_number")"
+
   if [[ " \$* " == *" --jq .title "* ]]; then
-    printf '%s\n' "${ISSUE_TITLE}"
+    printf '%s\n' "\$issue_title"
     exit 0
   fi
 
   cat <<OUT
-# Issue #${ISSUE_NUMBER}
+# Issue #\${issue_number}
 
-Title: ${ISSUE_TITLE}
-URL: ${ISSUE_URL}
+Title: \${issue_title}
+URL: \${issue_url}
 
 ## Body
 **Kind**
 - refactor
 
 **Problem / Goal**
-Smoke harness fixture issue body.
+Smoke harness fixture issue body for #\${issue_number}.
 OUT
   exit 0
 fi
@@ -512,8 +615,10 @@ if [[ "\$#" -ge 2 && "\$1" == "auth" && "\$2" == "status" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
-  if [[ -f "${state_dir}/pr-url.txt" ]]; then
-    cat "${state_dir}/pr-url.txt"
+  head_branch="\$(flag_value '--head' "\$@")"
+  pr_state_file="\$(pr_state_file_for_branch "\$head_branch")"
+  if [[ -f "\$pr_state_file" ]]; then
+    cat "\$pr_state_file"
     exit 0
   fi
 
@@ -522,10 +627,12 @@ if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "create" ]]; then
+  head_branch="\$(flag_value '--head' "\$@")"
+  pr_url="\$(pr_url_for_branch "\$head_branch")"
   copy_flag_value_to_file '--body-file' "${state_dir}/pr-create-body.txt" "\$@"
   write_flag_value_to_file '--title' "${state_dir}/pr-create-title.txt" "\$@"
-  printf 'https://example.test/pr/${ISSUE_NUMBER}\n' > "${state_dir}/pr-url.txt"
-  cat "${state_dir}/pr-url.txt"
+  printf '%s\n' "\$pr_url" > "\$(pr_state_file_for_branch "\$head_branch")"
+  printf '%s\n' "\$pr_url"
   exit 0
 fi
 
@@ -1368,6 +1475,68 @@ run_continue_after_review_smoke() {
   assert_commit_excludes_internal_paths HEAD~1
 }
 
+run_issue_queue_smoke() {
+  local queue_log="${state_dir}/issue-queue.log"
+  local first_branch="issue/${QUEUE_FIRST_ISSUE_NUMBER}-queue-first-issue"
+  local second_branch="issue/${QUEUE_SECOND_ISSUE_NUMBER}-queue-second-issue"
+  local pr_create_count
+
+  log 'running run_issue_queue.sh smoke'
+  clear_command_logs
+  reset_flow_counters
+  mkdir -p "${repo_dir}/.work/codex"
+  printf 'stale queue artifact\n' > "${repo_dir}/.work/codex/stale-sentinel.txt"
+
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" \
+        "${QUEUE_FIRST_ISSUE_NUMBER}" \
+        "${QUEUE_SECOND_ISSUE_NUMBER}"
+  ) > "${queue_log}" 2>&1; then
+    fail 'run_issue_queue.sh should succeed for two explicit issue numbers'
+  fi
+
+  assert_line_order \
+    "${queue_log}" \
+    "[queue] starting issue ${QUEUE_FIRST_ISSUE_NUMBER} (1/2)" \
+    "[queue] starting issue ${QUEUE_SECOND_ISSUE_NUMBER} (2/2)" \
+    'queue issues should run in input order'
+  assert_line_order \
+    "${state_dir}/gh.log" \
+    "issue view ${QUEUE_FIRST_ISSUE_NUMBER}" \
+    "issue view ${QUEUE_SECOND_ISSUE_NUMBER}" \
+    'queue gh issue views should run in input order'
+
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_FIRST_ISSUE_NUMBER} --json title --jq .title"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_SECOND_ISSUE_NUMBER} --json title --jq .title"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_FIRST_ISSUE_NUMBER} --json number,title,body,url --template"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_SECOND_ISSUE_NUMBER} --json number,title,body,url --template"
+
+  pr_create_count="$(grep -Fc 'pr create ' "${state_dir}/gh.log" || true)"
+  assert_equals '2' "${pr_create_count}" 'queue PR create count'
+  assert_file_contains "${state_dir}/gh.log" "pr create --draft --base main --head ${first_branch}"
+  assert_file_contains "${state_dir}/gh.log" "pr create --draft --base main --head ${second_branch}"
+
+  assert_equals "${QUEUE_SECOND_ISSUE_NUMBER}" "$(< "${repo_dir}/.work/current_issue")" 'queue final current issue'
+  assert_equals "${second_branch}" "$(< "${repo_dir}/.work/current_branch")" 'queue final current branch'
+  assert_equals "${second_branch}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'queue checked-out branch'
+  assert_file_exists "${repo_dir}/.work/issues/${QUEUE_FIRST_ISSUE_NUMBER}.md"
+  assert_file_exists "${repo_dir}/.work/issues/${QUEUE_SECOND_ISSUE_NUMBER}.md"
+  assert_file_contains "${repo_dir}/.work/issues/${QUEUE_FIRST_ISSUE_NUMBER}.md" "Title: ${QUEUE_FIRST_ISSUE_TITLE}"
+  assert_file_contains "${repo_dir}/.work/issues/${QUEUE_SECOND_ISSUE_NUMBER}.md" "Title: ${QUEUE_SECOND_ISSUE_TITLE}"
+  assert_path_not_exists "${repo_dir}/.work/codex/stale-sentinel.txt"
+
+  assert_file_contains "${queue_log}" "[flow] pushing branch ${first_branch}"
+  assert_file_contains "${queue_log}" "[flow] pushing branch ${second_branch}"
+  assert_file_contains "${queue_log}" "[flow] created PR: https://example.test/pr/${QUEUE_FIRST_ISSUE_NUMBER}"
+  assert_file_contains "${queue_log}" "[flow] created PR: https://example.test/pr/${QUEUE_SECOND_ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/git.log" "push --set-upstream origin ${first_branch}"
+  assert_file_contains "${state_dir}/git.log" "push --set-upstream origin ${second_branch}"
+}
+
 run_vendor_worktree_visibility_smoke() {
   local status_log="${state_dir}/vendor-visibility.status.txt"
   local review_diff_log="${state_dir}/vendor-visibility.review.diff"
@@ -1438,6 +1607,7 @@ main() {
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
+  run_issue_queue_smoke
   run_vendor_worktree_visibility_smoke
   log 'all smoke scenarios passed'
 }
