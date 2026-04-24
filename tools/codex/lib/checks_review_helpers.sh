@@ -2,6 +2,9 @@
 
 # shellcheck disable=SC2154
 
+# shellcheck source=tools/codex/lib/review_semantics.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
+
 append_untracked_file_diff() {
   local path="$1"
   local status
@@ -216,51 +219,14 @@ validate_review_output() {
 
 validate_review_output_semantics() {
   local file="$1"
+  local accept_line
 
-  awk '
-    function trim(value) {
-      sub(/^[[:space:]]+/, "", value)
-      sub(/[[:space:]]+$/, "", value)
-      return value
-    }
-    function is_placeholder_item(value, normalized) {
-      normalized = tolower(trim(value))
-      return normalized == "none" || normalized == "n/a" || normalized == "no issues" || normalized == "nothing"
-    }
-    NR == 1 {
-      accept = $0
-      next
-    }
-    $0 == "blocker:" {
-      section = "blocker"
-      next
-    }
-    $0 == "major:" {
-      section = "major"
-      next
-    }
-    $0 == "minor:" {
-      section = "minor"
-      next
-    }
-    /^- / {
-      item = substr($0, 3)
-      if (is_placeholder_item(item)) {
-        next
-      }
-      if (section == "blocker") {
-        blocker_count += 1
-      } else if (section == "major") {
-        major_count += 1
-      }
-      next
-    }
-    END {
-      if (accept == "accept: yes" && (blocker_count > 0 || major_count > 0)) {
-        exit 1
-      }
-    }
-  ' "$file"
+  if ! IFS= read -r accept_line < "$file"; then
+    return 1
+  fi
+  if [[ "$accept_line" == 'accept: yes' ]] && review_has_blocker_or_major_findings "$file"; then
+    return 1
+  fi
 }
 
 ensure_valid_review_output() {

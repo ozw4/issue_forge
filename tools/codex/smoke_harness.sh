@@ -782,6 +782,26 @@ run_make_pr_only_smoke() {
   fi
 }
 
+write_pr_body_for_current_issue() {
+  local body_path="$1"
+
+  (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" bash -c '
+set -euo pipefail
+body_path="$1"
+issue_number="$2"
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/flow_state.sh
+source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
+issue_file="$(require_issue_file "$issue_number")"
+issue_title="$(read_issue_title_from_issue_file "$issue_file")"
+branch_name="$(< "$CODEX_FLOW_CURRENT_BRANCH_FILE")"
+write_issue_pr_body_file "$issue_number" "$branch_name" "$issue_title" "$body_path"
+' bash "$body_path" "${ISSUE_NUMBER}"
+  )
+}
+
 run_pr_body_utf8_smoke() {
   local body_path="${state_dir}/pr-body-utf8.txt"
   local original_issue_file="${state_dir}/issue-${ISSUE_NUMBER}.original.md"
@@ -803,26 +823,34 @@ EOF
 
   printf '%s\n' "${UTF8_CHECKS_LINE}" > "${repo_dir}/.work/codex/checks.log"
 
-  (
-    cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" bash -c '
-set -euo pipefail
-source vendor/issue_forge/tools/codex/lib/config.sh
-source vendor/issue_forge/tools/codex/lib/flow_state.sh
-source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
-issue_number="'"${ISSUE_NUMBER}"'"
-issue_file="$(require_issue_file "$issue_number")"
-issue_title="$(read_issue_title_from_issue_file "$issue_file")"
-branch_name="$(< "$CODEX_FLOW_CURRENT_BRANCH_FILE")"
-write_issue_pr_body_file "$issue_number" "$branch_name" "$issue_title" "'"${body_path}"'"
-'
-  )
+  write_pr_body_for_current_issue "${body_path}"
 
   assert_file_contains "${body_path}" "${UTF8_PR_BODY_TITLE}"
   assert_file_contains "${body_path}" "${UTF8_CHECKS_LINE}"
 
   mv "${original_issue_file}" "${issue_file}"
   rm -f "${repo_dir}/.work/codex/checks.log"
+}
+
+run_pr_body_review_count_smoke() {
+  local review_file="${repo_dir}/.work/codex/review.txt"
+  local placeholder_body="${state_dir}/pr-body-review-placeholder.txt"
+  local mixed_body="${state_dir}/pr-body-review-mixed.txt"
+
+  log 'running PR body review count smoke'
+  mkdir -p "${repo_dir}/.work/codex"
+
+  write_review_output_fixture "${review_file}" 'yes' '-  NONE  ' '- No Issues' $'-   n/a\n- nothing'
+  write_pr_body_for_current_issue "${placeholder_body}"
+  assert_file_contains "${placeholder_body}" 'accept: yes'
+  assert_file_contains "${placeholder_body}" 'findings: blocker 0, major 0, minor 0'
+
+  write_review_output_fixture "${review_file}" 'yes' '-  NONE  ' '- No Issues' $'- n/a\n- real minor follow-up'
+  write_pr_body_for_current_issue "${mixed_body}"
+  assert_file_contains "${mixed_body}" 'accept: yes'
+  assert_file_contains "${mixed_body}" 'findings: blocker 0, major 0, minor 1'
+
+  rm -f "${review_file}"
 }
 
 run_doctor_smoke() {
@@ -1401,6 +1429,7 @@ main() {
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
   run_pr_body_utf8_smoke
+  run_pr_body_review_count_smoke
   run_doctor_smoke
   run_invalid_consumer_root_smoke
   run_run_codex_smoke

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# shellcheck source=tools/codex/lib/review_semantics.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
+
 require_publish_commands() {
   require_command awk
   require_command gh
@@ -110,37 +113,6 @@ write_pr_checks_section() {
   fi
 
   printf -- "- \`%s\`: %s\n\n" "$checks_log" "$checks_summary"
-}
-
-review_finding_counts() {
-  local review_file="$1"
-
-  awk '
-    $0 == "blocker:" {
-      section = "blocker"
-      next
-    }
-    $0 == "major:" {
-      section = "major"
-      next
-    }
-    $0 == "minor:" {
-      section = "minor"
-      next
-    }
-    /^- / {
-      if (section == "blocker") {
-        blocker += 1
-      } else if (section == "major") {
-        major += 1
-      } else if (section == "minor") {
-        minor += 1
-      }
-    }
-    END {
-      printf "blocker %d, major %d, minor %d\n", blocker + 0, major + 0, minor + 0
-    }
-  ' "$review_file"
 }
 
 write_pr_review_section() {
