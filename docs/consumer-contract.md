@@ -8,7 +8,7 @@ Status:
 
 ## 1. Contract Summary
 
-`issue_forge` is a shared shell engine. External consumers use it directly from `vendor/issue_forge`; they do not need local wrapper scripts under `./tools/codex` or `./tools/issue`.
+`issue_forge` is a shared shell engine. External consumers use it directly from `vendor/issue_forge`; they do not need local wrapper scripts under `./tools/codex` or `./tools/issue`. Consumers may opt in to local convenience files for `run 5` style usage, but those files are not required for the engine contract.
 
 This repository still self-hosts the engine and therefore keeps checked-in entrypoints under `tools/codex/` and `tools/issue/` for engine development, smoke coverage, and local verification.
 
@@ -18,7 +18,7 @@ External consumer-facing entrypoints are:
 
 | Path | Arguments | Role |
 | --- | --- | --- |
-| `vendor/issue_forge/tools/consumer/init.sh` | `[consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, and warn about missing consumer-owned checks/README files |
+| `vendor/issue_forge/tools/consumer/init.sh` | `[--scaffold-checks\|--scaffold-run] [consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, warn about missing consumer-owned checks/README files by default, and optionally scaffold a starter checks hook or local run convenience files |
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
@@ -36,19 +36,21 @@ Consumer-owned paths are:
 | Path | Required | Notes |
 | --- | --- | --- |
 | `.issue_forge/project.sh` | yes | May be empty; engine applies defaults before validation; `tools/consumer/init.sh` creates a minimal default file when missing |
-| `.issue_forge/checks/run_changed.sh` | yes | Default checks hook path; must be executable; `tools/consumer/init.sh` only warns when it is missing |
+| `.issue_forge/checks/run_changed.sh` | yes | Default checks hook path; must be executable; `tools/consumer/init.sh` only warns when it is missing unless `--scaffold-checks` is explicitly passed |
+| `.issue_forge/shell.sh` | no | Optional consumer-owned shell snippet generated only by `tools/consumer/init.sh --scaffold-run`; source it manually to define a `run` function |
 | `AGENTS.md` | yes | Consumer-owned repo instructions |
 | `README.md` | recommended | Primary consumer documentation entrypoint; `tools/consumer/init.sh` warns when it is missing but does not create it |
 | `docs/README.md` | optional | Optional consumer docs index for additional source-of-truth docs; `tools/consumer/init.sh` does not warn when it is missing and does not create it |
+| `tools/run_issue.sh` | no | Optional consumer-owned wrapper generated only by `tools/consumer/init.sh --scaffold-run`; it delegates to direct vendor entrypoints |
 | `vendor/issue_forge` | yes | Bind-mounted or symlinked engine root; not committed by the consumer repo |
 
 First-time consumer initialization may be done by running:
 
 ```bash
-./vendor/issue_forge/tools/consumer/init.sh
+./vendor/issue_forge/tools/consumer/init.sh [--scaffold-checks|--scaffold-run] [consumer-root]
 ```
 
-That command:
+With no flags, that command:
 
 - updates consumer `.gitignore` with `.work`, `.work/`, `vendor/issue_forge`, and `vendor/issue_forge/`
 - creates `.issue_forge/project.sh` when it is missing
@@ -56,7 +58,18 @@ That command:
 - warns about missing `README.md`
 - does not warn about missing `docs/README.md`
 - does not create checks, `README.md`, or `docs/README.md`
+- does not create `tools/run_issue.sh` or `.issue_forge/shell.sh`
 - does not stage or commit changes
+
+When `--scaffold-checks` is explicitly passed, the same entrypoint creates `.issue_forge/checks/run_changed.sh` only if that file is missing, creates the parent directory when needed, makes the file executable, and suppresses the missing-checks warning after creation. Existing checks files are consumer-owned and are never overwritten; init logs that the file already exists. The starter hook is intentionally minimal: it collects changed files relative to the supplied base ref while excluding `.work` and consumer-local `vendor/issue_forge`, runs `shellcheck -x` only when changed shell files exist, and runs `pytest -q` only when Python-related files change. Consumers may edit the starter for their own repo after generation.
+
+This opt-in scaffold does not change `CODEX_FLOW_CHECKS_COMMAND`, does not add config toggles, and does not change `doctor.sh` or engine-wide required commands.
+
+When `--scaffold-run` is explicitly passed, the same entrypoint creates `tools/run_issue.sh` and `.issue_forge/shell.sh` only when those files are missing, creates parent directories when needed, and makes `tools/run_issue.sh` executable. Existing files are consumer-owned and are never overwritten; init logs that they already exist. This scaffold does not create checks or docs and does not suppress the normal missing checks/README warnings.
+
+The generated `tools/run_issue.sh` is a convenience wrapper. It resolves the consumer repo root from its own `tools/` directory, requires `.issue_forge/project.sh`, sources `vendor/issue_forge/tools/codex/lib/config.sh` and `vendor/issue_forge/tools/codex/lib/flow_state.sh`, validates the issue with `require_numeric_issue_number`, verifies a clean worktree with `ensure_clean_worktree`, syncs `${CODEX_FLOW_BASE_BRANCH}` from origin, then delegates to `vendor/issue_forge/tools/issue/start_from_issue.sh <issue>` and `vendor/issue_forge/tools/codex/run_issue_flow.sh <issue>`. It does not duplicate issue bootstrap state or publish behavior.
+
+The generated `.issue_forge/shell.sh` is a source-only snippet that defines `run()`. After a user manually runs `source .issue_forge/shell.sh`, `run 5` resolves the current git worktree root from any subdirectory and forwards arguments to `${root}/tools/run_issue.sh`. Init does not source this file, edit shell startup files such as `~/.bashrc`, `~/.zshrc`, or `~/.profile`, or modify global `PATH`.
 
 Optional consumer overrides:
 
@@ -66,6 +79,7 @@ Optional consumer overrides:
 
 External consumers do not need:
 
+- `./tools/run_issue.sh`
 - `./tools/codex/*.sh`
 - `./tools/issue/*.sh`
 - `./tools/codex/prompts/*.prompt.md.tmpl`
@@ -141,6 +155,7 @@ Checks behavior:
 - stdout/stderr are captured into `.work/codex/checks.log`
 - exit `0` means pass; non-zero enters the fix-from-checks loop
 - the checks hook must be non-interactive and validation-only
+- `tools/consumer/init.sh --scaffold-checks` can create a minimal consumer-owned starter at that default path; the starter runs `shellcheck -x` for changed shell files and `pytest -q` for Python-related changes only
 
 ## 8. PR Publish Behavior
 
@@ -275,5 +290,5 @@ Regression coverage for the direct vendor contract lives in:
 - `tests/test_codex_smoke_harness.py`
 
 The smoke harness must prove that a fixture consumer with no `tools/codex` and no `tools/issue` can run the full flow through `./vendor/issue_forge/tools/...`.
-It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, warning-only behavior for missing checks/`README.md`, no warning for missing `docs/README.md`, and idempotent reruns.
+It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, no-flag warning-only behavior for missing checks/`README.md`, no warning for missing `docs/README.md`, no creation of `tools/run_issue.sh` or `.issue_forge/shell.sh` without opt-in, idempotent reruns, opt-in `--scaffold-checks` creation of the starter checks hook, opt-in `--scaffold-run` creation and preservation of the run wrapper and shell snippet, source-snippet `run 5` forwarding from a subdirectory, and preservation of existing consumer-owned checks files.
 It covers PR body generation for create and existing-PR update paths, including changed files, checks, review, and missing-artifact sections.

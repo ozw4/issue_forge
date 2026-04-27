@@ -21,15 +21,23 @@ Rules:
 - Reject changes that satisfy the issue but violate AGENTS.md or source-of-truth docs.
 - Accept changes that remain consistent with docs even if the issue wording is slightly broader.
 - Focus on correctness, scope, regressions, repository rules, and doc consistency.
+- If there is any real blocker or major finding, set `accept: no`.
+- If there are only minor findings, `accept: yes` is allowed.
+- If `accept: yes`, then `blocker:` and `major:` must contain only `- none`.
+- Use the exact lowercase placeholder `none` for any empty section.
+- Never output `...` or `- ...`.
+- Do not add any prose before or after the required format.
+- Every real finding must be a single `- ` bullet in the correct section.
 
-Return exactly this format:
+Return exactly this format and nothing else:
+
 accept: yes/no
 
 blocker:
-- ...
+- none
 
 major:
-- ...
+- none
 
 minor:
-- ...
+- none

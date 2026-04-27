@@ -46,6 +46,24 @@ assert_file_exists() {
   fi
 }
 
+assert_file_executable() {
+  local path="$1"
+
+  if [[ ! -x "$path" ]]; then
+    fail "expected file to be executable: $path"
+  fi
+}
+
+assert_file_ends_with_newline() {
+  local path="$1"
+
+  assert_file_exists "$path"
+
+  if [[ -s "$path" && -n "$(tail -c 1 "$path")" ]]; then
+    fail "expected file to end with newline: $path"
+  fi
+}
+
 assert_path_not_exists() {
   local path="$1"
 
@@ -175,6 +193,221 @@ assert_default_consumer_project_file() {
 EOF
   assert_files_equal "${expected_contents}" "${path}" 'default consumer project config'
   rm -f "${expected_contents}"
+}
+
+write_expected_consumer_checks_starter() {
+  local path="$1"
+
+  cat > "${path}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly WORK_EXCLUDE_PATHSPEC=':(exclude).work'
+readonly VENDOR_EXCLUDE_PATHSPEC=':(exclude)vendor/issue_forge'
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "Missing required check command: $1"
+}
+
+collect_changed_files() {
+  local base_ref="$1"
+
+  {
+    git diff --name-only "$base_ref" -- . "$WORK_EXCLUDE_PATHSPEC" "$VENDOR_EXCLUDE_PATHSPEC"
+    git diff --name-only --cached -- . "$WORK_EXCLUDE_PATHSPEC" "$VENDOR_EXCLUDE_PATHSPEC"
+    git diff --name-only -- . "$WORK_EXCLUDE_PATHSPEC" "$VENDOR_EXCLUDE_PATHSPEC"
+    git ls-files --others --exclude-standard -- . "$WORK_EXCLUDE_PATHSPEC" "$VENDOR_EXCLUDE_PATHSPEC"
+  } | awk 'NF && !seen[$0]++'
+}
+
+run_shellcheck_if_needed() {
+  local -a shell_targets=("$@")
+
+  if [[ "${#shell_targets[@]}" -eq 0 ]]; then
+    printf 'shellcheck: skipped (no shell targets changed)\n'
+    return 0
+  fi
+
+  require_command shellcheck
+  printf 'shellcheck: %s target(s)\n' "${#shell_targets[@]}"
+  shellcheck -x "${shell_targets[@]}"
+}
+
+run_pytest_if_needed() {
+  local should_run="$1"
+
+  if [[ "$should_run" -ne 1 ]]; then
+    printf 'pytest: skipped (no Python-related changes)\n'
+    return 0
+  fi
+
+  require_command pytest
+  printf 'pytest: pytest -q\n'
+  pytest -q
+}
+
+main() {
+  local base_ref
+  local path
+  local run_pytest=0
+  local -a changed_files=()
+  local -a shell_targets=()
+
+  if [[ "$#" -ne 1 ]]; then
+    fail "Usage: $0 <base-ref>"
+  fi
+
+  base_ref="$1"
+
+  git rev-parse --verify "$base_ref" >/dev/null 2>&1 || fail "Missing base ref for checks: $base_ref"
+
+  mapfile -t changed_files < <(collect_changed_files "$base_ref")
+
+  if [[ "${#changed_files[@]}" -eq 0 ]]; then
+    printf 'No changes detected relative to %s\n' "$base_ref"
+    return 0
+  fi
+
+  printf 'Changed files relative to %s:\n' "$base_ref"
+  printf ' - %s\n' "${changed_files[@]}"
+
+  for path in "${changed_files[@]}"; do
+    case "$path" in
+      *.sh)
+        [[ -f "$path" ]] && shell_targets+=("$path")
+        ;;
+    esac
+
+    case "$path" in
+      *.py|conftest.py|tests/*|pytest.ini|pyproject.toml|setup.cfg|tox.ini|requirements*.txt|Pipfile|Pipfile.lock|poetry.lock|uv.lock)
+        run_pytest=1
+        ;;
+    esac
+  done
+
+  run_shellcheck_if_needed "${shell_targets[@]}"
+  run_pytest_if_needed "$run_pytest"
+}
+
+main "$@"
+EOF
+}
+
+write_expected_consumer_run_wrapper() {
+  local path="$1"
+
+  cat > "${path}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  printf 'Usage: %s <issue-number>\n' "$0"
+}
+
+log() {
+  printf '[run_issue] %s\n' "$1"
+}
+
+main() {
+  local issue
+  local script_dir
+  local repo_root
+  local config_script
+  local flow_state_script
+  local start_script
+  local flow_script
+
+  if [[ "$#" -ne 1 ]]; then
+    usage >&2
+    exit 1
+  fi
+
+  issue="$1"
+
+  command -v git >/dev/null 2>&1 || fail 'Missing required command: git'
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)" \
+    || fail "Failed to resolve repo root from ${script_dir}"
+
+  config_script="${repo_root}/vendor/issue_forge/tools/codex/lib/config.sh"
+  flow_state_script="${repo_root}/vendor/issue_forge/tools/codex/lib/flow_state.sh"
+  start_script="${repo_root}/vendor/issue_forge/tools/issue/start_from_issue.sh"
+  flow_script="${repo_root}/vendor/issue_forge/tools/codex/run_issue_flow.sh"
+
+  [[ -f "${repo_root}/.issue_forge/project.sh" ]] \
+    || fail "Missing consumer config: ${repo_root}/.issue_forge/project.sh"
+  [[ -f "${config_script}" ]] \
+    || fail "Missing issue_forge runtime: ${config_script}"
+  [[ -f "${flow_state_script}" ]] \
+    || fail "Missing issue_forge runtime: ${flow_state_script}"
+  [[ -x "${start_script}" ]] \
+    || fail "Missing executable bootstrap entrypoint: ${start_script}"
+  [[ -x "${flow_script}" ]] \
+    || fail "Missing executable flow entrypoint: ${flow_script}"
+
+  cd "${repo_root}" || exit 1
+
+  # shellcheck source=/dev/null
+  source "${config_script}"
+  # shellcheck source=/dev/null
+  source "${flow_state_script}"
+
+  require_numeric_issue_number "${issue}"
+  enter_repo_root
+  ensure_clean_worktree 'Working tree must be clean before running tools/run_issue.sh.'
+
+  log "switching to base branch ${CODEX_FLOW_BASE_BRANCH}"
+  git switch "${CODEX_FLOW_BASE_BRANCH}"
+
+  log "fetching origin/${CODEX_FLOW_BASE_BRANCH}"
+  git fetch origin "${CODEX_FLOW_BASE_BRANCH}"
+
+  log "pulling origin/${CODEX_FLOW_BASE_BRANCH}"
+  git pull --ff-only origin "${CODEX_FLOW_BASE_BRANCH}"
+
+  log "bootstrapping issue ${issue}"
+  "${start_script}" "${issue}"
+
+  log "running issue flow for issue ${issue}"
+  "${flow_script}" "${issue}"
+}
+
+main "$@"
+EOF
+}
+
+write_expected_consumer_shell_snippet() {
+  local path="$1"
+
+  cat > "${path}" <<'EOF'
+# shellcheck shell=bash
+run() {
+  local root
+
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    printf 'Not inside a git worktree.\n' >&2
+    return 1
+  }
+
+  [[ -x "${root}/tools/run_issue.sh" ]] || {
+    printf 'Missing executable wrapper: %s/tools/run_issue.sh\n' "$root" >&2
+    return 1
+  }
+
+  "${root}/tools/run_issue.sh" "$@"
+}
+EOF
 }
 
 assert_source_checks_command_executable() {
@@ -566,18 +799,20 @@ if [[ "\$#" -lt 1 || "\$1" != "exec" ]]; then
 fi
 
 case "\$prompt" in
-  *"Return exactly this format:"*)
+  *"Return exactly this format"*)
     review_count="\$(increment_counter "${state_dir}/review-count.txt")"
     if [[ "\$review_count" -eq 1 ]]; then
       cat <<'OUT'
 accept: no
 
 blocker:
+- none
 
 major:
 - smoke harness forces one review fix round
 
 minor:
+- none
 OUT
       exit 0
     fi
@@ -586,10 +821,13 @@ OUT
 accept: yes
 
 blocker:
+- none
 
 major:
+- none
 
 minor:
+- none
 OUT
     exit 0
     ;;
@@ -655,8 +893,21 @@ create_fixture_repo() {
 }
 
 run_consumer_init_smoke() {
+  local existing_checks_repo="${temp_root}/init-existing-checks"
+  local existing_checks_log="${state_dir}/consumer-init-existing-checks.log"
+  local invalid_option_log="${state_dir}/consumer-init-invalid-option.log"
   local missing_repo="${temp_root}/init-missing"
   local readme_repo="${temp_root}/init-readme"
+  local run_scaffold_repo="${temp_root}/init-run-scaffold"
+  local run_scaffold_expected_shell="${state_dir}/expected-consumer-shell.sh"
+  local run_scaffold_expected_wrapper="${state_dir}/expected-consumer-run-issue.sh"
+  local run_scaffold_forward_log="${state_dir}/consumer-run-forwarded-args.log"
+  local run_scaffold_log="${state_dir}/consumer-init-run-scaffold.log"
+  local run_scaffold_rerun_log="${state_dir}/consumer-init-run-scaffold-rerun.log"
+  local run_scaffold_source_log="${state_dir}/consumer-init-run-source.log"
+  local scaffold_repo="${temp_root}/init-scaffold"
+  local scaffold_expected="${state_dir}/expected-consumer-run-changed.sh"
+  local scaffold_log="${state_dir}/consumer-init-scaffold.log"
   local first_log="${state_dir}/consumer-init-first.log"
   local second_log="${state_dir}/consumer-init-second.log"
   local readme_log="${state_dir}/consumer-init-readme.log"
@@ -679,6 +930,9 @@ run_consumer_init_smoke() {
   assert_file_contains "${first_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
   assert_file_contains "${first_log}" 'warning: missing README.md'
   assert_file_not_contains "${first_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${missing_repo}/.issue_forge/checks/run_changed.sh"
+  assert_path_not_exists "${missing_repo}/tools/run_issue.sh"
+  assert_path_not_exists "${missing_repo}/.issue_forge/shell.sh"
   assert_path_not_exists "${missing_repo}/README.md"
   assert_path_not_exists "${missing_repo}/docs/README.md"
 
@@ -698,8 +952,144 @@ run_consumer_init_smoke() {
   assert_file_contains "${second_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
   assert_file_contains "${second_log}" 'warning: missing README.md'
   assert_file_not_contains "${second_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${missing_repo}/.issue_forge/checks/run_changed.sh"
+  assert_path_not_exists "${missing_repo}/tools/run_issue.sh"
+  assert_path_not_exists "${missing_repo}/.issue_forge/shell.sh"
   assert_path_not_exists "${missing_repo}/README.md"
   assert_path_not_exists "${missing_repo}/docs/README.md"
+
+  if (
+    cd "${missing_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh" --unknown-option
+  ) > "${invalid_option_log}" 2>&1; then
+    fail 'consumer init should fail for an unknown option'
+  fi
+  assert_file_contains "${invalid_option_log}" 'Usage: tools/consumer/init.sh [--scaffold-checks|--scaffold-run] [consumer-root]'
+
+  create_init_fixture_repo "${run_scaffold_repo}"
+  if ! (
+    cd "${run_scaffold_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh" --scaffold-run
+  ) > "${run_scaffold_log}" 2>&1; then
+    fail 'consumer init --scaffold-run should succeed for a direct-vendor consumer fixture'
+  fi
+
+  write_expected_consumer_run_wrapper "${run_scaffold_expected_wrapper}"
+  write_expected_consumer_shell_snippet "${run_scaffold_expected_shell}"
+  assert_init_gitignore_configured "${run_scaffold_repo}/.gitignore"
+  assert_file_exists "${run_scaffold_repo}/.issue_forge/project.sh"
+  assert_default_consumer_project_file "${run_scaffold_repo}/.issue_forge/project.sh"
+  assert_file_exists "${run_scaffold_repo}/tools/run_issue.sh"
+  assert_file_executable "${run_scaffold_repo}/tools/run_issue.sh"
+  assert_file_ends_with_newline "${run_scaffold_repo}/tools/run_issue.sh"
+  assert_files_equal "${run_scaffold_expected_wrapper}" "${run_scaffold_repo}/tools/run_issue.sh" 'scaffolded consumer run wrapper'
+  assert_file_exists "${run_scaffold_repo}/.issue_forge/shell.sh"
+  assert_file_ends_with_newline "${run_scaffold_repo}/.issue_forge/shell.sh"
+  assert_files_equal "${run_scaffold_expected_shell}" "${run_scaffold_repo}/.issue_forge/shell.sh" 'scaffolded consumer shell snippet'
+  assert_file_contains "${run_scaffold_log}" 'created tools/run_issue.sh'
+  assert_file_contains "${run_scaffold_log}" 'created .issue_forge/shell.sh'
+  assert_file_contains "${run_scaffold_log}" 'note: one-shot: source .issue_forge/shell.sh, then run 5'
+  assert_file_contains "${run_scaffold_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_contains "${run_scaffold_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
+  assert_file_contains "${run_scaffold_log}" 'warning: missing README.md'
+  assert_file_not_contains "${run_scaffold_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${run_scaffold_repo}/.issue_forge/checks/run_changed.sh"
+  assert_path_not_exists "${run_scaffold_repo}/README.md"
+  assert_path_not_exists "${run_scaffold_repo}/docs/README.md"
+
+  cat > "${run_scaffold_repo}/tools/run_issue.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" > "${run_scaffold_forward_log}"
+EOF
+  chmod +x "${run_scaffold_repo}/tools/run_issue.sh"
+  mkdir -p "${run_scaffold_repo}/nested/dir"
+
+  if ! (
+    cd "${run_scaffold_repo}/nested/dir"
+    bash -c '
+set -euo pipefail
+source "$1"
+declare -F run >/dev/null
+run 5
+' bash "${run_scaffold_repo}/.issue_forge/shell.sh"
+  ) > "${run_scaffold_source_log}" 2>&1; then
+    fail 'source .issue_forge/shell.sh should define run and forward arguments from a subdirectory'
+  fi
+  assert_equals '5' "$(< "${run_scaffold_forward_log}")" 'run shell snippet forwarded issue number'
+
+  cat > "${run_scaffold_repo}/.issue_forge/shell.sh" <<'EOF'
+# consumer-owned shell snippet
+run() {
+  printf 'consumer-owned run\n'
+}
+EOF
+
+  if ! (
+    cd "${temp_root}"
+    "${run_scaffold_repo}/${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh" --scaffold-run "${run_scaffold_repo}"
+  ) > "${run_scaffold_rerun_log}" 2>&1; then
+    fail 'consumer init --scaffold-run should preserve existing run scaffold files'
+  fi
+
+  assert_file_contains "${run_scaffold_rerun_log}" 'tools/run_issue.sh already exists'
+  assert_file_contains "${run_scaffold_rerun_log}" '.issue_forge/shell.sh already exists'
+  assert_file_contains "${run_scaffold_rerun_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_contains "${run_scaffold_rerun_log}" 'warning: missing README.md'
+  assert_file_not_contains "${run_scaffold_rerun_log}" 'warning: missing docs/README.md'
+  assert_file_contains "${run_scaffold_repo}/tools/run_issue.sh" "${run_scaffold_forward_log}"
+  assert_file_contains "${run_scaffold_repo}/.issue_forge/shell.sh" 'consumer-owned run'
+  assert_path_not_exists "${run_scaffold_repo}/.issue_forge/checks/run_changed.sh"
+  assert_path_not_exists "${run_scaffold_repo}/README.md"
+  assert_path_not_exists "${run_scaffold_repo}/docs/README.md"
+
+  create_init_fixture_repo "${scaffold_repo}"
+  if ! (
+    cd "${scaffold_repo}"
+    "./${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh" --scaffold-checks
+  ) > "${scaffold_log}" 2>&1; then
+    fail 'consumer init --scaffold-checks should succeed for a direct-vendor consumer fixture'
+  fi
+
+  write_expected_consumer_checks_starter "${scaffold_expected}"
+  assert_init_gitignore_configured "${scaffold_repo}/.gitignore"
+  assert_file_exists "${scaffold_repo}/.issue_forge/project.sh"
+  assert_default_consumer_project_file "${scaffold_repo}/.issue_forge/project.sh"
+  assert_file_exists "${scaffold_repo}/.issue_forge/checks/run_changed.sh"
+  assert_file_executable "${scaffold_repo}/.issue_forge/checks/run_changed.sh"
+  assert_files_equal "${scaffold_expected}" "${scaffold_repo}/.issue_forge/checks/run_changed.sh" 'scaffolded consumer checks starter'
+  assert_file_contains "${scaffold_log}" 'created .issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${scaffold_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_not_contains "${scaffold_log}" 'note: issue_forge defaults checks to ./.issue_forge/checks/run_changed.sh'
+  assert_file_contains "${scaffold_log}" 'warning: missing README.md'
+  assert_file_not_contains "${scaffold_log}" 'warning: missing docs/README.md'
+  assert_path_not_exists "${scaffold_repo}/tools/run_issue.sh"
+  assert_path_not_exists "${scaffold_repo}/.issue_forge/shell.sh"
+  assert_path_not_exists "${scaffold_repo}/README.md"
+  assert_path_not_exists "${scaffold_repo}/docs/README.md"
+
+  create_init_fixture_repo "${existing_checks_repo}"
+  mkdir -p "${existing_checks_repo}/.issue_forge/checks"
+  cat > "${existing_checks_repo}/.issue_forge/checks/run_changed.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'consumer owned checks\n'
+EOF
+  chmod +x "${existing_checks_repo}/.issue_forge/checks/run_changed.sh"
+
+  if ! (
+    cd "${temp_root}"
+    "${existing_checks_repo}/${FIXTURE_ENGINE_PATH}/tools/consumer/init.sh" --scaffold-checks "${existing_checks_repo}"
+  ) > "${existing_checks_log}" 2>&1; then
+    fail 'consumer init --scaffold-checks should preserve an existing checks file'
+  fi
+
+  assert_init_gitignore_configured "${existing_checks_repo}/.gitignore"
+  assert_file_contains "${existing_checks_repo}/.issue_forge/checks/run_changed.sh" 'consumer owned checks'
+  assert_file_contains "${existing_checks_log}" '.issue_forge/checks/run_changed.sh already exists'
+  assert_file_not_contains "${existing_checks_log}" 'warning: missing .issue_forge/checks/run_changed.sh'
+  assert_file_contains "${existing_checks_log}" 'warning: missing README.md'
+  assert_file_not_contains "${existing_checks_log}" 'warning: missing docs/README.md'
 
   create_init_fixture_repo "${readme_repo}"
   mkdir -p "${readme_repo}/.issue_forge/checks"
@@ -1166,18 +1556,26 @@ Rules:
 - Reject changes that satisfy the issue but violate AGENTS.md or source-of-truth docs.
 - Accept changes that remain consistent with docs even if the issue wording is slightly broader.
 - Focus on correctness, scope, regressions, repository rules, and doc consistency.
+- If there is any real blocker or major finding, set \`accept: no\`.
+- If there are only minor findings, \`accept: yes\` is allowed.
+- If \`accept: yes\`, then \`blocker:\` and \`major:\` must contain only \`- none\`.
+- Use the exact lowercase placeholder \`none\` for any empty section.
+- Never output \`...\` or \`- ...\`.
+- Do not add any prose before or after the required format.
+- Every real finding must be a single \`- \` bullet in the correct section.
 
-Return exactly this format:
+Return exactly this format and nothing else:
+
 accept: yes/no
 
 blocker:
-- ...
+- none
 
 major:
-- ...
+- none
 
 minor:
-- ...
+- none
 EOF
 
   cat > "${expected_prompt_dir}/fix-from-review.prompt.md" <<EOF

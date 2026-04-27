@@ -26,7 +26,7 @@
 - external consumer entrypoints は `vendor/issue_forge/tools/consumer/init.sh`、`vendor/issue_forge/tools/issue/start_from_issue.sh`、`vendor/issue_forge/tools/codex/*.sh` です。
 - external consumers は `./tools/codex` や `./tools/issue` の shim を持つ必要がありません。
 - consumer docs の primary entrypoint は `README.md` です。`docs/README.md` は追加 docs が必要な場合だけ optional です。
-- typical consumer-owned paths は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`README.md`、optional `docs/README.md`、`vendor/issue_forge` です。`tools/consumer/init.sh` は `.gitignore` を更新し、`.issue_forge/project.sh` を初期化できますが、`README.md` と `docs/README.md` は作らず、missing warning は `.issue_forge/checks/run_changed.sh` と `README.md` にだけ出します。
+- typical consumer-owned paths は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`README.md`、optional `docs/README.md`、`vendor/issue_forge` です。`tools/consumer/init.sh [--scaffold-checks|--scaffold-run] [consumer-root]` は `.gitignore` を更新し、`.issue_forge/project.sh` を初期化できます。no-flag では checks file を作らず、missing warning は `.issue_forge/checks/run_changed.sh` と `README.md` にだけ出し、`tools/run_issue.sh` や `.issue_forge/shell.sh` も作りません。`--scaffold-checks` の場合だけ `.issue_forge/checks/run_changed.sh` の最小 starter を作れます。`--scaffold-run` の場合だけ optional convenience として `tools/run_issue.sh` と `.issue_forge/shell.sh` を作れます。これらの local wrapper はなくても engine は direct vendor entrypoint で動きます。`README.md` と `docs/README.md` は作りません。
 - `.work/current_issue`、`.work/current_branch`、`.work/issues/<issue>.md`、`.work/codex/*` の path と命名は維持します。
 - review output の厳密フォーマットを維持します。
 - PR publish は deterministic な body を生成し、open PR がある場合は title/body だけを同期更新します。
