@@ -22,6 +22,7 @@ External consumer-facing entrypoints are:
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
+| `vendor/issue_forge/tools/codex/run_issue_queue.sh` | `[options] <issue_number> [issue_number...]` | Local-only sequential issue queue: process issues linearly on batch branches, run strict batch review, create one batch PR per batch, and optionally request auto-merge |
 | `vendor/issue_forge/tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or sync the PR title/body for the current issue branch without pushing new commits |
@@ -128,8 +129,20 @@ After sourcing `.issue_forge/project.sh`, the engine applies these defaults befo
 | `CODEX_FLOW_PROFILE_WRITE_REASONING` | `xhigh` |
 | `CODEX_FLOW_PROFILE_READ_SANDBOX` | `danger-full-access` |
 | `CODEX_FLOW_PROFILE_READ_REASONING` | `medium` |
+| `CODEX_FLOW_BATCH_BRANCH_PREFIX` | `batch/` |
+| `CODEX_FLOW_QUEUE_REVIEW_EVERY` | `3` |
+| `CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT` | `0` |
+| `CODEX_FLOW_BATCH_REVIEW_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_FIX_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_CHECK_FIX_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` | `5` |
+| `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` | `5` |
+| `CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS` | `900` |
+| `CODEX_FLOW_AUTO_MERGE_POLL_SECONDS` | `15` |
 
 Validation still runs after defaults. Missing or malformed values after defaulting remain hard errors.
+
+`CODEX_RUN_REASONING_EFFORT` is a narrow per-invocation override for `run_codex.sh`. When set, it must be non-empty and contain no whitespace; it replaces the selected profile reasoning value for that invocation only and does not change sandbox selection or mutate profile config.
 
 This repository’s own `.issue_forge/project.sh` may continue to set explicit self-hosted values such as:
 
@@ -147,6 +160,7 @@ Prompt behavior:
 - default prompt templates are engine-owned and live at `vendor/issue_forge/tools/codex/prompts/`
 - consumers may optionally override `CODEX_FLOW_PROMPTS_DIR`
 - `.work/codex/*.prompt.md` output paths are unchanged
+- consumers with custom `CODEX_FLOW_PROMPTS_DIR` only need the batch prompt templates when they use `run_issue_queue.sh`; missing batch templates are a hard queue error
 
 Checks behavior:
 
@@ -194,7 +208,57 @@ If checks or review artifacts do not exist yet, their section says `not availabl
 
 Changed files come from the PR branch diff against the saved fixed base commit in `.work/base_commit`. This intentionally ignores uncommitted worktree-only state and avoids the moving-base problem when `origin/main` advances after issue bootstrap. The same worktree exclusion contract applies, so `.work/` and consumer-local `vendor/issue_forge` are not listed.
 
-## 9. Git / Worktree Exclusion Contract
+## 9. Local Sequential Queue
+
+`run_issue_queue.sh` is local-only. It does not install or depend on GitHub Actions workflows, does not invoke Copilot review, does not request human reviewers, and does not add labels or projects.
+
+Usage:
+
+```bash
+vendor/issue_forge/tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
+```
+
+Options:
+
+- `--review-every <positive_integer>` sets the number of issues per batch PR; the default is `CODEX_FLOW_QUEUE_REVIEW_EVERY=3`
+- `--batch-review-effort <value>` overrides `CODEX_FLOW_BATCH_REVIEW_REASONING` for that queue run
+- `--batch-fix-effort <value>` overrides both `CODEX_FLOW_BATCH_FIX_REASONING` and `CODEX_FLOW_BATCH_CHECK_FIX_REASONING` for that queue run
+- `--auto-merge` requests auto-merge for each batch PR and waits for it to merge before starting the next batch
+- `--draft` creates draft batch PRs; it cannot be combined with `--auto-merge`
+
+The queue processes issues strictly in the input order. It creates one deterministic batch branch per batch, named `${CODEX_FLOW_BATCH_BRANCH_PREFIX}<first_issue>-<last_issue>`; with defaults this is `batch/<first_issue>-<last_issue>`. The branch is created from `CODEX_FLOW_BASE_REF` after fetching `origin/${CODEX_FLOW_BASE_BRANCH}`. If the planned branch already exists locally or remotely, the queue fails before creating it.
+
+The queue never calls `tools/issue/start_from_issue.sh`. For each issue, it fetches issue context with the existing issue bootstrap helper, writes `.work/current_issue`, `.work/current_branch`, and `.work/base_commit`, records the current batch branch as `.work/current_branch`, records the current `HEAD` before that issue as `.work/base_commit`, and then runs:
+
+```bash
+CODEX_FLOW_SKIP_PUBLISH=1 vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
+```
+
+`CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, normal review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. When unset or `0`, single-issue flow publishing behavior is unchanged.
+
+After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
+
+Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
+
+If batch review returns `accept: no`, Codex runs in write mode with the batch review fix prompt, commits any resulting changes, reruns batch checks, and reruns batch review. `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` and `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` bound the loops.
+
+The queue creates one batch PR per batch. The PR title is:
+
+```text
+Batch: address issues #<first_issue>-#<last_issue>
+```
+
+The PR body includes one `Closes #<issue_number>` line per issue plus an issue list with titles from local issue context. If an open PR already exists for the batch branch and base branch, the queue reuses it and syncs the title/body.
+
+If the issue list requires more than one batch, `--auto-merge` is required. Without it, the queue fails before modifying the repository because the next batch must start from the base branch after the previous batch has merged. Auto-merge uses:
+
+```bash
+gh pr merge <pr_number> --auto --squash --delete-branch --match-head-commit <head_sha>
+```
+
+It does not use `--admin`. The queue polls `gh pr view <pr_number> --json state,mergedAt`; a closed unmerged PR or timeout is a hard error. After a batch PR merges, the queue fetches `origin/${CODEX_FLOW_BASE_BRANCH}` before creating the next batch branch.
+
+## 10. Git / Worktree Exclusion Contract
 
 The flow must explicitly exclude internal paths from git operations instead of relying on `.gitignore`.
 
@@ -231,7 +295,7 @@ vendor/issue_forge/
 
 That recommendation is separate from the explicit runtime exclusions above.
 
-## 10. Stable Invariants
+## 11. Stable Invariants
 
 The following remain part of the v1 behavior contract:
 
@@ -252,6 +316,9 @@ The following remain part of the v1 behavior contract:
 - `.work/codex/review.txt`
 - `.work/codex/fix-from-review.log`
 - `.work/codex/history/<stem>.round-<NN>.<ext>`
+- `.work/queue/lock`
+- `.work/queue/current_batch`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/`
 
 Additional invariants:
 
@@ -276,7 +343,7 @@ minor:
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed
 
-## 11. Self-Hosting and Verification
+## 12. Self-Hosting and Verification
 
 This repository itself must still support:
 
@@ -292,3 +359,4 @@ Regression coverage for the direct vendor contract lives in:
 The smoke harness must prove that a fixture consumer with no `tools/codex` and no `tools/issue` can run the full flow through `./vendor/issue_forge/tools/...`.
 It also covers `./vendor/issue_forge/tools/consumer/init.sh`, including `.gitignore` initialization, minimal `.issue_forge/project.sh` creation, no-flag warning-only behavior for missing checks/`README.md`, no warning for missing `docs/README.md`, no creation of `tools/run_issue.sh` or `.issue_forge/shell.sh` without opt-in, idempotent reruns, opt-in `--scaffold-checks` creation of the starter checks hook, opt-in `--scaffold-run` creation and preservation of the run wrapper and shell snippet, source-snippet `run 5` forwarding from a subdirectory, and preservation of existing consumer-owned checks files.
 It covers PR body generation for create and existing-PR update paths, including changed files, checks, review, and missing-artifact sections.
+It covers `CODEX_RUN_REASONING_EFFORT`, `CODEX_FLOW_SKIP_PUBLISH=1`, one-batch queue processing, batch review/fix effort selection, batch PR body generation, fail-fast multi-batch behavior without `--auto-merge`, and the absence of generated GitHub workflow files.

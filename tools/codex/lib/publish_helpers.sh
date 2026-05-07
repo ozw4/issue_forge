@@ -21,6 +21,35 @@ current_pr_url_for_branch() {
     --jq 'if length == 0 then "" else .[0].url end'
 }
 
+current_pr_number_url_for_branch() {
+  local branch_name="$1"
+  local pr_number_variable="$2"
+  local pr_url_variable="$3"
+  local pr_line
+  local pr_number=''
+  local pr_url=''
+
+  pr_line="$(
+    gh pr list \
+      --head "$branch_name" \
+      --base "$CODEX_FLOW_BASE_BRANCH" \
+      --state open \
+      --json number,url \
+      --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].url)" end'
+  )"
+
+  if [[ -n "$pr_line" ]]; then
+    IFS=$'\t' read -r pr_number pr_url <<< "$pr_line"
+    if [[ -z "$pr_number" || -z "$pr_url" ]]; then
+      printf 'Malformed PR lookup result for branch %s: %s\n' "$branch_name" "$pr_line" >&2
+      exit 1
+    fi
+  fi
+
+  printf -v "$pr_number_variable" '%s' "$pr_number"
+  printf -v "$pr_url_variable" '%s' "$pr_url"
+}
+
 read_issue_title_from_issue_file() {
   local issue_file="$1"
   local issue_title
@@ -176,6 +205,40 @@ write_issue_pr_body_file() {
   write_issue_pr_body "$issue_number" "$branch_name" "$issue_title" > "$pr_body_file"
 }
 
+write_batch_pr_body() {
+  local first_issue="$1"
+  local last_issue="$2"
+  local issue_number
+  local issue_file
+  local issue_title
+
+  shift 2
+
+  for issue_number in "$@"; do
+    printf 'Closes #%s\n' "$issue_number"
+  done
+
+  printf '\n## Issues\n'
+  for issue_number in "$@"; do
+    issue_file="$(require_issue_file "$issue_number")"
+    issue_title="$(read_issue_title_from_issue_file "$issue_file")"
+    printf -- '- #%s %s\n' "$issue_number" "$issue_title"
+  done
+
+  printf '\n'
+  printf 'Batch range: #%s-#%s\n' "$first_issue" "$last_issue"
+}
+
+write_batch_pr_body_file() {
+  local first_issue="$1"
+  local last_issue="$2"
+  local pr_body_file="$3"
+
+  shift 3
+
+  write_batch_pr_body "$first_issue" "$last_issue" "$@" > "$pr_body_file"
+}
+
 stage_issue_flow_changes() {
   local pathspec_file
 
@@ -280,4 +343,101 @@ publish_issue_results() {
   issue_title="$(read_issue_title_from_issue_file "$issue_file")"
   sync_issue_pr_for_branch "$issue_number" "$branch_name" "$issue_title" pr_url pr_action
   log_info "${pr_action} PR: ${pr_url}"
+}
+
+sync_batch_pr_for_branch() {
+  local first_issue="$1"
+  local last_issue="$2"
+  local branch_name="$3"
+  local draft_pr="$4"
+  local pr_number_variable="$5"
+  local pr_url_variable="$6"
+  local pr_action_variable="$7"
+  local existing_pr_number
+  local existing_pr_url
+  local pr_body_file
+  local pr_draft_args=()
+  local pr_number
+  local pr_title="Batch: address issues #${first_issue}-#${last_issue}"
+  local pr_url
+
+  shift 7
+
+  pr_body_file="$(mktemp)"
+  write_batch_pr_body_file "$first_issue" "$last_issue" "$pr_body_file" "$@"
+
+  current_pr_number_url_for_branch "$branch_name" existing_pr_number existing_pr_url
+  if [[ -n "$existing_pr_url" ]]; then
+    gh pr edit "$existing_pr_url" \
+      --title "$pr_title" \
+      --body-file "$pr_body_file" >/dev/null
+
+    rm -f "$pr_body_file"
+    printf -v "$pr_number_variable" '%s' "$existing_pr_number"
+    printf -v "$pr_url_variable" '%s' "$existing_pr_url"
+    printf -v "$pr_action_variable" '%s' 'updated'
+    return 0
+  fi
+
+  if [[ "$draft_pr" -eq 1 ]]; then
+    pr_draft_args+=(--draft)
+  fi
+
+  pr_url="$(
+    gh pr create \
+      "${pr_draft_args[@]}" \
+      --base "$CODEX_FLOW_BASE_BRANCH" \
+      --head "$branch_name" \
+      --title "$pr_title" \
+      --body-file "$pr_body_file"
+  )"
+
+  if [[ -z "$pr_url" ]]; then
+    rm -f "$pr_body_file"
+    printf 'gh pr create returned an empty PR URL for branch %s\n' "$branch_name" >&2
+    exit 1
+  fi
+
+  pr_number="$(gh pr view "$pr_url" --json number --jq '.number')"
+  if [[ -z "$pr_number" || ! "$pr_number" =~ ^[0-9]+$ ]]; then
+    rm -f "$pr_body_file"
+    printf 'Failed to resolve created PR number from URL: %s\n' "$pr_url" >&2
+    exit 1
+  fi
+
+  rm -f "$pr_body_file"
+  printf -v "$pr_number_variable" '%s' "$pr_number"
+  printf -v "$pr_url_variable" '%s' "$pr_url"
+  printf -v "$pr_action_variable" '%s' 'created'
+}
+
+publish_batch_results() {
+  local first_issue="$1"
+  local last_issue="$2"
+  local branch_name="$3"
+  local draft_pr="$4"
+  local pr_number_variable="$5"
+  local pr_url_variable="$6"
+  local published_pr_number
+  local published_pr_url
+  local pr_action
+
+  shift 6
+
+  log_info "pushing batch branch ${branch_name}"
+  git push --set-upstream origin "$branch_name" >/dev/null
+
+  sync_batch_pr_for_branch \
+    "$first_issue" \
+    "$last_issue" \
+    "$branch_name" \
+    "$draft_pr" \
+    published_pr_number \
+    published_pr_url \
+    pr_action \
+    "$@"
+
+  log_info "${pr_action} batch PR: ${published_pr_url}"
+  printf -v "$pr_number_variable" '%s' "$published_pr_number"
+  printf -v "$pr_url_variable" '%s' "$published_pr_url"
 }

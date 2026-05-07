@@ -12,6 +12,13 @@ required_prompt_template_names() {
     'fix-from-review'
 }
 
+required_batch_prompt_template_names() {
+  printf '%s\n' \
+    'batch-review' \
+    'fix-from-batch-review' \
+    'fix-from-batch-checks'
+}
+
 prompt_template_file_path() {
   local template_name="$1"
 
@@ -30,6 +37,21 @@ prompt_template_path() {
   fi
 
   printf '%s\n' "$template_path"
+}
+
+require_prompt_template_names() {
+  local template_name
+
+  for template_name in "$@"; do
+    prompt_template_path "$template_name" >/dev/null
+  done
+}
+
+require_batch_prompt_templates() {
+  local -a template_names=()
+
+  mapfile -t template_names < <(required_batch_prompt_template_names)
+  require_prompt_template_names "${template_names[@]}"
 }
 
 render_prompt_template() {
@@ -119,4 +141,42 @@ write_issue_flow_prompt_files() {
     ISSUE_FILE "$issue_file" \
     REVIEW_OUTPUT "$review_output" \
     ISSUE_NUMBER "$issue_number"
+}
+
+write_batch_review_prompt_file() {
+  local issues_file="$1"
+  local batch_diff="$2"
+  local batch_untracked="$3"
+  local output_path="$4"
+
+  render_prompt_template \
+    "$(prompt_template_path batch-review)" \
+    "$output_path" \
+    BATCH_ISSUES_FILE "$issues_file" \
+    BATCH_DIFF "$batch_diff" \
+    BATCH_UNTRACKED "$batch_untracked"
+}
+
+write_fix_from_batch_review_prompt_file() {
+  local issues_file="$1"
+  local batch_review_output="$2"
+  local output_path="$3"
+
+  render_prompt_template \
+    "$(prompt_template_path fix-from-batch-review)" \
+    "$output_path" \
+    BATCH_ISSUES_FILE "$issues_file" \
+    BATCH_REVIEW_OUTPUT "$batch_review_output"
+}
+
+write_fix_from_batch_checks_prompt_file() {
+  local issues_file="$1"
+  local batch_checks_log="$2"
+  local output_path="$3"
+
+  render_prompt_template \
+    "$(prompt_template_path fix-from-batch-checks)" \
+    "$output_path" \
+    BATCH_ISSUES_FILE "$issues_file" \
+    BATCH_CHECKS_LOG "$batch_checks_log"
 }

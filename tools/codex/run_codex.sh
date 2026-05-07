@@ -46,6 +46,20 @@ parse_non_negative_integer() {
   fi
 }
 
+validate_reasoning_effort_override() {
+  local value="$1"
+
+  if [[ -z "$value" ]]; then
+    printf 'CODEX_RUN_REASONING_EFFORT must be non-empty when set.\n' >&2
+    exit 1
+  fi
+
+  if [[ "$value" =~ [[:space:]] ]]; then
+    printf 'CODEX_RUN_REASONING_EFFORT must not contain whitespace: %s\n' "$value" >&2
+    exit 1
+  fi
+}
+
 is_retryable_codex_failure() {
   local output_file="$1"
 
@@ -117,5 +131,9 @@ run_codex_with_retries() {
 
 sandbox_mode="$(resolve_codex_profile_sandbox "$profile_name")"
 reasoning_effort="$(resolve_codex_profile_reasoning "$profile_name")"
+if [[ -n "${CODEX_RUN_REASONING_EFFORT+x}" ]]; then
+  validate_reasoning_effort_override "$CODEX_RUN_REASONING_EFFORT"
+  reasoning_effort="$CODEX_RUN_REASONING_EFFORT"
+fi
 
 run_codex_with_retries "$sandbox_mode" "$reasoning_effort"

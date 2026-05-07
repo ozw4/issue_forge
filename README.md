@@ -54,6 +54,7 @@ consumer repo root から次を直接実行します。
 ./vendor/issue_forge/tools/issue/start_from_issue.sh 123
 ./vendor/issue_forge/tools/codex/doctor.sh
 ./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
+./vendor/issue_forge/tools/codex/run_issue_queue.sh [options] 123 124 125
 ./vendor/issue_forge/tools/codex/continue_after_review.sh 123
 ./vendor/issue_forge/tools/codex/restart_issue_flow.sh --hard 123
 ./vendor/issue_forge/tools/codex/make_pr_only.sh 123
@@ -89,6 +90,20 @@ Closes #<issue>
 
 checks/review artifact がまだ無い `make_pr_only.sh` 経路では、その section に `not available yet` を出します。既存の open PR がある場合は `gh pr edit ... --title ... --body-file ...` で title/body だけを同期し、draft/open state、reviewers、labels は変更しません。新規 PR 作成時は従来どおり `CODEX_FLOW_PR_DRAFT_DEFAULT` を守ります。
 
+## Local issue queue
+
+`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` で既存の single-issue flow を再利用します。issue ごとの実装、checks、通常 review、fix loop、commit は従来の `run_issue_flow.sh` が担当し、queue は issue PR を作らず、batch review 後に batch PR を 1 つ作ります。
+
+```bash
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --review-every 3 123 124 125
+```
+
+`--review-every N` は 1 batch PR あたりの issue 数です。default は `CODEX_FLOW_QUEUE_REVIEW_EVERY=3` です。branch 名は `batch/<first_issue>-<last_issue>`、artifact は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。
+
+複数 batch が必要な issue list では、`--auto-merge` が必須です。次の batch は前 batch PR が merge された後の updated base branch から始める必要があるためです。`--auto-merge` は `gh pr merge <number> --auto --squash --delete-branch --match-head-commit <head_sha>` を使い、merge 完了まで polling します。`--draft` と `--auto-merge` は併用できません。batch PR は default で non-draft ですが、`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=1` または `--draft` で draft にできます。
+
+batch review は通常 review と同じ `accept: yes/no` schema を使い、correctness、regressions、cross-issue interaction、scope、tests、architecture、docs/contract、shell safety、security/GitHub CLI merge risk を明示的に確認します。`--batch-review-effort` は batch review の reasoning を、`--batch-fix-effort` は batch review fix と batch checks fix の reasoning をその queue run だけで override します。custom `CODEX_FLOW_PROMPTS_DIR` を使う consumer は、queue を使う場合だけ batch prompt templates も用意する必要があります。
+
 ## Defaults
 
 consumer の `.issue_forge/project.sh` は空でも構いません。default は engine 側で補完されます。
@@ -105,8 +120,20 @@ consumer の `.issue_forge/project.sh` は空でも構いません。default は
 | `CODEX_FLOW_PROFILE_WRITE_REASONING` | `xhigh` |
 | `CODEX_FLOW_PROFILE_READ_SANDBOX` | `danger-full-access` |
 | `CODEX_FLOW_PROFILE_READ_REASONING` | `medium` |
+| `CODEX_FLOW_BATCH_BRANCH_PREFIX` | `batch/` |
+| `CODEX_FLOW_QUEUE_REVIEW_EVERY` | `3` |
+| `CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT` | `0` |
+| `CODEX_FLOW_BATCH_REVIEW_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_FIX_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_CHECK_FIX_REASONING` | `xhigh` |
+| `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` | `5` |
+| `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` | `5` |
+| `CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS` | `900` |
+| `CODEX_FLOW_AUTO_MERGE_POLL_SECONDS` | `15` |
 
 consumer-specific prompts を使いたい場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。
+
+`CODEX_RUN_REASONING_EFFORT` は `run_codex.sh` の per-invocation override です。set されている場合、その 1 回だけ profile の reasoning value より優先されます。値は non-empty かつ whitespace 無しである必要があり、sandbox profile は変更しません。
 
 ## Stable invariants
 

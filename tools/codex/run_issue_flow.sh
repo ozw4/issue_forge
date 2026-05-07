@@ -38,14 +38,40 @@ run_implementation_phase() {
   fi
 }
 
+resolve_skip_publish_flag() {
+  local value='0'
+
+  if [[ -n "${CODEX_FLOW_SKIP_PUBLISH+x}" ]]; then
+    value="$CODEX_FLOW_SKIP_PUBLISH"
+  fi
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    printf 'CODEX_FLOW_SKIP_PUBLISH must be a non-negative integer: %s\n' "$value" >&2
+    exit 1
+  fi
+
+  if [[ "$value" -eq 0 ]]; then
+    printf '0\n'
+    return
+  fi
+
+  printf '1\n'
+}
+
 if [[ "$#" -gt 1 ]]; then
   printf 'Usage: %s [issue_number]\n' "$0" >&2
   exit 1
 fi
 
 require_command awk
+require_command git
+require_command mktemp
 require_command sed
-require_publish_commands
+
+skip_publish="$(resolve_skip_publish_flag)"
+if [[ "$skip_publish" -eq 0 ]]; then
+  require_publish_commands
+fi
 
 enter_repo_root
 
@@ -96,4 +122,9 @@ run_implementation_phase
 ensure_checks_pass
 ensure_review_accepted
 commit_issue_changes "chore: address issue #${issue_number}" 1 'Loop finished without repository changes to commit.'
+if [[ "$skip_publish" -ne 0 ]]; then
+  log_info 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
+  exit 0
+fi
+
 publish_issue_results "$issue_number" "$current_branch"

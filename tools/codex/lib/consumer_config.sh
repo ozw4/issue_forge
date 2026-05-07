@@ -15,6 +15,38 @@ require_consumer_config_value() {
   fi
 }
 
+validate_non_negative_integer_config() {
+  local variable_name="$1"
+  local description="$2"
+  local value="${!variable_name-}"
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    issue_forge_consumer_config_error "${description} must be a non-negative integer: ${value}"
+  fi
+}
+
+validate_positive_integer_config() {
+  local variable_name="$1"
+  local description="$2"
+  local value="${!variable_name-}"
+
+  validate_non_negative_integer_config "$variable_name" "$description"
+  if [[ "$value" -eq 0 ]]; then
+    issue_forge_consumer_config_error "${description} must be a positive integer: ${value}"
+  fi
+}
+
+validate_nonempty_no_whitespace_config() {
+  local variable_name="$1"
+  local description="$2"
+  local value="${!variable_name-}"
+
+  require_consumer_config_value "$variable_name" "$description"
+  if [[ "$value" =~ [[:space:]] ]]; then
+    issue_forge_consumer_config_error "${description} must not contain whitespace: ${value}"
+  fi
+}
+
 validate_consumer_project_config() {
   require_consumer_config_value CODEX_FLOW_BASE_REF 'base ref'
   require_consumer_config_value CODEX_FLOW_BASE_BRANCH 'base branch'
@@ -26,10 +58,28 @@ validate_consumer_project_config() {
   require_consumer_config_value CODEX_FLOW_PROFILE_WRITE_REASONING 'write profile reasoning'
   require_consumer_config_value CODEX_FLOW_PROFILE_READ_SANDBOX 'read profile sandbox'
   require_consumer_config_value CODEX_FLOW_PROFILE_READ_REASONING 'read profile reasoning'
+  require_consumer_config_value CODEX_FLOW_BATCH_BRANCH_PREFIX 'batch branch prefix'
+  require_consumer_config_value CODEX_FLOW_QUEUE_REVIEW_EVERY 'queue review interval'
+  require_consumer_config_value CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT 'batch PR draft default'
+  require_consumer_config_value CODEX_FLOW_BATCH_REVIEW_REASONING 'batch review reasoning'
+  require_consumer_config_value CODEX_FLOW_BATCH_FIX_REASONING 'batch fix reasoning'
+  require_consumer_config_value CODEX_FLOW_BATCH_CHECK_FIX_REASONING 'batch check fix reasoning'
+  require_consumer_config_value CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS 'batch review max fix rounds'
+  require_consumer_config_value CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS 'batch check max fix rounds'
+  require_consumer_config_value CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS 'auto-merge wait seconds'
+  require_consumer_config_value CODEX_FLOW_AUTO_MERGE_POLL_SECONDS 'auto-merge poll seconds'
 
-  if [[ ! "${CODEX_FLOW_PR_DRAFT_DEFAULT}" =~ ^[0-9]+$ ]]; then
-    issue_forge_consumer_config_error "PR draft default must be a non-negative integer: ${CODEX_FLOW_PR_DRAFT_DEFAULT}"
-  fi
+  validate_non_negative_integer_config CODEX_FLOW_PR_DRAFT_DEFAULT 'PR draft default'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_BRANCH_PREFIX 'batch branch prefix'
+  validate_positive_integer_config CODEX_FLOW_QUEUE_REVIEW_EVERY 'queue review interval'
+  validate_non_negative_integer_config CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT 'batch PR draft default'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_REVIEW_REASONING 'batch review reasoning'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_FIX_REASONING 'batch fix reasoning'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_CHECK_FIX_REASONING 'batch check fix reasoning'
+  validate_non_negative_integer_config CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS 'batch review max fix rounds'
+  validate_non_negative_integer_config CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS 'batch check max fix rounds'
+  validate_positive_integer_config CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS 'auto-merge wait seconds'
+  validate_positive_integer_config CODEX_FLOW_AUTO_MERGE_POLL_SECONDS 'auto-merge poll seconds'
 }
 
 apply_consumer_project_defaults() {
@@ -43,6 +93,16 @@ apply_consumer_project_defaults() {
   : "${CODEX_FLOW_PROFILE_WRITE_REASONING:=xhigh}"
   : "${CODEX_FLOW_PROFILE_READ_SANDBOX:=danger-full-access}"
   : "${CODEX_FLOW_PROFILE_READ_REASONING:=medium}"
+  : "${CODEX_FLOW_BATCH_BRANCH_PREFIX:=batch/}"
+  : "${CODEX_FLOW_QUEUE_REVIEW_EVERY:=3}"
+  : "${CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT:=0}"
+  : "${CODEX_FLOW_BATCH_REVIEW_REASONING:=xhigh}"
+  : "${CODEX_FLOW_BATCH_FIX_REASONING:=xhigh}"
+  : "${CODEX_FLOW_BATCH_CHECK_FIX_REASONING:=xhigh}"
+  : "${CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS:=5}"
+  : "${CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS:=5}"
+  : "${CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS:=900}"
+  : "${CODEX_FLOW_AUTO_MERGE_POLL_SECONDS:=15}"
 }
 
 issue_forge_load_consumer_config() {

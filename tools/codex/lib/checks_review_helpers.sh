@@ -99,7 +99,10 @@ ensure_checks_pass() {
   done
 }
 
-extract_review_output() {
+extract_structured_review_output_file() {
+  local raw_output_file="$1"
+  local structured_output_file="$2"
+
   awk '
     /^accept: (yes|no)$/ { start = NR }
     { lines[NR] = $0 }
@@ -111,7 +114,11 @@ extract_review_output() {
         print lines[i]
       }
     }
-  ' "$review_raw_output" > "$review_output"
+  ' "$raw_output_file" > "$structured_output_file"
+}
+
+extract_review_output() {
+  extract_structured_review_output_file "$review_raw_output" "$review_output"
 
   archive_round_file "$review_output" "review" "$review_run_round" ".txt"
 }
@@ -241,10 +248,11 @@ ensure_valid_review_output() {
   fi
 }
 
-review_accepted() {
+review_output_accepted() {
+  local file="$1"
   local accept_value
 
-  accept_value="$(sed -n '1s/^accept: //p' "$review_output")"
+  accept_value="$(sed -n '1s/^accept: //p' "$file")"
   case "$accept_value" in
     yes)
       return 0
@@ -253,10 +261,14 @@ review_accepted() {
       return 1
       ;;
     *)
-      printf 'Invalid review accept value in %s\n' "$review_output" >&2
+      printf 'Invalid review accept value in %s\n' "$file" >&2
       exit 1
       ;;
   esac
+}
+
+review_accepted() {
+  review_output_accepted "$review_output"
 }
 
 run_fix_from_review_round() {

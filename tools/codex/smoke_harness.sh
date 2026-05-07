@@ -10,6 +10,9 @@ readonly REAL_GIT
 readonly ISSUE_NUMBER=40
 readonly ISSUE_TITLE='Regression Harness Issue'
 readonly ISSUE_URL='https://example.test/issues/40'
+readonly QUEUE_ISSUE_NUMBER=41
+readonly QUEUE_ISSUE_TITLE='Queue Follow-up Issue'
+readonly QUEUE_ISSUE_URL='https://example.test/issues/41'
 readonly UTF8_PR_BODY_TITLE='Regression Harness Issue 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀'
 readonly UTF8_CHECKS_LINE='checks passed with emoji 🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪'
 readonly FIXTURE_ENGINE_PATH='vendor/issue_forge'
@@ -92,6 +95,22 @@ assert_file_not_contains() {
 
   if grep -Fq -- "$pattern" "$path"; then
     printf '[smoke] expected %s to not contain: %s\n' "$path" "$pattern" >&2
+    exit 1
+  fi
+}
+
+assert_file_order() {
+  local path="$1"
+  local first_pattern="$2"
+  local second_pattern="$3"
+  local first_line
+  local second_line
+
+  first_line="$(grep -Fn -- "$first_pattern" "$path" | head -n 1 | cut -d: -f1 || true)"
+  second_line="$(grep -Fn -- "$second_pattern" "$path" | head -n 1 | cut -d: -f1 || true)"
+
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    printf '[smoke] expected %s to contain %s before %s\n' "$path" "$first_pattern" "$second_pattern" >&2
     exit 1
   fi
 }
@@ -596,7 +615,9 @@ clear_command_logs() {
 reset_flow_counters() {
   rm -f \
     "${state_dir}/checks-count.txt" \
+    "${state_dir}/batch-review-count.txt" \
     "${state_dir}/fix-checks-count.txt" \
+    "${state_dir}/fix-batch-review-count.txt" \
     "${state_dir}/fix-review-count.txt" \
     "${state_dir}/implementation-count.txt" \
     "${state_dir}/review-count.txt" \
@@ -717,24 +738,57 @@ write_flag_value_to_file() {
   exit 1
 }
 
+flag_value() {
+  local flag="\$1"
+  shift
+  local previous=''
+  local value
+
+  for value in "\$@"; do
+    if [[ "\$previous" == "\$flag" ]]; then
+      printf '%s\n' "\$value"
+      return 0
+    fi
+    previous="\$value"
+  done
+
+  return 1
+}
+
 if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
+  issue_number="\$3"
+  case "\$issue_number" in
+    ${ISSUE_NUMBER})
+      issue_title='${ISSUE_TITLE}'
+      issue_url='${ISSUE_URL}'
+      ;;
+    ${QUEUE_ISSUE_NUMBER})
+      issue_title='${QUEUE_ISSUE_TITLE}'
+      issue_url='${QUEUE_ISSUE_URL}'
+      ;;
+    *)
+      printf 'Unsupported issue number: %s\n' "\$issue_number" >&2
+      exit 1
+      ;;
+  esac
+
   if [[ " \$* " == *" --jq .title "* ]]; then
-    printf '%s\n' "${ISSUE_TITLE}"
+    printf '%s\n' "\$issue_title"
     exit 0
   fi
 
   cat <<OUT
-# Issue #${ISSUE_NUMBER}
+# Issue #\${issue_number}
 
-Title: ${ISSUE_TITLE}
-URL: ${ISSUE_URL}
+Title: \${issue_title}
+URL: \${issue_url}
 
 ## Body
 **Kind**
 - refactor
 
 **Problem / Goal**
-Smoke harness fixture issue body.
+Smoke harness fixture issue body for #\${issue_number}.
 OUT
   exit 0
 fi
@@ -745,6 +799,18 @@ if [[ "\$#" -ge 2 && "\$1" == "auth" && "\$2" == "status" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
+  head_value="\$(flag_value '--head' "\$@" || true)"
+  if [[ "\$head_value" == batch/* ]]; then
+    if [[ -f "${state_dir}/batch-pr-url.txt" ]]; then
+      printf '400\t'
+      cat "${state_dir}/batch-pr-url.txt"
+      exit 0
+    fi
+
+    printf '\n'
+    exit 0
+  fi
+
   if [[ -f "${state_dir}/pr-url.txt" ]]; then
     cat "${state_dir}/pr-url.txt"
     exit 0
@@ -755,6 +821,15 @@ if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "create" ]]; then
+  head_value="\$(flag_value '--head' "\$@" || true)"
+  if [[ "\$head_value" == batch/* ]]; then
+    copy_flag_value_to_file '--body-file' "${state_dir}/batch-pr-create-body.txt" "\$@"
+    write_flag_value_to_file '--title' "${state_dir}/batch-pr-create-title.txt" "\$@"
+    printf 'https://example.test/pr/400\n' > "${state_dir}/batch-pr-url.txt"
+    cat "${state_dir}/batch-pr-url.txt"
+    exit 0
+  fi
+
   copy_flag_value_to_file '--body-file' "${state_dir}/pr-create-body.txt" "\$@"
   write_flag_value_to_file '--title' "${state_dir}/pr-create-title.txt" "\$@"
   printf 'https://example.test/pr/${ISSUE_NUMBER}\n' > "${state_dir}/pr-url.txt"
@@ -763,8 +838,34 @@ if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "create" ]]; then
 fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "edit" ]]; then
+  if [[ "\$3" == "https://example.test/pr/400" ]]; then
+    copy_flag_value_to_file '--body-file' "${state_dir}/batch-pr-edit-body.txt" "\$@"
+    write_flag_value_to_file '--title' "${state_dir}/batch-pr-edit-title.txt" "\$@"
+    exit 0
+  fi
+
   copy_flag_value_to_file '--body-file' "${state_dir}/pr-edit-body.txt" "\$@"
   write_flag_value_to_file '--title' "${state_dir}/pr-edit-title.txt" "\$@"
+  exit 0
+fi
+
+if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "view" ]]; then
+  if [[ "\$3" == "https://example.test/pr/400" && " \$* " == *" --json number "* ]]; then
+    printf '400\n'
+    exit 0
+  fi
+
+  if [[ "\$3" == "400" && " \$* " == *" --json state,mergedAt "* ]]; then
+    printf 'OPEN\t\n'
+    exit 0
+  fi
+
+  printf 'Unsupported gh pr view invocation: %s\n' "\$*" >&2
+  exit 1
+fi
+
+if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "merge" ]]; then
+  printf 'merged\n' > "${state_dir}/batch-pr-merge.txt"
   exit 0
 fi
 
@@ -799,6 +900,49 @@ if [[ "\$#" -lt 1 || "\$1" != "exec" ]]; then
 fi
 
 case "\$prompt" in
+  *"strict batch review session"*)
+    batch_review_count="\$(increment_counter "${state_dir}/batch-review-count.txt")"
+    if [[ "\$batch_review_count" -eq 1 ]]; then
+      cat <<'OUT'
+accept: no
+
+blocker:
+- none
+
+major:
+- [cross-issue] smoke harness forces one batch review fix round
+
+minor:
+- none
+OUT
+      exit 0
+    fi
+
+    cat <<'OUT'
+accept: yes
+
+blocker:
+- none
+
+major:
+- none
+
+minor:
+- none
+OUT
+    exit 0
+    ;;
+  *"Make the required batch-review fixes, then stop."*)
+    fix_batch_review_count="\$(increment_counter "${state_dir}/fix-batch-review-count.txt")"
+    printf 'batch review fix round %s\n' "\$fix_batch_review_count" >> smoke-target.txt
+    printf 'applied batch review fix round %s\n' "\$fix_batch_review_count"
+    exit 0
+    ;;
+  *"Make the required batch-check fixes, then stop."*)
+    printf 'batch checks fix\n' >> smoke-target.txt
+    printf 'applied batch checks fix\n'
+    exit 0
+    ;;
   *"Return exactly this format"*)
     review_count="\$(increment_counter "${state_dir}/review-count.txt")"
     if [[ "\$review_count" -eq 1 ]]; then
@@ -1172,6 +1316,40 @@ run_make_pr_only_smoke() {
   fi
 }
 
+run_issue_flow_skip_publish_smoke() {
+  local previous_head
+  local current_head
+  local skip_publish_log="${state_dir}/skip-publish.log"
+
+  log 'running CODEX_FLOW_SKIP_PUBLISH smoke'
+  clear_command_logs
+  reset_flow_counters
+  previous_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
+
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_flow.sh" "${ISSUE_NUMBER}"
+  ) > "${skip_publish_log}" 2>&1; then
+    cat "${skip_publish_log}" >&2
+    fail 'CODEX_FLOW_SKIP_PUBLISH=1 run_issue_flow.sh should succeed'
+  fi
+
+  current_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
+  if [[ "${current_head}" == "${previous_head}" ]]; then
+    fail 'CODEX_FLOW_SKIP_PUBLISH=1 should still commit issue flow changes'
+  fi
+
+  assert_file_contains "${skip_publish_log}" 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
+  assert_equals "chore: address issue #${ISSUE_NUMBER}" "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'skip publish commit message'
+  assert_file_not_contains "${state_dir}/git.log" "push --set-upstream origin issue/${ISSUE_NUMBER}-regression-harness-issue"
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr edit'
+}
+
 write_pr_body_for_current_issue() {
   local body_path="$1"
 
@@ -1316,6 +1494,7 @@ run_run_codex_smoke() {
   read_prompt="${prompt_dir}/read.prompt.md"
   printf 'write prompt\n' > "${write_prompt}"
   printf 'read prompt\n' > "${read_prompt}"
+  : > "${state_dir}/codex.log"
 
   write_output="$(
     PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" write "${write_prompt}"
@@ -1323,11 +1502,22 @@ run_run_codex_smoke() {
   read_output="$(
     PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" read "${read_prompt}"
   )"
+  override_output="$(
+    PATH="${stub_dir}:$PATH" \
+      CODEX_RUN_REASONING_EFFORT=override_effort \
+      "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" write "${write_prompt}"
+  )"
+  post_override_write_output="$(
+    PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" write "${write_prompt}"
+  )"
 
   assert_equals 'stub codex ok' "${write_output}" 'write mode stdout'
   assert_equals 'stub codex ok' "${read_output}" 'read mode stdout'
-  assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=xhigh'
-  assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium'
+  assert_equals 'stub codex ok' "${override_output}" 'override write mode stdout'
+  assert_equals 'stub codex ok' "${post_override_write_output}" 'post-override write mode stdout'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=xhigh' '2' 'write reasoning profile count'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium' '1' 'read reasoning profile count'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=override_effort' '1' 'reasoning override count'
 
   invalid_mode_log="${state_dir}/invalid-mode.log"
   if PATH="${stub_dir}:$PATH" "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" invalid "${write_prompt}" > "${invalid_mode_log}" 2>&1; then
@@ -1611,6 +1801,7 @@ run_issue_flow_smoke() {
   "${REAL_GIT}" -C "${repo_dir}" add .gitignore
   "${REAL_GIT}" -C "${repo_dir}" commit -m 'fixture: ignore managed paths' >/dev/null
   clear_command_logs
+  reset_flow_counters
 
   (
     cd "${repo_dir}"
@@ -1766,6 +1957,106 @@ run_continue_after_review_smoke() {
   assert_commit_excludes_internal_paths HEAD~1
 }
 
+run_issue_queue_fail_fast_smoke() {
+  local fail_fast_log="${state_dir}/queue-fail-fast.log"
+  local current_branch
+  local current_head
+
+  log 'running issue queue fail-fast smoke'
+  clear_command_logs
+  current_branch="$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)"
+  current_head="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
+
+  if (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --review-every 1 "${ISSUE_NUMBER}" "${QUEUE_ISSUE_NUMBER}"
+  ) > "${fail_fast_log}" 2>&1; then
+    fail 'run_issue_queue.sh should fail before modifying files when multiple batches are requested without --auto-merge'
+  fi
+
+  assert_file_contains "${fail_fast_log}" 'Multiple batches require --auto-merge'
+  assert_equals "${current_branch}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'fail-fast current branch'
+  assert_equals "${current_head}" "$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)" 'fail-fast HEAD'
+  assert_path_not_exists "${repo_dir}/.work/queue"
+  if "${REAL_GIT}" -C "${repo_dir}" show-ref --verify --quiet "refs/heads/batch/${ISSUE_NUMBER}-${ISSUE_NUMBER}"; then
+    fail 'fail-fast queue should not create the first batch branch'
+  fi
+  if "${REAL_GIT}" -C "${repo_dir}" show-ref --verify --quiet "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"; then
+    fail 'fail-fast queue should not create the second batch branch'
+  fi
+}
+
+run_issue_queue_smoke() {
+  local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  local queue_log="${state_dir}/queue.log"
+
+  log 'running issue queue smoke'
+  clear_command_logs
+  reset_flow_counters
+
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" \
+        --review-every 2 \
+        --batch-review-effort queue_review \
+        --batch-fix-effort queue_fix \
+        "${QUEUE_ISSUE_NUMBER}" "${ISSUE_NUMBER}"
+  ) > "${queue_log}" 2>&1; then
+    cat "${queue_log}" >&2
+    fail 'run_issue_queue.sh should succeed for one batch'
+  fi
+
+  assert_equals "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'queue batch branch'
+  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} origin/main"
+  assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${QUEUE_ISSUE_NUMBER}"
+  assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER}"
+  assert_file_not_contains "${state_dir}/gh.log" '--head issue/'
+  assert_file_contains "${state_dir}/gh.log" "pr create --base main --head batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  assert_equals "Batch: address issues #${QUEUE_ISSUE_NUMBER}-#${ISSUE_NUMBER}" "$(< "${state_dir}/batch-pr-create-title.txt")" 'batch PR title'
+  assert_file_contains "${state_dir}/batch-pr-create-body.txt" "Closes #${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/batch-pr-create-body.txt" "Closes #${ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/batch-pr-create-body.txt" "#${QUEUE_ISSUE_NUMBER} ${QUEUE_ISSUE_TITLE}"
+  assert_file_contains "${state_dir}/batch-pr-create-body.txt" "#${ISSUE_NUMBER} ${ISSUE_TITLE}"
+
+  assert_file_exists "${batch_dir}/issues.txt"
+  assert_file_order "${batch_dir}/issues.txt" "# Issue #${QUEUE_ISSUE_NUMBER}" "# Issue #${ISSUE_NUMBER}"
+  assert_file_exists "${batch_dir}/base_commit"
+  assert_file_exists "${batch_dir}/head_commit"
+  assert_file_exists "${batch_dir}/changed-files.txt"
+  assert_file_exists "${batch_dir}/batch.diff"
+  assert_file_exists "${batch_dir}/batch.untracked.txt"
+  assert_file_exists "${batch_dir}/checks.log"
+  assert_file_exists "${batch_dir}/batch-review.prompt.md"
+  assert_file_exists "${batch_dir}/batch-review.raw.txt"
+  assert_file_exists "${batch_dir}/batch-review.txt"
+  assert_file_exists "${batch_dir}/fix-from-batch-review.prompt.md"
+  assert_file_exists "${batch_dir}/fix-from-batch-review.log"
+  assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
+  assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
+  assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md"
+  assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md"
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${ISSUE_NUMBER}"
+  assert_file_contains "${batch_dir}/batch-review.txt" 'accept: yes'
+  assert_file_contains "${batch_dir}/fix-from-batch-review.log" 'applied batch review fix round 1'
+  assert_file_contains "${repo_dir}/smoke-target.txt" 'batch review fix round 1'
+  assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=queue_review'
+  assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=queue_fix'
+  assert_file_contains "${state_dir}/codex.log" 'strict batch review session'
+  assert_file_contains "${state_dir}/codex.log" 'Make the required batch-review fixes, then stop.'
+  assert_file_contains "${queue_log}" 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
+  assert_file_contains "${state_dir}/run-changed-args.txt" "$(< "${batch_dir}/base_commit")"
+  assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
+  assert_commit_includes_path HEAD 'smoke-target.txt'
+  assert_commit_excludes_internal_paths HEAD
+}
+
 run_vendor_worktree_visibility_smoke() {
   local status_log="${state_dir}/vendor-visibility.status.txt"
   local review_diff_log="${state_dir}/vendor-visibility.review.diff"
@@ -1812,6 +2103,20 @@ git diff --cached --name-only > "'"${staged_log}"'"
   assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
 }
 
+run_no_workflow_file_smoke() {
+  local workflow_file
+
+  log 'running no workflow file smoke'
+  assert_path_not_exists "${repo_dir}/.github/workflows"
+
+  if [[ -d "${REPO_ROOT}/.github/workflows" ]]; then
+    workflow_file="$(find "${REPO_ROOT}/.github/workflows" -type f | head -n 1)"
+    if [[ -n "${workflow_file}" ]]; then
+      fail "expected no GitHub workflow files to exist, found ${workflow_file}"
+    fi
+  fi
+}
+
 cleanup() {
   if [[ -n "${temp_root:-}" && -d "${temp_root}" ]]; then
     rm -rf "${temp_root}"
@@ -1826,6 +2131,7 @@ main() {
   run_start_from_issue_smoke
   advance_origin_main_after_bootstrap
   run_make_pr_only_smoke
+  run_issue_flow_skip_publish_smoke
   run_pr_body_utf8_smoke
   run_pr_body_review_count_smoke
   run_doctor_smoke
@@ -1836,7 +2142,10 @@ main() {
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
+  run_issue_queue_fail_fast_smoke
+  run_issue_queue_smoke
   run_vendor_worktree_visibility_smoke
+  run_no_workflow_file_smoke
   log 'all smoke scenarios passed'
 }
 

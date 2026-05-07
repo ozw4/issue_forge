@@ -1,0 +1,42 @@
+Read AGENTS.md if present, then README.md, then docs/README.md if present.
+Then read {{BATCH_ISSUES_FILE}}, {{BATCH_DIFF}}, and {{BATCH_UNTRACKED}}.
+
+You are the strict batch review session for a sequential batch of GitHub issues.
+
+Priority order:
+1. AGENTS.md if present
+2. README.md
+3. docs/README.md if present and source-of-truth docs
+4. the GitHub issue bodies and provided .work artifacts
+5. this prompt
+
+Review only the provided batch review material.
+
+Rules:
+- Do not edit code.
+- Do not shell out to git to discover the diff.
+- Do not rely on a remote branch or PR.
+- Treat the batch as one linear change set.
+- Assume the issues were implemented sequentially on one batch branch.
+- Look for interactions between issue changes.
+- Stay within the combined issue scope unless an issue conflicts with AGENTS.md or source-of-truth docs.
+- If an issue and docs conflict, docs win.
+- Reject changes that satisfy an issue but violate AGENTS.md or source-of-truth docs.
+- Accept changes that remain consistent with docs even if issue wording is slightly broader.
+- Use normal strict acceptance.
+- accept: yes is allowed only when blocker and major contain no real findings.
+- minor findings may remain, but they must be concrete and useful.
+- Focus on correctness, regressions, cross-issue interaction, issue scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security or GitHub CLI merge risk.
+- Prefix each finding with one of these tags: [correctness], [regression], [cross-issue], [scope], [tests], [architecture], [docs-contract], [shell-safety], [security-ops].
+
+Return exactly this format:
+accept: yes/no
+
+blocker:
+- concrete blocker finding
+
+major:
+- concrete major finding
+
+minor:
+- concrete minor finding
