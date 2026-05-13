@@ -102,30 +102,45 @@ ensure_checks_pass() {
 extract_structured_review_output_file() {
   local raw_output_file="$1"
   local structured_output_file="$2"
+  local sanitized_output
+  local candidate_output
+  local found_candidate=0
+  local line_number
 
-  sanitize_codex_runtime_logs "$raw_output_file" | awk '
-    !start {
-      if ($0 ~ /^accept: (yes|no)$/) {
-        start = 1
-        if (!invalid_prefix) {
-          print
-        }
-        next
-      }
-      invalid_prefix = 1
-      next
-    }
-    {
-      if (!invalid_prefix) {
-        print
-      }
-    }
-    END {
-      if (!start || invalid_prefix) {
-        exit 1
-      }
-    }
-  ' > "$structured_output_file"
+  sanitized_output="$(mktemp)"
+  candidate_output="$(mktemp)"
+
+  if ! sanitize_codex_runtime_logs "$raw_output_file" > "$sanitized_output"; then
+    rm -f "$sanitized_output" "$candidate_output"
+    return 1
+  fi
+
+  if head -n 1 "$sanitized_output" | grep -Eq '^accept: (yes|no)$'; then
+    cp "$sanitized_output" "$structured_output_file"
+    rm -f "$sanitized_output" "$candidate_output"
+    return 0
+  fi
+
+  if ! is_codex_transcript_output "$sanitized_output"; then
+    rm -f "$sanitized_output" "$candidate_output"
+    return 1
+  fi
+
+  while IFS=: read -r line_number _; do
+    if [[ -z "$line_number" ]]; then
+      continue
+    fi
+
+    if extract_review_candidate_from_line "$sanitized_output" "$line_number" > "$candidate_output" \
+      && validate_review_output "$candidate_output" \
+      && validate_review_output_semantics "$candidate_output"; then
+      cp "$candidate_output" "$structured_output_file"
+      found_candidate=1
+    fi
+  done < <(grep -nE '^accept: (yes|no)$' "$sanitized_output" || true)
+
+  rm -f "$sanitized_output" "$candidate_output"
+  [[ "$found_candidate" -eq 1 ]]
 }
 
 sanitize_codex_runtime_logs() {
@@ -139,6 +154,115 @@ sanitize_codex_runtime_logs() {
       print
     }
   ' "$raw_output_file"
+}
+
+is_codex_transcript_output() {
+  local sanitized_output_file="$1"
+
+  grep -Eq '^(Reading prompt from stdin[.]*|OpenAI Codex)' "$sanitized_output_file"
+}
+
+extract_review_candidate_from_line() {
+  local sanitized_output_file="$1"
+  local start_line="$2"
+
+  awk -v start_line="$start_line" '
+    NR < start_line {
+      next
+    }
+    NR == start_line {
+      if ($0 !~ /^accept: (yes|no)$/) {
+        exit 1
+      }
+      print
+      state = "accept-gap"
+      next
+    }
+    state == "accept-gap" {
+      if ($0 != "") {
+        exit 1
+      }
+      print
+      state = "blocker-header"
+      next
+    }
+    state == "blocker-header" {
+      if ($0 != "blocker:") {
+        exit 1
+      }
+      print
+      state = "blocker"
+      next
+    }
+    state == "blocker" {
+      if ($0 == "") {
+        print
+        state = "major-header"
+        next
+      }
+      if ($0 ~ /^- /) {
+        print
+        next
+      }
+      exit 1
+    }
+    state == "major-header" {
+      if ($0 != "major:") {
+        exit 1
+      }
+      print
+      state = "major"
+      next
+    }
+    state == "major" {
+      if ($0 == "") {
+        print
+        state = "minor-header"
+        next
+      }
+      if ($0 ~ /^- /) {
+        print
+        next
+      }
+      exit 1
+    }
+    state == "minor-header" {
+      if ($0 != "minor:") {
+        exit 1
+      }
+      print
+      state = "minor"
+      next
+    }
+    state == "minor" {
+      if ($0 == "" || $0 ~ /^- /) {
+        print
+        next
+      }
+      exit 0
+    }
+    {
+      exit 1
+    }
+    END {
+      if (state != "minor") {
+        exit 1
+      }
+    }
+  ' "$sanitized_output_file" | awk '
+    {
+      lines[NR] = $0
+    }
+    END {
+      end = NR
+      while (end > 0 && lines[end] == "") {
+        end -= 1
+      }
+      for (i = 1; i <= end; i++) {
+        print lines[i]
+      }
+    }
+  '
 }
 
 extract_review_output() {

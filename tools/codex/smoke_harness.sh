@@ -1669,6 +1669,8 @@ run_review_output_validation_smoke() {
   local runtime_after_output="${state_dir}/review-runtime-after.txt"
   local runtime_after_raw="${state_dir}/review-runtime-after.raw.txt"
   local runtime_fixture="${state_dir}/review-runtime-fixture.txt"
+  local transcript_output="${state_dir}/review-transcript.txt"
+  local transcript_raw="${state_dir}/review-transcript.raw.txt"
   local garbage_before_output="${state_dir}/review-garbage-before.txt"
   local garbage_before_raw="${state_dir}/review-garbage-before.raw.txt"
   local garbage_before_log="${state_dir}/review-garbage-before.log"
@@ -1729,6 +1731,80 @@ run_review_output_validation_smoke() {
   assert_file_contains "$runtime_after_raw" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "$runtime_after_output" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "$runtime_after_output" 'accept: yes'
+
+  cat > "$transcript_raw" <<EOF
+Reading prompt from stdin...
+OpenAI Codex v0.0.0
+user
+Return exactly this format:
+
+accept: yes/no
+
+blocker:
+- none
+
+major:
+- none
+
+minor:
+- none
+codex
+I will inspect the provided material and then return the review block.
+exec
+sed -n '1,40p' smoke-target.txt
+tool output
+implementation round 1
+${CODEX_RUNTIME_SESSION_LOG_LINE}
+codex
+accept: no
+
+blocker:
+- none
+
+major:
+- stale transcript candidate before the final review
+
+minor:
+- none
+codex
+accept: yes
+
+blocker:
+- none
+
+major:
+- none
+
+minor:
+- none
+tokens used
+50,261
+accept: yes
+
+blocker:
+- none
+
+major:
+- none
+
+minor:
+- none
+${CODEX_RUNTIME_SESSION_LOG_LINE}
+EOF
+  run_review_extraction_validation_command "$transcript_raw" "$transcript_output" 'yes'
+  assert_file_contains "$transcript_raw" 'Reading prompt from stdin'
+  assert_file_contains "$transcript_raw" 'tokens used'
+  assert_file_contains "$transcript_raw" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "$transcript_output" 'Reading prompt from stdin'
+  assert_file_not_contains "$transcript_output" 'OpenAI Codex'
+  assert_file_not_contains "$transcript_output" 'user'
+  assert_file_not_contains "$transcript_output" 'codex'
+  assert_file_not_contains "$transcript_output" 'exec'
+  assert_file_not_contains "$transcript_output" 'tool output'
+  assert_file_not_contains "$transcript_output" 'tokens used'
+  assert_file_not_contains "$transcript_output" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "$transcript_output" 'accept: no'
+  assert_fixed_line_count "$transcript_output" 'accept: yes' '1' 'transcript extraction should keep one final review block'
 
   {
     printf 'unrelated garbage before review\n'
