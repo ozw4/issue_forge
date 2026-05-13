@@ -68,7 +68,7 @@ run_codex_batch_read() {
   local reasoning_effort="$3"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$prompt_file" > "$output_log" 2>&1
+    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$prompt_file" > "$output_log"
 }
 
 run_batch_checks_once() {

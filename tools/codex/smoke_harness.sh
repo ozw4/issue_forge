@@ -15,6 +15,7 @@ readonly QUEUE_ISSUE_TITLE='Queue Follow-up Issue'
 readonly QUEUE_ISSUE_URL='https://example.test/issues/41'
 readonly UTF8_PR_BODY_TITLE='Regression Harness Issue 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀'
 readonly UTF8_CHECKS_LINE='checks passed with emoji 🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪'
+readonly CODEX_RUNTIME_SESSION_LOG_LINE='2026-05-13T09:31:45.338857Z ERROR codex_core::session: failed to record rollout items: thread 019e20ac-2a2b-70f0-bf23-77ae5017250a not found'
 readonly FIXTURE_ENGINE_PATH='vendor/issue_forge'
 readonly FIXTURE_ENGINE_CODEX_PATH="${FIXTURE_ENGINE_PATH}/tools/codex"
 readonly FIXTURE_ENGINE_ISSUE_PATH="${FIXTURE_ENGINE_PATH}/tools/issue"
@@ -540,6 +541,49 @@ run_review_validation_command() {
   )
 }
 
+run_review_extraction_validation_command() {
+  local review_raw_path="$1"
+  local review_output_path="$2"
+  local expected_accept_state="$3"
+
+  (
+    set -euo pipefail
+    cd "${repo_dir}"
+    # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/config.sh
+    # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
+    # shellcheck disable=SC2317
+    log_fail_with_path() {
+      printf '[flow] %s\n' "$1" >&2
+      printf '[flow] see log: %s\n' "$2" >&2
+    }
+    # shellcheck disable=SC2034
+    review_output="${review_output_path}"
+    # shellcheck disable=SC2034
+    review_raw_output="${review_raw_path}"
+
+    extract_structured_review_output_file "$review_raw_output" "$review_output"
+    ensure_valid_review_output
+
+    case "${expected_accept_state}" in
+      yes)
+        review_accepted
+        ;;
+      no)
+        if review_accepted; then
+          printf 'Expected review_accepted to return false for %s\n' "${review_output}" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        printf 'Invalid expected accept state: %s\n' "${expected_accept_state}" >&2
+        exit 1
+        ;;
+    esac
+  )
+}
+
 copy_flow_scripts() {
   mkdir -p "${repo_dir}/docs" "${repo_dir}/.issue_forge/checks" "${repo_dir}/vendor"
 
@@ -903,6 +947,7 @@ case "\$prompt" in
   *"strict batch review session"*)
     batch_review_count="\$(increment_counter "${state_dir}/batch-review-count.txt")"
     if [[ "\$batch_review_count" -eq 1 ]]; then
+      printf '%s\n' '${CODEX_RUNTIME_SESSION_LOG_LINE}'
       cat <<'OUT'
 accept: no
 
@@ -930,6 +975,7 @@ major:
 minor:
 - none
 OUT
+    printf '%s\n' '${CODEX_RUNTIME_SESSION_LOG_LINE}'
     exit 0
     ;;
   *"Make the required batch-review fixes, then stop."*)
@@ -946,6 +992,7 @@ OUT
   *"Return exactly this format"*)
     review_count="\$(increment_counter "${state_dir}/review-count.txt")"
     if [[ "\$review_count" -eq 1 ]]; then
+      printf '%s\n' '${CODEX_RUNTIME_SESSION_LOG_LINE}'
       cat <<'OUT'
 accept: no
 
@@ -973,6 +1020,7 @@ major:
 minor:
 - none
 OUT
+    printf '%s\n' '${CODEX_RUNTIME_SESSION_LOG_LINE}'
     exit 0
     ;;
   *".work/codex/checks.log"*)
@@ -1616,6 +1664,17 @@ run_review_output_validation_smoke() {
   local invalid_yes_major_log="${state_dir}/review-invalid-yes-major.log"
   local valid_no_output="${state_dir}/review-valid-no.txt"
   local valid_no_raw="${state_dir}/review-valid-no.raw.txt"
+  local runtime_before_output="${state_dir}/review-runtime-before.txt"
+  local runtime_before_raw="${state_dir}/review-runtime-before.raw.txt"
+  local runtime_after_output="${state_dir}/review-runtime-after.txt"
+  local runtime_after_raw="${state_dir}/review-runtime-after.raw.txt"
+  local runtime_fixture="${state_dir}/review-runtime-fixture.txt"
+  local garbage_before_output="${state_dir}/review-garbage-before.txt"
+  local garbage_before_raw="${state_dir}/review-garbage-before.raw.txt"
+  local garbage_before_log="${state_dir}/review-garbage-before.log"
+  local garbage_after_output="${state_dir}/review-garbage-after.txt"
+  local garbage_after_raw="${state_dir}/review-garbage-after.raw.txt"
+  local garbage_after_log="${state_dir}/review-garbage-after.log"
   local malformed_output="${state_dir}/review-malformed.txt"
   local malformed_raw="${state_dir}/review-malformed.raw.txt"
   local malformed_log="${state_dir}/review-malformed.log"
@@ -1651,6 +1710,42 @@ run_review_output_validation_smoke() {
   write_review_output_fixture "$valid_no_output" 'no' '- blocker remains' '- major remains' '- minor remains'
   cp "$valid_no_output" "$valid_no_raw"
   run_review_validation_command "$valid_no_output" "$valid_no_raw" 'no'
+
+  write_review_output_fixture "$runtime_fixture" 'yes' '' '' '- minor follow-up remains'
+  {
+    printf '%s\n' "$CODEX_RUNTIME_SESSION_LOG_LINE"
+    cat "$runtime_fixture"
+  } > "$runtime_before_raw"
+  run_review_extraction_validation_command "$runtime_before_raw" "$runtime_before_output" 'yes'
+  assert_file_contains "$runtime_before_raw" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "$runtime_before_output" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_contains "$runtime_before_output" 'accept: yes'
+
+  {
+    cat "$runtime_fixture"
+    printf '%s\n' "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  } > "$runtime_after_raw"
+  run_review_extraction_validation_command "$runtime_after_raw" "$runtime_after_output" 'yes'
+  assert_file_contains "$runtime_after_raw" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "$runtime_after_output" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_contains "$runtime_after_output" 'accept: yes'
+
+  {
+    printf 'unrelated garbage before review\n'
+    cat "$runtime_fixture"
+  } > "$garbage_before_raw"
+  if run_review_extraction_validation_command "$garbage_before_raw" "$garbage_before_output" 'yes' > "$garbage_before_log" 2>&1; then
+    fail 'garbage before structured review output should fail validation'
+  fi
+
+  {
+    cat "$runtime_fixture"
+    printf 'unrelated garbage after review\n'
+  } > "$garbage_after_raw"
+  if run_review_extraction_validation_command "$garbage_after_raw" "$garbage_after_output" 'yes' > "$garbage_after_log" 2>&1; then
+    fail 'garbage after structured review output should fail validation'
+  fi
+  assert_file_contains "$garbage_after_log" 'review output format is invalid'
 
   cat > "$malformed_output" <<'EOF'
 accept: yes
@@ -1848,10 +1943,16 @@ run_issue_flow_smoke() {
 
   assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-01.txt" 'accept: no'
   assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-02.txt" 'accept: yes'
+  assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-01.txt" 'accept: no'
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-02.txt" 'accept: yes'
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/checks.round-03.log" 'simulated checks pass on round 3'
+  assert_file_contains "${repo_dir}/.work/codex/review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/review.txt" 'accept: yes'
+  assert_file_not_contains "${repo_dir}/.work/codex/review.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/smoke-target.txt" 'implementation round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
@@ -2039,11 +2140,19 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/fix-from-batch-review.log"
   assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
+  assert_file_exists "${batch_dir}/history/batch-review-raw.round-01.txt"
+  assert_file_exists "${batch_dir}/history/batch-review-raw.round-02.txt"
   assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md"
   assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md"
   assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${QUEUE_ISSUE_NUMBER}"
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${ISSUE_NUMBER}"
+  assert_file_contains "${batch_dir}/history/batch-review-raw.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_contains "${batch_dir}/history/batch-review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_contains "${batch_dir}/batch-review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.txt" 'accept: yes'
+  assert_file_not_contains "${batch_dir}/history/batch-review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "${batch_dir}/history/batch-review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_file_not_contains "${batch_dir}/batch-review.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/fix-from-batch-review.log" 'applied batch review fix round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'batch review fix round 1'
   assert_file_contains "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=queue_review'

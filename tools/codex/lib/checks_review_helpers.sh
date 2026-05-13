@@ -103,18 +103,42 @@ extract_structured_review_output_file() {
   local raw_output_file="$1"
   local structured_output_file="$2"
 
-  awk '
-    /^accept: (yes|no)$/ { start = NR }
-    { lines[NR] = $0 }
-    END {
-      if (!start) {
-        exit 1
+  sanitize_codex_runtime_logs "$raw_output_file" | awk '
+    !start {
+      if ($0 ~ /^accept: (yes|no)$/) {
+        start = 1
+        if (!invalid_prefix) {
+          print
+        }
+        next
       }
-      for (i = start; i <= NR; i++) {
-        print lines[i]
+      invalid_prefix = 1
+      next
+    }
+    {
+      if (!invalid_prefix) {
+        print
       }
     }
-  ' "$raw_output_file" > "$structured_output_file"
+    END {
+      if (!start || invalid_prefix) {
+        exit 1
+      }
+    }
+  ' > "$structured_output_file"
+}
+
+sanitize_codex_runtime_logs() {
+  local raw_output_file="$1"
+
+  awk '
+    /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:/ {
+      next
+    }
+    {
+      print
+    }
+  ' "$raw_output_file"
 }
 
 extract_review_output() {
@@ -133,7 +157,7 @@ run_review_round() {
   archive_round_file "$review_untracked" "review-untracked" "$review_run_round" ".txt"
   before_status="$(status_outside_work)"
   log_info "codex review"
-  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$review_prompt" > "$review_raw_output" 2>&1
+  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$review_prompt" > "$review_raw_output"
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   after_status="$(status_outside_work)"
 
