@@ -239,10 +239,10 @@ The queue processes issues strictly in the input order. It creates one determini
 The queue never calls `tools/issue/start_from_issue.sh`. For each issue, it fetches issue context with the existing issue bootstrap helper, writes `.work/current_issue`, `.work/current_branch`, and `.work/base_commit`, records the current batch branch as `.work/current_branch`, records the current `HEAD` before that issue as `.work/base_commit`, and then runs:
 
 ```bash
-CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1 vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
+CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
 ```
 
-`CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. When `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero, queue mode sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` for each per-issue flow, so `.work/codex/review.prompt.md` is rendered from `review-light.prompt.md.tmpl`. Set `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` to keep full strict per-issue review inside queues. Single-issue flow remains strict unless the caller explicitly sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for that invocation.
+`CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. Queue mode derives `CODEX_FLOW_LIGHT_ISSUE_REVIEW` from `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` for each per-issue flow: non-zero sets `1`, so `.work/codex/review.prompt.md` is rendered from `review-light.prompt.md.tmpl`; `0` sets `0`, so full strict per-issue review is used even if the parent environment already has `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1`. Single-issue flow remains strict unless the caller explicitly sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for that invocation.
 
 After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
 

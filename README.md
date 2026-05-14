@@ -92,7 +92,7 @@ checks/review artifact がまだ無い `make_pr_only.sh` 経路では、その s
 
 ## Local issue queue
 
-`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` で既存の single-issue flow を再利用します。issue ごとの実装、checks、light per-issue review、fix loop、commit は `run_issue_flow.sh` が担当し、queue は issue PR を作らず、strict batch review 後に batch PR を 1 つ作ります。full per-issue review に戻したい consumer は `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` を設定できます。
+`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` と queue 設定から導出した `CODEX_FLOW_LIGHT_ISSUE_REVIEW` で既存の single-issue flow を再利用します。issue ごとの実装、checks、light per-issue review、fix loop、commit は `run_issue_flow.sh` が担当し、queue は issue PR を作らず、strict batch review 後に batch PR を 1 つ作ります。full per-issue review に戻したい consumer は `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` を設定できます。
 
 ```bash
 ./vendor/issue_forge/tools/codex/run_issue_queue.sh --review-every 3 123 124 125

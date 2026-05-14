@@ -112,6 +112,7 @@ check_base_ref() {
 check_prompt_templates() {
   local template_name
   local template_path
+  local -a template_names=()
 
   if [[ ! -d "${CODEX_FLOW_PROMPTS_DIR}" ]]; then
     record_failure "missing prompts directory: ${CODEX_FLOW_PROMPTS_DIR}"
@@ -120,7 +121,12 @@ check_prompt_templates() {
 
   record_ok "prompts directory exists: ${CODEX_FLOW_PROMPTS_DIR}"
 
-  while IFS= read -r template_name; do
+  mapfile -t template_names < <(required_prompt_template_names)
+  if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then
+    template_names+=('review-light')
+  fi
+
+  for template_name in "${template_names[@]}"; do
     template_path="$(prompt_template_file_path "$template_name")"
     if [[ -f "$template_path" ]]; then
       record_ok "prompt template present: ${template_path}"
@@ -128,7 +134,7 @@ check_prompt_templates() {
     fi
 
     record_failure "missing prompt template: ${template_path}"
-  done < <(required_prompt_template_names)
+  done
 }
 
 check_checks_command() {

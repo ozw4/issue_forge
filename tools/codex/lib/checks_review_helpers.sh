@@ -108,7 +108,14 @@ extract_structured_review_output_file() {
   fi
 
   if head -n 1 "$sanitized_output" | grep -Eq '^accept: (yes|no)$'; then
-    cp "$sanitized_output" "$structured_output_file"
+    if ! extract_review_candidate_from_line "$sanitized_output" 1 > "$candidate_output" \
+      || ! direct_review_output_has_allowed_tail "$sanitized_output" "$candidate_output" \
+      || ! validate_review_output "$candidate_output" \
+      || ! validate_review_output_semantics "$candidate_output"; then
+      rm -f "$sanitized_output" "$candidate_output"
+      return 1
+    fi
+    cp "$candidate_output" "$structured_output_file"
     rm -f "$sanitized_output" "$candidate_output"
     return 0
   fi
@@ -152,6 +159,52 @@ is_codex_transcript_output() {
   local sanitized_output_file="$1"
 
   grep -Eq '^(Reading prompt from stdin[.]*|OpenAI Codex)' "$sanitized_output_file"
+}
+
+direct_review_output_has_allowed_tail() {
+  local sanitized_output_file="$1"
+  local candidate_output_file="$2"
+
+  awk '
+    FNR == NR {
+      candidate[++candidate_count] = $0
+      next
+    }
+    FNR <= candidate_count {
+      if ($0 != candidate[FNR]) {
+        exit 1
+      }
+      next
+    }
+    state == "" {
+      if ($0 == "") {
+        next
+      }
+      if ($0 == "tokens used") {
+        state = "token-count"
+        next
+      }
+      exit 1
+    }
+    state == "token-count" {
+      if ($0 !~ /^([0-9]+|[0-9][0-9]?[0-9]?(,[0-9][0-9][0-9])*)$/) {
+        exit 1
+      }
+      state = "token-tail"
+      next
+    }
+    state == "token-tail" {
+      if ($0 != "") {
+        exit 1
+      }
+      next
+    }
+    END {
+      if (candidate_count == 0 || FNR < candidate_count || state == "token-count") {
+        exit 1
+      }
+    }
+  ' "$candidate_output_file" "$sanitized_output_file"
 }
 
 extract_review_candidate_from_line() {

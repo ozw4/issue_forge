@@ -277,6 +277,7 @@ process_issue_on_batch_branch() {
   local issues_file="$4"
   local issue_file
   local issue_base_commit
+  local issue_light_review=0
 
   ensure_clean_worktree "Working tree must be clean before processing issue ${issue_number}."
   rm -rf "$CODEX_FLOW_CODEX_DIR"
@@ -291,11 +292,10 @@ process_issue_on_batch_branch() {
 
   log_info "running issue flow for issue ${issue_number}"
   if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then
-    CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1 \
-      "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
-  else
-    CODEX_FLOW_SKIP_PUBLISH=1 "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+    issue_light_review=1
   fi
+  CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
+    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
   ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
   archive_issue_codex_artifacts "$batch_dir" "$issue_number"
   rm -rf "$CODEX_FLOW_CODEX_DIR"

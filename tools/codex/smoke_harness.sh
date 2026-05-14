@@ -1474,7 +1474,10 @@ run_pr_body_review_count_smoke() {
 run_doctor_smoke() {
   local doctor_success_log="${state_dir}/doctor-success.log"
   local doctor_warning_log="${state_dir}/doctor-warning.log"
+  local doctor_missing_light_log="${state_dir}/doctor-missing-light.log"
+  local doctor_light_disabled_log="${state_dir}/doctor-light-disabled.log"
   local doctor_failure_log="${state_dir}/doctor-failure.log"
+  local custom_prompt_dir="${state_dir}/doctor-prompts-without-light"
   local original_project_config
   log 'running doctor.sh smoke'
 
@@ -1501,6 +1504,40 @@ run_doctor_smoke() {
 
   original_project_config="$(mktemp)"
   cp "${repo_dir}/.issue_forge/project.sh" "${original_project_config}"
+  mkdir -p "${custom_prompt_dir}"
+  cp "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/prompts/implementation.prompt.md.tmpl" "${custom_prompt_dir}/implementation.prompt.md.tmpl"
+  cp "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/prompts/fix-from-checks.prompt.md.tmpl" "${custom_prompt_dir}/fix-from-checks.prompt.md.tmpl"
+  cp "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/prompts/review.prompt.md.tmpl" "${custom_prompt_dir}/review.prompt.md.tmpl"
+  cp "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/prompts/fix-from-review.prompt.md.tmpl" "${custom_prompt_dir}/fix-from-review.prompt.md.tmpl"
+  set_work_ignore_fixture_state 'enabled'
+
+  cat > "${repo_dir}/.issue_forge/project.sh" <<EOF
+CODEX_FLOW_PROMPTS_DIR='${custom_prompt_dir}'
+EOF
+
+  if (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
+  ) > "${doctor_missing_light_log}" 2>&1; then
+    fail 'doctor.sh should fail when queue light review is enabled and review-light template is missing'
+  fi
+  assert_file_contains "${doctor_missing_light_log}" "FAIL missing prompt template: ${custom_prompt_dir}/review-light.prompt.md.tmpl"
+
+  cat > "${repo_dir}/.issue_forge/project.sh" <<EOF
+CODEX_FLOW_PROMPTS_DIR='${custom_prompt_dir}'
+CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
+EOF
+
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/doctor.sh"
+  ) > "${doctor_light_disabled_log}" 2>&1; then
+    cat "${doctor_light_disabled_log}" >&2
+    fail 'doctor.sh should not fail solely because review-light template is missing when queue light review is disabled'
+  fi
+  assert_file_not_contains "${doctor_light_disabled_log}" "missing prompt template: ${custom_prompt_dir}/review-light.prompt.md.tmpl"
+  assert_file_contains "${doctor_light_disabled_log}" '0 failure(s)'
+
   cat > "${repo_dir}/.issue_forge/project.sh" <<'EOF'
 CODEX_FLOW_BASE_REF='origin/missing'
 EOF
@@ -1701,6 +1738,11 @@ run_review_output_validation_smoke() {
   local runtime_after_output="${state_dir}/review-runtime-after.txt"
   local runtime_after_raw="${state_dir}/review-runtime-after.raw.txt"
   local runtime_fixture="${state_dir}/review-runtime-fixture.txt"
+  local token_trailer_output="${state_dir}/review-token-trailer.txt"
+  local token_trailer_raw="${state_dir}/review-token-trailer.raw.txt"
+  local token_trailer_extra_output="${state_dir}/review-token-trailer-extra.txt"
+  local token_trailer_extra_raw="${state_dir}/review-token-trailer-extra.raw.txt"
+  local token_trailer_extra_log="${state_dir}/review-token-trailer-extra.log"
   local transcript_output="${state_dir}/review-transcript.txt"
   local transcript_raw="${state_dir}/review-transcript.raw.txt"
   local garbage_before_output="${state_dir}/review-garbage-before.txt"
@@ -1763,6 +1805,32 @@ run_review_output_validation_smoke() {
   assert_file_contains "$runtime_after_raw" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "$runtime_after_output" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "$runtime_after_output" 'accept: yes'
+
+  {
+    cat "$runtime_fixture"
+    printf '\n'
+    printf 'tokens used\n'
+    printf '133,813\n'
+    printf '\n'
+  } > "$token_trailer_raw"
+  run_review_extraction_validation_command "$token_trailer_raw" "$token_trailer_output" 'yes'
+  assert_file_contains "$token_trailer_raw" 'tokens used'
+  assert_file_contains "$token_trailer_raw" '133,813'
+  assert_file_not_contains "$token_trailer_output" 'tokens used'
+  assert_file_not_contains "$token_trailer_output" '133,813'
+  assert_file_contains "$token_trailer_output" 'accept: yes'
+
+  {
+    cat "$runtime_fixture"
+    printf '\n'
+    printf 'tokens used\n'
+    printf '133813\n'
+    printf 'unrelated extra line\n'
+  } > "$token_trailer_extra_raw"
+  if run_review_extraction_validation_command "$token_trailer_extra_raw" "$token_trailer_extra_output" 'yes' > "$token_trailer_extra_log" 2>&1; then
+    fail 'structured review output with token trailer and extra text should fail validation'
+  fi
+  assert_path_not_exists "$token_trailer_extra_output"
 
   cat > "$transcript_raw" <<EOF
 Reading prompt from stdin...
@@ -1853,7 +1921,7 @@ EOF
   if run_review_extraction_validation_command "$garbage_after_raw" "$garbage_after_output" 'yes' > "$garbage_after_log" 2>&1; then
     fail 'garbage after structured review output should fail validation'
   fi
-  assert_file_contains "$garbage_after_log" 'review output format is invalid'
+  assert_path_not_exists "$garbage_after_output"
 
   cat > "$malformed_output" <<'EOF'
 accept: yes
@@ -2242,6 +2310,43 @@ run_issue_queue_fail_fast_smoke() {
   fi
 }
 
+run_issue_queue_strict_issue_review_smoke() {
+  local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
+  local queue_log="${state_dir}/queue-strict-review.log"
+
+  log 'running issue queue strict per-issue review smoke'
+  clear_command_logs
+  reset_flow_counters
+
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0 \
+      CODEX_FLOW_LIGHT_ISSUE_REVIEW=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" \
+        --review-every 2 \
+        "${ISSUE_NUMBER}" "${QUEUE_ISSUE_NUMBER}"
+  ) > "${queue_log}" 2>&1; then
+    cat "${queue_log}" >&2
+    fail 'run_issue_queue.sh should succeed with strict per-issue review forced'
+  fi
+
+  assert_equals "batch/${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'strict queue batch branch'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" "You are the review session for issue #${QUEUE_ISSUE_NUMBER}."
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" 'Focus on correctness, scope, regressions, repository rules, and doc consistency.'
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" 'Focus on correctness, scope, regressions, repository rules, and doc consistency.'
+  assert_file_not_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" 'queue smoke review'
+  assert_file_not_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" 'queue smoke review'
+  assert_file_contains "${batch_dir}/batch-review.prompt.md" 'strict batch review session'
+  assert_file_not_contains "${batch_dir}/batch-review.prompt.md" 'queue smoke review'
+  assert_file_contains "${queue_log}" 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
+  assert_commit_includes_path HEAD 'smoke-target.txt'
+  assert_commit_excludes_internal_paths HEAD
+}
+
 run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue.log"
@@ -2432,6 +2537,7 @@ main() {
   run_continue_after_review_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
+  run_issue_queue_strict_issue_review_smoke
   run_vendor_worktree_visibility_smoke
   run_no_workflow_file_smoke
   log 'all smoke scenarios passed'

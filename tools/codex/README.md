@@ -74,7 +74,7 @@ Rows are appended after Codex calls when the corresponding Codex log contains a 
 
 ## Queue Light Review
 
-Queue mode sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` for each `run_issue_flow.sh` invocation when `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero. The consumer config default is:
+Queue mode derives `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for each `run_issue_flow.sh` invocation from `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW`: `1` when queue light review is enabled, and `0` when it is disabled. The consumer config default is:
 
 ```sh
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=1
@@ -88,4 +88,4 @@ Consumers that want full strict review for every queued issue can disable it:
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 ```
 
-Batch review still uses `batch-review.prompt.md.tmpl` and remains strict.
+Queue mode passes `CODEX_FLOW_LIGHT_ISSUE_REVIEW=0` in that case, so a parent `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` environment value cannot force light per-issue reviews. Batch review still uses `batch-review.prompt.md.tmpl` and remains strict.
