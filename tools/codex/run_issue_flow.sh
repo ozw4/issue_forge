@@ -27,9 +27,32 @@ log_fail_with_path() {
   printf '[flow] see log: %s\n' "$2" >&2
 }
 
+run_codex_phase() {
+  local mode="$1"
+  local prompt_file="$2"
+  local output_file="$3"
+  local reasoning_effort="$4"
+  local stderr_policy="${5:-combined}"
+
+  case "$stderr_policy" in
+    combined)
+      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file" 2>&1
+      ;;
+    stdout)
+      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file"
+      ;;
+    *)
+      printf 'Invalid Codex phase stderr policy: %s\n' "$stderr_policy" >&2
+      exit 1
+      ;;
+  esac
+}
+
 run_implementation_phase() {
   log_info 'codex implementation'
-  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$implement_prompt" > "$implementation_log" 2>&1
+  run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
 
   if [[ -z "$(status_outside_work)" ]]; then
@@ -96,6 +119,7 @@ implementation_log="${CODEX_FLOW_CODEX_DIR}/implementation.log"
 fix_checks_log="${CODEX_FLOW_CODEX_DIR}/fix-from-checks.log"
 review_diff="${CODEX_FLOW_CODEX_DIR}/review.diff"
 review_untracked="${CODEX_FLOW_CODEX_DIR}/review.untracked.txt"
+review_summary="${CODEX_FLOW_CODEX_DIR}/review.summary.txt"
 review_raw_output="${CODEX_FLOW_CODEX_DIR}/review.raw.txt"
 review_output="${CODEX_FLOW_CODEX_DIR}/review.txt"
 fix_review_log="${CODEX_FLOW_CODEX_DIR}/fix-from-review.log"
@@ -116,6 +140,7 @@ write_issue_flow_prompt_files \
   "$checks_log" \
   "$review_diff" \
   "$review_untracked" \
+  "$review_summary" \
   "$review_output"
 
 run_implementation_phase

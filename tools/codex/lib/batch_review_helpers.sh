@@ -1,29 +1,17 @@
 #!/usr/bin/env bash
 
-append_untracked_file_diff_to_batch() {
-  local path="$1"
-  local diff_file="$2"
-  local status
-
-  set +e
-  git diff --no-index -- /dev/null "$path" >> "$diff_file"
-  status=$?
-  set -e
-
-  if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
-    printf 'Failed to generate batch review material for untracked file: %s\n' "$path" >&2
-    exit 1
-  fi
-}
+# shellcheck source=tools/codex/lib/review_material_helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 
 generate_batch_review_material() {
   local base_commit="$1"
   local batch_diff="$2"
   local batch_untracked="$3"
+  local batch_summary="$4"
   local has_material=0
   local path
 
-  git diff --no-ext-diff --binary "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$batch_diff"
+  git diff --no-ext-diff "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$batch_diff"
   : > "$batch_untracked"
 
   while IFS= read -r path; do
@@ -33,8 +21,10 @@ generate_batch_review_material() {
 
     has_material=1
     printf '%s\n' "$path" >> "$batch_untracked"
-    append_untracked_file_diff_to_batch "$path" "$batch_diff"
+    append_untracked_file_diff_to_review_material "$path" "$batch_diff" 'batch'
   done < <(git ls-files --others --exclude-standard -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}")
+
+  write_review_material_summary "$base_commit" "$batch_summary" "$batch_untracked"
 
   if [[ -s "$batch_diff" ]]; then
     has_material=1
@@ -157,6 +147,7 @@ run_batch_review_once() {
   local review_round="$5"
   local batch_diff="${batch_dir}/batch.diff"
   local batch_untracked="${batch_dir}/batch.untracked.txt"
+  local batch_summary="${batch_dir}/batch.summary.txt"
   local batch_review_prompt="${batch_dir}/batch-review.prompt.md"
   local batch_review_raw="${batch_dir}/batch-review.raw.txt"
   local batch_review_output="${batch_dir}/batch-review.txt"
@@ -165,10 +156,11 @@ run_batch_review_once() {
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
-  generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked"
+  generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
   archive_round_file "$batch_diff" 'batch-diff' "$review_round" '.txt'
   archive_round_file "$batch_untracked" 'batch-untracked' "$review_round" '.txt'
-  write_batch_review_prompt_file "$issues_file" "$batch_diff" "$batch_untracked" "$batch_review_prompt"
+  archive_round_file "$batch_summary" 'batch-summary' "$review_round" '.txt'
+  write_batch_review_prompt_file "$issues_file" "$batch_diff" "$batch_untracked" "$batch_summary" "$batch_review_prompt"
 
   before_status="$(status_outside_work)"
   log_info "codex batch review (round ${review_round})"

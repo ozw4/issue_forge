@@ -129,8 +129,13 @@ After sourcing `.issue_forge/project.sh`, the engine applies these defaults befo
 | `CODEX_FLOW_PROFILE_WRITE_REASONING` | `xhigh` |
 | `CODEX_FLOW_PROFILE_READ_SANDBOX` | `danger-full-access` |
 | `CODEX_FLOW_PROFILE_READ_REASONING` | `medium` |
+| `CODEX_FLOW_IMPLEMENTATION_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
+| `CODEX_FLOW_CHECK_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
+| `CODEX_FLOW_REVIEW_REASONING` | `${CODEX_FLOW_PROFILE_READ_REASONING}` |
+| `CODEX_FLOW_REVIEW_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
 | `CODEX_FLOW_BATCH_BRANCH_PREFIX` | `batch/` |
 | `CODEX_FLOW_QUEUE_REVIEW_EVERY` | `3` |
+| `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` | `1` |
 | `CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT` | `0` |
 | `CODEX_FLOW_BATCH_REVIEW_REASONING` | `xhigh` |
 | `CODEX_FLOW_BATCH_FIX_REASONING` | `xhigh` |
@@ -141,6 +146,8 @@ After sourcing `.issue_forge/project.sh`, the engine applies these defaults befo
 | `CODEX_FLOW_AUTO_MERGE_POLL_SECONDS` | `15` |
 
 Validation still runs after defaults. Missing or malformed values after defaulting remain hard errors.
+
+The single-issue flow always passes explicit per-phase reasoning to `run_codex.sh`: implementation uses `CODEX_FLOW_IMPLEMENTATION_REASONING`, checks repair uses `CODEX_FLOW_CHECK_FIX_REASONING`, review uses `CODEX_FLOW_REVIEW_REASONING`, and review repair uses `CODEX_FLOW_REVIEW_FIX_REASONING`. These values must be non-empty and contain no whitespace after defaults are applied. The defaults preserve the prior write/read profile behavior while allowing consumers to lower normal implementation effort and keep repair phases stricter.
 
 `CODEX_RUN_REASONING_EFFORT` is a narrow per-invocation override for `run_codex.sh`. When set, it must be non-empty and contain no whitespace; it replaces the selected profile reasoning value for that invocation only and does not change sandbox selection or mutate profile config.
 
@@ -160,7 +167,8 @@ Prompt behavior:
 - default prompt templates are engine-owned and live at `vendor/issue_forge/tools/codex/prompts/`
 - consumers may optionally override `CODEX_FLOW_PROMPTS_DIR`
 - `.work/codex/*.prompt.md` output paths are unchanged
-- consumers with custom `CODEX_FLOW_PROMPTS_DIR` only need the batch prompt templates when they use `run_issue_queue.sh`; missing batch templates are a hard queue error
+- consumers with custom `CODEX_FLOW_PROMPTS_DIR` need the batch prompt templates when they use `run_issue_queue.sh`; missing batch templates are a hard queue error
+- when `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero, queue mode also requires `review-light.prompt.md.tmpl`; missing light review templates are a hard queue error
 
 Checks behavior:
 
@@ -231,12 +239,12 @@ The queue processes issues strictly in the input order. It creates one determini
 The queue never calls `tools/issue/start_from_issue.sh`. For each issue, it fetches issue context with the existing issue bootstrap helper, writes `.work/current_issue`, `.work/current_branch`, and `.work/base_commit`, records the current batch branch as `.work/current_branch`, records the current `HEAD` before that issue as `.work/base_commit`, and then runs:
 
 ```bash
-CODEX_FLOW_SKIP_PUBLISH=1 vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
+CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1 vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
 ```
 
-`CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, normal review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. When unset or `0`, single-issue flow publishing behavior is unchanged.
+`CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. When `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero, queue mode sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` for each per-issue flow, so `.work/codex/review.prompt.md` is rendered from `review-light.prompt.md.tmpl`. Set `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` to keep full strict per-issue review inside queues. Single-issue flow remains strict unless the caller explicitly sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for that invocation.
 
-After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
+After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
 
 Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
 
@@ -270,13 +278,15 @@ The flow must explicitly exclude internal paths from git operations instead of r
 Current operations that must honor the full exclude array include:
 
 - `git status --porcelain --untracked-files=all -- . ...`
-- `git diff --no-ext-diff --binary <base> -- . ...`
+- `git diff --no-ext-diff <base> -- . ...`
 - `git ls-files --others --exclude-standard -- . ...`
 - `git diff --name-only -z -- . ...`
 - `git diff --name-only -z --cached -- . ...`
 - `git ls-files --others --exclude-standard -z -- . ...`
 
 The positive pathspec `.` stays before the exclude pathspecs for those discovery commands.
+
+Review diff artifacts are text diffs and must not include `GIT binary patch` payloads. Binary changes are represented in the supplemental review summaries with `git diff --stat`, `git diff --name-status`, `git diff --numstat`, untracked byte sizes, and an explicit binary-file section derived from numstat/name-status data.
 
 Staging then passes only the concrete returned paths to `git add -A --pathspec-from-file=<tmp> --pathspec-file-nul`. The staging pathspec file must not include `:(exclude)...` entries, so ignored managed paths such as `.work` and `vendor/issue_forge` are never passed back to `git add` directly.
 
@@ -312,6 +322,7 @@ The following remain part of the v1 behavior contract:
 - `.work/codex/fix-from-checks.log`
 - `.work/codex/review.diff`
 - `.work/codex/review.untracked.txt`
+- `.work/codex/review.summary.txt`
 - `.work/codex/review.raw.txt`
 - `.work/codex/review.txt`
 - `.work/codex/fix-from-review.log`

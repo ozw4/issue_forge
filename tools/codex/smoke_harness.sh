@@ -676,6 +676,8 @@ EOF
   cat > "${repo_dir}/vendor/tracked.txt" <<'EOF'
 tracked baseline
 EOF
+
+  printf 'binary baseline\0content\n' > "${repo_dir}/binary-target.dat"
 }
 
 set_work_ignore_fixture_state() {
@@ -1916,6 +1918,7 @@ Read the issue/review artifact(s) named below:
 - .work/issues/${ISSUE_NUMBER}.md
 - .work/codex/review.diff
 - .work/codex/review.untracked.txt
+- .work/codex/review.summary.txt
 Read README.md and docs/README.md only when they are directly relevant to the current issue, review finding, or diff. Prefer targeted rg/sed section reads over reading entire files.
 
 You are the review session for issue #${ISSUE_NUMBER}.
@@ -2028,6 +2031,7 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/fix-from-checks.log"
   assert_file_exists "${repo_dir}/.work/codex/review.diff"
   assert_file_exists "${repo_dir}/.work/codex/review.untracked.txt"
+  assert_file_exists "${repo_dir}/.work/codex/review.summary.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.raw.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.log"
@@ -2041,6 +2045,8 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/history/review-diff.round-02.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-untracked.round-01.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-untracked.round-02.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/review-summary.round-01.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/review-summary.round-02.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-01.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-02.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review.round-01.txt"
@@ -2058,6 +2064,9 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-01.txt" 'accept: no'
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-02.txt" 'accept: yes'
+  assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
+  assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/review.summary.txt'
+  assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'queue smoke review'
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/checks.round-03.log" 'simulated checks pass on round 3'
@@ -2067,6 +2076,8 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'implementation round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=xhigh' '3' 'issue-flow write phase reasoning count'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium' '2' 'issue-flow review phase reasoning count'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
   assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
   assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/40 --title Regression Harness Issue --body-file'
@@ -2243,6 +2254,7 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/changed-files.txt"
   assert_file_exists "${batch_dir}/batch.diff"
   assert_file_exists "${batch_dir}/batch.untracked.txt"
+  assert_file_exists "${batch_dir}/batch.summary.txt"
   assert_file_exists "${batch_dir}/checks.log"
   assert_file_exists "${batch_dir}/batch-review.prompt.md"
   assert_file_exists "${batch_dir}/batch-review.raw.txt"
@@ -2251,12 +2263,21 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/fix-from-batch-review.log"
   assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
+  assert_file_exists "${batch_dir}/history/batch-summary.round-01.txt"
+  assert_file_exists "${batch_dir}/history/batch-summary.round-02.txt"
   assert_file_exists "${batch_dir}/history/batch-review-raw.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review-raw.round-02.txt"
   assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md"
   assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md"
   assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${QUEUE_ISSUE_NUMBER}"
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${ISSUE_NUMBER}"
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" "queue smoke review for issue #${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" "queue smoke review for issue #${ISSUE_NUMBER}"
+  assert_file_not_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" 'strict batch review session'
+  assert_file_not_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" 'strict batch review session'
+  assert_file_contains "${batch_dir}/batch-review.prompt.md" 'strict batch review session'
+  assert_file_contains "${batch_dir}/batch-review.prompt.md" ".work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/batch.summary.txt"
+  assert_file_not_contains "${batch_dir}/batch-review.prompt.md" 'queue smoke review'
   assert_file_contains "${batch_dir}/history/batch-review-raw.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/history/batch-review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
@@ -2281,10 +2302,12 @@ run_vendor_worktree_visibility_smoke() {
   local status_log="${state_dir}/vendor-visibility.status.txt"
   local review_diff_log="${state_dir}/vendor-visibility.review.diff"
   local review_untracked_log="${state_dir}/vendor-visibility.review.untracked.txt"
+  local review_summary_log="${state_dir}/vendor-visibility.review.summary.txt"
   local staged_log="${state_dir}/vendor-visibility.staged.txt"
 
   log 'running vendor visibility smoke'
   printf 'tracked dirty change\n' >> "${repo_dir}/vendor/tracked.txt"
+  printf 'binary dirty\0change\n' > "${repo_dir}/binary-target.dat"
   printf 'untracked vendor change\n' > "${repo_dir}/vendor/other.txt"
   clear_command_logs
 
@@ -2298,6 +2321,7 @@ source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
 source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
 review_diff="'"${review_diff_log}"'"
 review_untracked="'"${review_untracked_log}"'"
+review_summary="'"${review_summary_log}"'"
 status_outside_work > "'"${status_log}"'"
 generate_review_material
 stage_issue_flow_changes
@@ -2311,11 +2335,20 @@ git diff --cached --name-only > "'"${staged_log}"'"
   assert_path_list_excludes_path_regex "${status_log}" 'vendor/issue_forge' 'vendor/issue_forge'
   assert_file_contains "${review_diff_log}" 'vendor/other.txt'
   assert_file_contains "${review_diff_log}" 'vendor/tracked.txt'
+  assert_file_not_contains "${review_diff_log}" 'GIT binary patch'
   assert_diff_file_excludes_path_regex "${review_diff_log}" '\.work' '.work'
   assert_diff_file_excludes_path_regex "${review_diff_log}" 'vendor/issue_forge' 'vendor/issue_forge'
   assert_file_contains "${review_untracked_log}" 'vendor/other.txt'
   assert_path_list_excludes_path_regex "${review_untracked_log}" '\.work' '.work'
   assert_path_list_excludes_path_regex "${review_untracked_log}" 'vendor/issue_forge' 'vendor/issue_forge'
+  assert_file_contains "${review_summary_log}" 'base commit:'
+  assert_file_contains "${review_summary_log}" 'diff stat:'
+  assert_file_contains "${review_summary_log}" 'name status:'
+  assert_file_contains "${review_summary_log}" 'numstat:'
+  assert_file_contains "${review_summary_log}" 'untracked files:'
+  assert_file_contains "${review_summary_log}" 'binary files changed:'
+  assert_file_contains "${review_summary_log}" $'M\tbinary-target.dat'
+  assert_file_not_contains "${review_summary_log}" 'GIT binary patch'
   assert_file_contains "${staged_log}" 'vendor/other.txt'
   assert_file_contains "${staged_log}" 'vendor/tracked.txt'
   assert_path_list_excludes_path_regex "${staged_log}" '\.work' '.work'

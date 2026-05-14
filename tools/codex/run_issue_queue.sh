@@ -275,7 +275,12 @@ process_issue_on_batch_branch() {
   write_current_issue_branch_state "$issue_number" "$batch_branch" "$issue_base_commit"
 
   log_info "running issue flow for issue ${issue_number}"
-  CODEX_FLOW_SKIP_PUBLISH=1 "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+  if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then
+    CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1 \
+      "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+  else
+    CODEX_FLOW_SKIP_PUBLISH=1 "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+  fi
   ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
   archive_issue_codex_artifacts "$batch_dir" "$issue_number"
   rm -rf "$CODEX_FLOW_CODEX_DIR"
@@ -419,7 +424,7 @@ main() {
   require_command sed
 
   enter_repo_root
-  require_batch_prompt_templates
+  require_queue_prompt_templates
   ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
   ensure_planned_batch_branches_available
   create_queue_lock

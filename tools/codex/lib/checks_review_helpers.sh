@@ -4,21 +4,8 @@
 
 # shellcheck source=tools/codex/lib/review_semantics.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
-
-append_untracked_file_diff() {
-  local path="$1"
-  local status
-
-  set +e
-  git diff --no-index -- /dev/null "$path" >> "$review_diff"
-  status=$?
-  set -e
-
-  if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
-    printf 'Failed to generate review material for untracked file: %s\n' "$path" >&2
-    exit 1
-  fi
-}
+# shellcheck source=tools/codex/lib/review_material_helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 
 generate_review_material() {
   local has_material=0
@@ -27,7 +14,7 @@ generate_review_material() {
 
   base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
-  git diff --no-ext-diff --binary "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$review_diff"
+  git diff --no-ext-diff "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$review_diff"
   : > "$review_untracked"
 
   while IFS= read -r path; do
@@ -37,8 +24,10 @@ generate_review_material() {
 
     has_material=1
     printf '%s\n' "$path" >> "$review_untracked"
-    append_untracked_file_diff "$path"
+    append_untracked_file_diff_to_review_material "$path" "$review_diff" 'single-issue'
   done < <(git ls-files --others --exclude-standard -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}")
+
+  write_review_material_summary "$base_commit" "$review_summary" "$review_untracked"
 
   if [[ -s "$review_diff" ]]; then
     has_material=1
@@ -74,7 +63,7 @@ run_fix_from_checks_round() {
 
   fix_checks_round=$((fix_checks_round + 1))
   log_info "codex fix from checks (round ${fix_round})"
-  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$fix_checks_prompt" > "$fix_checks_log" 2>&1
+  run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
 }
 
@@ -279,9 +268,10 @@ run_review_round() {
   generate_review_material
   archive_round_file "$review_diff" "review-diff" "$review_run_round" ".txt"
   archive_round_file "$review_untracked" "review-untracked" "$review_run_round" ".txt"
+  archive_round_file "$review_summary" "review-summary" "$review_run_round" ".txt"
   before_status="$(status_outside_work)"
   log_info "codex review"
-  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$review_prompt" > "$review_raw_output"
+  run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   after_status="$(status_outside_work)"
 
@@ -424,7 +414,7 @@ run_fix_from_review_round() {
 
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$fix_review_prompt" > "$fix_review_log" 2>&1
+  run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
 }
 

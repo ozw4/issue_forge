@@ -15,7 +15,10 @@ Covered behavior includes:
 - the direct vendor issue bootstrap entrypoint writes `.work/current_issue`, `.work/current_branch`, and the issue markdown file
 - the direct vendor Codex execution entrypoint keeps the current `codex exec` defaults for `write` and `read`
 - `CODEX_RUN_REASONING_EFFORT` overrides reasoning for one `run_codex.sh` invocation without changing normal write/read profile defaults
+- the direct vendor issue-flow entrypoint passes phase-specific reasoning for implementation, checks repair, review, and review repair while preserving profile-derived defaults
+- queue mode defaults to a light per-issue review prompt and retains strict final batch review
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
+- review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
 - `CODEX_FLOW_SKIP_PUBLISH=1` keeps issue-flow commits while skipping branch push and issue PR creation
 - the direct vendor issue queue processes issues sequentially in input order on one batch branch, archives per-issue Codex artifacts, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, and fails before modification when multiple batches are requested without `--auto-merge`
 - PR publishing generates the deterministic body format, stores body-file contents from the `gh` stub, covers the create path, and covers existing PR title/body sync through `gh pr edit`
@@ -29,3 +32,43 @@ Manual run:
 ```
 
 The harness does not call external GitHub or Codex services.
+
+## Single-Issue Reasoning
+
+Consumers can tune reasoning effort per phase in `.issue_forge/project.sh`:
+
+| Setting | Default | Applied to |
+| --- | --- | --- |
+| `CODEX_FLOW_IMPLEMENTATION_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` | initial implementation |
+| `CODEX_FLOW_CHECK_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` | fix-from-checks rounds |
+| `CODEX_FLOW_REVIEW_REASONING` | `${CODEX_FLOW_PROFILE_READ_REASONING}` | review rounds |
+| `CODEX_FLOW_REVIEW_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` | fix-from-review rounds |
+
+Each value is validated after defaults are applied and must be non-empty with no whitespace. A typical progressive-effort setup lowers normal implementation effort and keeps repair phases strict, for example:
+
+```sh
+CODEX_FLOW_IMPLEMENTATION_REASONING='high'
+CODEX_FLOW_CHECK_FIX_REASONING='xhigh'
+CODEX_FLOW_REVIEW_REASONING='medium'
+CODEX_FLOW_REVIEW_FIX_REASONING='xhigh'
+```
+
+Batch reasoning remains controlled by the existing batch-specific variables and queue flags.
+
+## Queue Light Review
+
+Queue mode sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` for each `run_issue_flow.sh` invocation when `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero. The consumer config default is:
+
+```sh
+CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=1
+```
+
+With that default, per-issue `.work/codex/review.prompt.md` is rendered from `review-light.prompt.md.tmpl`. The output schema and validation are unchanged, but the prompt avoids broad docs rereads and leaves cross-issue analysis to the strict final batch review.
+
+Consumers that want full strict review for every queued issue can disable it:
+
+```sh
+CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
+```
+
+Batch review still uses `batch-review.prompt.md.tmpl` and remains strict.

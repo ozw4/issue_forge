@@ -19,6 +19,14 @@ required_batch_prompt_template_names() {
     'fix-from-batch-checks'
 }
 
+required_queue_prompt_template_names() {
+  required_batch_prompt_template_names
+
+  if [[ "${CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW:-0}" -ne 0 ]]; then
+    printf '%s\n' 'review-light'
+  fi
+}
+
 prompt_template_file_path() {
   local template_name="$1"
 
@@ -51,6 +59,13 @@ require_batch_prompt_templates() {
   local -a template_names=()
 
   mapfile -t template_names < <(required_batch_prompt_template_names)
+  require_prompt_template_names "${template_names[@]}"
+}
+
+require_queue_prompt_templates() {
+  local -a template_names=()
+
+  mapfile -t template_names < <(required_queue_prompt_template_names)
   require_prompt_template_names "${template_names[@]}"
 }
 
@@ -112,7 +127,19 @@ write_issue_flow_prompt_files() {
   local checks_log="$7"
   local review_diff="$8"
   local review_untracked="$9"
-  local review_output="${10}"
+  local review_summary="${10}"
+  local review_output="${11}"
+  local light_issue_review="${CODEX_FLOW_LIGHT_ISSUE_REVIEW:-0}"
+  local review_template='review'
+
+  if [[ ! "$light_issue_review" =~ ^[0-9]+$ ]]; then
+    printf 'CODEX_FLOW_LIGHT_ISSUE_REVIEW must be a non-negative integer: %s\n' "$light_issue_review" >&2
+    exit 1
+  fi
+
+  if [[ "$light_issue_review" -ne 0 ]]; then
+    review_template='review-light'
+  fi
 
   render_prompt_template \
     "$(prompt_template_path implementation)" \
@@ -128,11 +155,12 @@ write_issue_flow_prompt_files() {
     ISSUE_NUMBER "$issue_number"
 
   render_prompt_template \
-    "$(prompt_template_path review)" \
+    "$(prompt_template_path "$review_template")" \
     "$review_prompt" \
     ISSUE_FILE "$issue_file" \
     REVIEW_DIFF "$review_diff" \
     REVIEW_UNTRACKED "$review_untracked" \
+    REVIEW_SUMMARY "$review_summary" \
     ISSUE_NUMBER "$issue_number"
 
   render_prompt_template \
@@ -147,14 +175,16 @@ write_batch_review_prompt_file() {
   local issues_file="$1"
   local batch_diff="$2"
   local batch_untracked="$3"
-  local output_path="$4"
+  local batch_summary="$4"
+  local output_path="$5"
 
   render_prompt_template \
     "$(prompt_template_path batch-review)" \
     "$output_path" \
     BATCH_ISSUES_FILE "$issues_file" \
     BATCH_DIFF "$batch_diff" \
-    BATCH_UNTRACKED "$batch_untracked"
+    BATCH_UNTRACKED "$batch_untracked" \
+    BATCH_SUMMARY "$batch_summary"
 }
 
 write_fix_from_batch_review_prompt_file() {

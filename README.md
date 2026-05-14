@@ -92,7 +92,7 @@ checks/review artifact がまだ無い `make_pr_only.sh` 経路では、その s
 
 ## Local issue queue
 
-`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` で既存の single-issue flow を再利用します。issue ごとの実装、checks、通常 review、fix loop、commit は従来の `run_issue_flow.sh` が担当し、queue は issue PR を作らず、batch review 後に batch PR を 1 つ作ります。
+`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` で既存の single-issue flow を再利用します。issue ごとの実装、checks、light per-issue review、fix loop、commit は `run_issue_flow.sh` が担当し、queue は issue PR を作らず、strict batch review 後に batch PR を 1 つ作ります。full per-issue review に戻したい consumer は `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` を設定できます。
 
 ```bash
 ./vendor/issue_forge/tools/codex/run_issue_queue.sh --review-every 3 123 124 125
@@ -120,8 +120,13 @@ consumer の `.issue_forge/project.sh` は空でも構いません。default は
 | `CODEX_FLOW_PROFILE_WRITE_REASONING` | `xhigh` |
 | `CODEX_FLOW_PROFILE_READ_SANDBOX` | `danger-full-access` |
 | `CODEX_FLOW_PROFILE_READ_REASONING` | `medium` |
+| `CODEX_FLOW_IMPLEMENTATION_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
+| `CODEX_FLOW_CHECK_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
+| `CODEX_FLOW_REVIEW_REASONING` | `${CODEX_FLOW_PROFILE_READ_REASONING}` |
+| `CODEX_FLOW_REVIEW_FIX_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |
 | `CODEX_FLOW_BATCH_BRANCH_PREFIX` | `batch/` |
 | `CODEX_FLOW_QUEUE_REVIEW_EVERY` | `3` |
+| `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` | `1` |
 | `CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT` | `0` |
 | `CODEX_FLOW_BATCH_REVIEW_REASONING` | `xhigh` |
 | `CODEX_FLOW_BATCH_FIX_REASONING` | `xhigh` |
@@ -132,6 +137,8 @@ consumer の `.issue_forge/project.sh` は空でも構いません。default は
 | `CODEX_FLOW_AUTO_MERGE_POLL_SECONDS` | `15` |
 
 consumer-specific prompts を使いたい場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。
+
+single-issue flow の phase-specific reasoning は、default では従来の write/read profile reasoning を継承します。token 節約したい consumer は `CODEX_FLOW_IMPLEMENTATION_REASONING` を低めにし、`CODEX_FLOW_CHECK_FIX_REASONING` と `CODEX_FLOW_REVIEW_FIX_REASONING` を高めに保つ progressive-effort pattern を使えます。各値は default 適用後に non-empty かつ whitespace 無しで検証されます。
 
 `CODEX_RUN_REASONING_EFFORT` は `run_codex.sh` の per-invocation override です。set されている場合、その 1 回だけ profile の reasoning value より優先されます。値は non-empty かつ whitespace 無しである必要があり、sandbox profile は変更しません。
 

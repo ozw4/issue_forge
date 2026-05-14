@@ -58,8 +58,13 @@ validate_consumer_project_config() {
   require_consumer_config_value CODEX_FLOW_PROFILE_WRITE_REASONING 'write profile reasoning'
   require_consumer_config_value CODEX_FLOW_PROFILE_READ_SANDBOX 'read profile sandbox'
   require_consumer_config_value CODEX_FLOW_PROFILE_READ_REASONING 'read profile reasoning'
+  require_consumer_config_value CODEX_FLOW_IMPLEMENTATION_REASONING 'implementation reasoning'
+  require_consumer_config_value CODEX_FLOW_CHECK_FIX_REASONING 'check fix reasoning'
+  require_consumer_config_value CODEX_FLOW_REVIEW_REASONING 'review reasoning'
+  require_consumer_config_value CODEX_FLOW_REVIEW_FIX_REASONING 'review fix reasoning'
   require_consumer_config_value CODEX_FLOW_BATCH_BRANCH_PREFIX 'batch branch prefix'
   require_consumer_config_value CODEX_FLOW_QUEUE_REVIEW_EVERY 'queue review interval'
+  require_consumer_config_value CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW 'queue light issue review'
   require_consumer_config_value CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT 'batch PR draft default'
   require_consumer_config_value CODEX_FLOW_BATCH_REVIEW_REASONING 'batch review reasoning'
   require_consumer_config_value CODEX_FLOW_BATCH_FIX_REASONING 'batch fix reasoning'
@@ -70,8 +75,13 @@ validate_consumer_project_config() {
   require_consumer_config_value CODEX_FLOW_AUTO_MERGE_POLL_SECONDS 'auto-merge poll seconds'
 
   validate_non_negative_integer_config CODEX_FLOW_PR_DRAFT_DEFAULT 'PR draft default'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_IMPLEMENTATION_REASONING 'implementation reasoning'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_CHECK_FIX_REASONING 'check fix reasoning'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_REVIEW_REASONING 'review reasoning'
+  validate_nonempty_no_whitespace_config CODEX_FLOW_REVIEW_FIX_REASONING 'review fix reasoning'
   validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_BRANCH_PREFIX 'batch branch prefix'
   validate_positive_integer_config CODEX_FLOW_QUEUE_REVIEW_EVERY 'queue review interval'
+  validate_non_negative_integer_config CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW 'queue light issue review'
   validate_non_negative_integer_config CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT 'batch PR draft default'
   validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_REVIEW_REASONING 'batch review reasoning'
   validate_nonempty_no_whitespace_config CODEX_FLOW_BATCH_FIX_REASONING 'batch fix reasoning'
@@ -93,8 +103,13 @@ apply_consumer_project_defaults() {
   : "${CODEX_FLOW_PROFILE_WRITE_REASONING:=xhigh}"
   : "${CODEX_FLOW_PROFILE_READ_SANDBOX:=danger-full-access}"
   : "${CODEX_FLOW_PROFILE_READ_REASONING:=medium}"
+  : "${CODEX_FLOW_IMPLEMENTATION_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
+  : "${CODEX_FLOW_CHECK_FIX_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
+  : "${CODEX_FLOW_REVIEW_REASONING:=${CODEX_FLOW_PROFILE_READ_REASONING}}"
+  : "${CODEX_FLOW_REVIEW_FIX_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
   : "${CODEX_FLOW_BATCH_BRANCH_PREFIX:=batch/}"
   : "${CODEX_FLOW_QUEUE_REVIEW_EVERY:=3}"
+  : "${CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW:=1}"
   : "${CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT:=0}"
   : "${CODEX_FLOW_BATCH_REVIEW_REASONING:=xhigh}"
   : "${CODEX_FLOW_BATCH_FIX_REASONING:=xhigh}"
