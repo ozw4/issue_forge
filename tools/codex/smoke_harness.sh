@@ -1844,17 +1844,25 @@ write_expected_issue_flow_prompts() {
   mkdir -p "${expected_prompt_dir}"
 
   cat > "${expected_prompt_dir}/implementation.prompt.md" <<EOF
-Read AGENTS.md if present, then README.md, then docs/README.md if present.
-Then read .work/issues/${ISSUE_NUMBER}.md.
+Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless you need to verify a specific line or resolve an ambiguity.
+Read the issue artifact named below:
+- .work/issues/${ISSUE_NUMBER}.md
+Read README.md and docs/README.md only when they are directly relevant to the current issue. Prefer targeted rg/sed section reads over reading entire files.
 
 You are the implementation session for issue #${ISSUE_NUMBER}.
 
-Priority order:
-1. AGENTS.md if present
-2. README.md
-3. docs/README.md if present and source-of-truth docs
+Priority order for instructions and facts you use:
+1. already-loaded AGENTS.md instructions
+2. README.md when directly relevant
+3. docs/README.md when directly relevant and source-of-truth docs
 4. the GitHub issue body and provided .work artifacts
 5. this prompt
+
+Token discipline:
+- Prefer \`rg\`, \`git diff --stat\`, \`git diff --name-only\`, and targeted file/hunk reads.
+- Avoid printing full repository diffs unless needed for a concrete uncertainty.
+- Avoid re-reading the same file/range repeatedly.
+- Keep test/check output concise; inspect relevant failing sections instead of dumping huge logs.
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.
@@ -1870,17 +1878,26 @@ Make the required changes, then stop.
 EOF
 
   cat > "${expected_prompt_dir}/fix-from-checks.prompt.md" <<EOF
-Read AGENTS.md if present, then README.md, then docs/README.md if present.
-Then read .work/issues/${ISSUE_NUMBER}.md and .work/codex/checks.log.
+Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless you need to verify a specific line or resolve an ambiguity.
+Read the issue/check artifact(s) named below:
+- .work/issues/${ISSUE_NUMBER}.md
+- .work/codex/checks.log
+Read README.md and docs/README.md only when they are directly relevant to the current issue or check failure. Prefer targeted rg/sed section reads over reading entire files.
 
 You are continuing the implementation session for issue #${ISSUE_NUMBER}.
 
-Priority order:
-1. AGENTS.md if present
-2. README.md
-3. docs/README.md if present and source-of-truth docs
+Priority order for instructions and facts you use:
+1. already-loaded AGENTS.md instructions
+2. README.md when directly relevant
+3. docs/README.md when directly relevant and source-of-truth docs
 4. the GitHub issue body and provided .work artifacts
 5. this prompt
+
+Token discipline:
+- Prefer \`rg\`, \`git diff --stat\`, \`git diff --name-only\`, and targeted file/hunk reads.
+- Avoid printing full repository diffs unless needed for a concrete uncertainty.
+- Avoid re-reading the same file/range repeatedly.
+- Keep test/check output concise; inspect relevant failing sections instead of dumping huge logs.
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.
@@ -1894,19 +1911,28 @@ Rules:
 EOF
 
   cat > "${expected_prompt_dir}/review.prompt.md" <<EOF
-Read AGENTS.md if present, then README.md, then docs/README.md if present.
-Then read .work/issues/${ISSUE_NUMBER}.md, .work/codex/review.diff, and .work/codex/review.untracked.txt.
+Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless you need to verify a specific line or resolve an ambiguity.
+Read the issue/review artifact(s) named below:
+- .work/issues/${ISSUE_NUMBER}.md
+- .work/codex/review.diff
+- .work/codex/review.untracked.txt
+Read README.md and docs/README.md only when they are directly relevant to the current issue, review finding, or diff. Prefer targeted rg/sed section reads over reading entire files.
 
 You are the review session for issue #${ISSUE_NUMBER}.
 
-Priority order:
-1. AGENTS.md if present
-2. README.md
-3. docs/README.md if present and source-of-truth docs
+Priority order for instructions and facts you use:
+1. already-loaded AGENTS.md instructions
+2. README.md when directly relevant
+3. docs/README.md when directly relevant and source-of-truth docs
 4. the GitHub issue body and provided .work artifacts
 5. this prompt
 
 Review only the provided review material.
+
+Token discipline:
+- Review only the provided material.
+- Do not shell out to rediscover diffs.
+- Inspect docs only for named conflicts or ambiguous source-of-truth questions.
 
 Rules:
 - Do not edit code.
@@ -1940,17 +1966,26 @@ minor:
 EOF
 
   cat > "${expected_prompt_dir}/fix-from-review.prompt.md" <<EOF
-Read AGENTS.md if present, then README.md, then docs/README.md if present.
-Then read .work/issues/${ISSUE_NUMBER}.md and .work/codex/review.txt.
+Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless you need to verify a specific line or resolve an ambiguity.
+Read the issue/review artifact(s) named below:
+- .work/issues/${ISSUE_NUMBER}.md
+- .work/codex/review.txt
+Read README.md and docs/README.md only when they are directly relevant to the current issue or review finding. Prefer targeted rg/sed section reads over reading entire files.
 
 You are continuing the implementation session for issue #${ISSUE_NUMBER}.
 
-Priority order:
-1. AGENTS.md if present
-2. README.md
-3. docs/README.md if present and source-of-truth docs
+Priority order for instructions and facts you use:
+1. already-loaded AGENTS.md instructions
+2. README.md when directly relevant
+3. docs/README.md when directly relevant and source-of-truth docs
 4. the GitHub issue body and provided .work artifacts
 5. this prompt
+
+Token discipline:
+- Prefer \`rg\`, \`git diff --stat\`, \`git diff --name-only\`, and targeted file/hunk reads.
+- Avoid printing full repository diffs unless needed for a concrete uncertainty.
+- Avoid re-reading the same file/range repeatedly.
+- Keep test/check output concise; inspect relevant failing sections instead of dumping huge logs.
 
 Rules:
 - Stay within issue scope as long as it does not conflict with AGENTS.md or source-of-truth docs.

@@ -1,14 +1,23 @@
-Read AGENTS.md if present, then README.md, then docs/README.md if present.
-Then read {{BATCH_ISSUES_FILE}} and {{BATCH_REVIEW_OUTPUT}}.
+Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless you need to verify a specific line or resolve an ambiguity.
+Read the issue/review artifact(s) named below:
+- {{BATCH_ISSUES_FILE}}
+- {{BATCH_REVIEW_OUTPUT}}
+Read README.md and docs/README.md only when they are directly relevant to the current issue or review finding. Prefer targeted rg/sed section reads over reading entire files.
 
 You are continuing the implementation session for a sequential batch of GitHub issues after strict batch review.
 
-Priority order:
-1. AGENTS.md if present
-2. README.md
-3. docs/README.md if present and source-of-truth docs
+Priority order for instructions and facts you use:
+1. already-loaded AGENTS.md instructions
+2. README.md when directly relevant
+3. docs/README.md when directly relevant and source-of-truth docs
 4. the GitHub issue bodies and provided .work artifacts
 5. this prompt
+
+Token discipline:
+- Prefer `rg`, `git diff --stat`, `git diff --name-only`, and targeted file/hunk reads.
+- Avoid printing full repository diffs unless needed for a concrete uncertainty.
+- Avoid re-reading the same file/range repeatedly.
+- Keep test/check output concise; inspect relevant failing sections instead of dumping huge logs.
 
 Rules:
 - Treat the batch as one linear change set.
