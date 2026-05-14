@@ -16,6 +16,7 @@ Covered behavior includes:
 - the direct vendor Codex execution entrypoint keeps the current `codex exec` defaults for `write` and `read`
 - `CODEX_RUN_REASONING_EFFORT` overrides reasoning for one `run_codex.sh` invocation without changing normal write/read profile defaults
 - the direct vendor issue-flow entrypoint passes phase-specific reasoning for implementation, checks repair, review, and review repair while preserving profile-derived defaults
+- Codex token usage TSV artifacts are initialized for single-issue and batch flows, and token counts are recorded when Codex logs include a `tokens used` block
 - queue mode defaults to a light per-issue review prompt and retains strict final batch review
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
@@ -54,6 +55,22 @@ CODEX_FLOW_REVIEW_FIX_REASONING='xhigh'
 ```
 
 Batch reasoning remains controlled by the existing batch-specific variables and queue flags.
+
+## Token Usage Metrics
+
+Issue flows write `.work/codex/token-usage.tsv` with this header:
+
+```text
+phase	issue	round	reasoning	tokens	log
+```
+
+Batch flows write `.work/queue/batches/<batch>/token-usage.tsv` with this header:
+
+```text
+phase	issues	round	reasoning	tokens	log
+```
+
+Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow.
 
 ## Queue Light Review
 

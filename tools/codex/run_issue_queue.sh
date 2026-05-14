@@ -182,6 +182,21 @@ batch_id_for_range() {
   printf 'batch-%s-%s\n' "$first_issue" "$last_issue"
 }
 
+join_issue_numbers() {
+  local joined=''
+  local issue_number
+
+  for issue_number in "$@"; do
+    if [[ -n "$joined" ]]; then
+      joined="${joined},${issue_number}"
+    else
+      joined="$issue_number"
+    fi
+  done
+
+  printf '%s\n' "$joined"
+}
+
 ensure_planned_batch_branches_available() {
   local start_index=0
   local end_index
@@ -348,6 +363,7 @@ process_batch() {
   local batch_pr_number
   local _batch_pr_url
   local issues_file
+  local batch_issues_label
   local index
   local -a batch_issues=()
 
@@ -361,6 +377,7 @@ process_batch() {
   fi
 
   mkdir -p "${batch_dir}/history"
+  initialize_batch_token_usage_tsv "$batch_dir"
   : > "$issues_file"
   printf '%s\n' "$batch_id" > "${CODEX_FLOW_QUEUE_DIR}/current_batch"
 
@@ -373,13 +390,16 @@ process_batch() {
     process_issue_on_batch_branch "${issue_numbers[$index]}" "$batch_branch" "$batch_dir" "$issues_file"
   done
 
-  ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_check_fix_effort"
+  batch_issues_label="$(join_issue_numbers "${batch_issues[@]}")"
+
+  ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
   ensure_batch_review_accepted \
     "$batch_dir" \
     "$issues_file" \
     "$batch_base_commit" \
     "$first_issue" \
     "$last_issue" \
+    "$batch_issues_label" \
     "$batch_review_effort" \
     "$batch_review_fix_effort" \
     "$batch_check_fix_effort"

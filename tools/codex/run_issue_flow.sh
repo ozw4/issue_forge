@@ -7,6 +7,8 @@ readonly SCRIPT_DIR
 source "${SCRIPT_DIR}/lib/config.sh"
 # shellcheck source=tools/codex/lib/history_helpers.sh
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
+# shellcheck source=tools/codex/lib/token_usage_helpers.sh
+source "${SCRIPT_DIR}/lib/token_usage_helpers.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
@@ -54,6 +56,7 @@ run_implementation_phase() {
   log_info 'codex implementation'
   run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
+  ensure_issue_token_usage_tsv 'implementation' "$issue_number" 0 "$CODEX_FLOW_IMPLEMENTATION_REASONING" "$implementation_log"
 
   if [[ -z "$(status_outside_work)" ]]; then
     log_fail_with_path 'initial implementation session produced no file changes' "$implementation_log"
@@ -108,6 +111,7 @@ resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Ru
 ensure_clean_worktree 'Working tree must be clean before running the issue flow.'
 mkdir -p "$CODEX_FLOW_CODEX_DIR"
 mkdir -p "$CODEX_FLOW_CODEX_HISTORY_DIR"
+initialize_issue_token_usage_tsv
 
 implement_prompt="${CODEX_FLOW_CODEX_DIR}/implementation.prompt.md"
 fix_checks_prompt="${CODEX_FLOW_CODEX_DIR}/fix-from-checks.prompt.md"

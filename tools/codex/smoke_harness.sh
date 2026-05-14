@@ -1651,6 +1651,36 @@ resolve_codex_profile_sandbox write
   assert_file_contains "${incomplete_profile_log}" 'Missing Codex profile setting: profile write sandbox'
 }
 
+run_token_usage_parser_smoke() {
+  local token_log="${state_dir}/token-usage-parser.log"
+  local no_token_log="${state_dir}/token-usage-parser-empty.log"
+  local parsed_tokens
+  local empty_tokens
+
+  log 'running token usage parser smoke'
+
+  cat > "$token_log" <<'EOF'
+OpenAI Codex v0.0.0
+tokens used
+42
+codex
+tokens used
+133,813
+EOF
+  cat > "$no_token_log" <<'EOF'
+OpenAI Codex v0.0.0
+no token block here
+EOF
+
+  # shellcheck source=tools/codex/lib/token_usage_helpers.sh
+  source "${REPO_ROOT}/tools/codex/lib/token_usage_helpers.sh"
+
+  parsed_tokens="$(extract_codex_token_usage "$token_log")"
+  empty_tokens="$(extract_codex_token_usage "$no_token_log")"
+  assert_equals '133813' "$parsed_tokens" 'token usage parser should return final comma-normalized value'
+  assert_equals '' "$empty_tokens" 'token usage parser should return empty without a token block'
+}
+
 run_review_output_validation_smoke() {
   local valid_yes_empty_output="${state_dir}/review-valid-yes-empty.txt"
   local valid_yes_empty_raw="${state_dir}/review-valid-yes-empty.raw.txt"
@@ -2035,6 +2065,7 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review.raw.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.log"
+  assert_file_exists "${repo_dir}/.work/codex/token-usage.tsv"
 
   assert_file_exists "${repo_dir}/.work/codex/history/implementation.round-00.log"
   assert_file_exists "${repo_dir}/.work/codex/history/checks.round-01.log"
@@ -2070,6 +2101,7 @@ run_issue_flow_smoke() {
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/checks.round-03.log" 'simulated checks pass on round 3'
+  assert_equals $'phase\tissue\tround\treasoning\ttokens\tlog' "$(head -n 1 "${repo_dir}/.work/codex/token-usage.tsv")" 'single-issue token usage header'
   assert_file_contains "${repo_dir}/.work/codex/review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/review.txt" 'accept: yes'
   assert_file_not_contains "${repo_dir}/.work/codex/review.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
@@ -2256,6 +2288,7 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/batch.untracked.txt"
   assert_file_exists "${batch_dir}/batch.summary.txt"
   assert_file_exists "${batch_dir}/checks.log"
+  assert_file_exists "${batch_dir}/token-usage.tsv"
   assert_file_exists "${batch_dir}/batch-review.prompt.md"
   assert_file_exists "${batch_dir}/batch-review.raw.txt"
   assert_file_exists "${batch_dir}/batch-review.txt"
@@ -2279,6 +2312,7 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/batch-review.prompt.md" ".work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/batch.summary.txt"
   assert_file_not_contains "${batch_dir}/batch-review.prompt.md" 'queue smoke review'
   assert_file_contains "${batch_dir}/history/batch-review-raw.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
+  assert_equals $'phase\tissues\tround\treasoning\ttokens\tlog' "$(head -n 1 "${batch_dir}/token-usage.tsv")" 'batch token usage header'
   assert_file_contains "${batch_dir}/history/batch-review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.txt" 'accept: yes'
@@ -2391,6 +2425,7 @@ main() {
   run_invalid_consumer_root_smoke
   run_run_codex_smoke
   run_codex_profile_smoke
+  run_token_usage_parser_smoke
   run_review_output_validation_smoke
   run_issue_flow_smoke
   run_restart_issue_flow_smoke

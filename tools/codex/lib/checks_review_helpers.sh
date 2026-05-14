@@ -6,6 +6,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
 # shellcheck source=tools/codex/lib/review_material_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
+# shellcheck source=tools/codex/lib/token_usage_helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 
 generate_review_material() {
   local has_material=0
@@ -65,6 +67,7 @@ run_fix_from_checks_round() {
   log_info "codex fix from checks (round ${fix_round})"
   run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
+  ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" "$CODEX_FLOW_CHECK_FIX_REASONING" "$fix_checks_log"
 }
 
 ensure_checks_pass() {
@@ -273,6 +276,7 @@ run_review_round() {
   log_info "codex review"
   run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
+  ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" "$CODEX_FLOW_REVIEW_REASONING" "$review_raw_output"
   after_status="$(status_outside_work)"
 
   if [[ "$before_status" != "$after_status" ]]; then
@@ -416,6 +420,7 @@ run_fix_from_review_round() {
   log_info "codex fix from review (round ${review_fix_round})"
   run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
+  ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
 }
 
 ensure_review_accepted() {

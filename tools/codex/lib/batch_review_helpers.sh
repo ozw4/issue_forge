@@ -2,6 +2,8 @@
 
 # shellcheck source=tools/codex/lib/review_material_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
+# shellcheck source=tools/codex/lib/token_usage_helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -80,7 +82,8 @@ ensure_batch_checks_pass() {
   local base_commit="$3"
   local first_issue="$4"
   local last_issue="$5"
-  local check_fix_effort="$6"
+  local issues_label="$6"
+  local check_fix_effort="$7"
   local checks_log="${batch_dir}/checks.log"
   local fix_checks_prompt="${batch_dir}/fix-from-batch-checks.prompt.md"
   local fix_checks_log="${batch_dir}/fix-from-batch-checks.log"
@@ -111,6 +114,7 @@ ensure_batch_checks_pass() {
     log_info "codex fix from batch checks (round ${fix_round})"
     run_codex_batch_write "$fix_checks_prompt" "$fix_checks_log" "$check_fix_effort"
     archive_round_file "$fix_checks_log" 'fix-from-batch-checks' "$fix_round" '.log'
+    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-checks' "$issues_label" "$fix_round" "$check_fix_effort" "$fix_checks_log"
 
     if [[ -z "$(status_outside_work)" ]]; then
       printf 'Batch checks fix produced no repository changes.\n' >&2
@@ -143,8 +147,9 @@ run_batch_review_once() {
   local batch_dir="$1"
   local issues_file="$2"
   local base_commit="$3"
-  local review_effort="$4"
-  local review_round="$5"
+  local issues_label="$4"
+  local review_effort="$5"
+  local review_round="$6"
   local batch_diff="${batch_dir}/batch.diff"
   local batch_untracked="${batch_dir}/batch.untracked.txt"
   local batch_summary="${batch_dir}/batch.summary.txt"
@@ -166,6 +171,7 @@ run_batch_review_once() {
   log_info "codex batch review (round ${review_round})"
   run_codex_batch_read "$batch_review_prompt" "$batch_review_raw" "$review_effort"
   archive_round_file "$batch_review_raw" 'batch-review-raw' "$review_round" '.txt'
+  ensure_batch_token_usage_tsv "$batch_dir" 'batch-review' "$issues_label" "$review_round" "$review_effort" "$batch_review_raw"
   after_status="$(status_outside_work)"
 
   if [[ "$before_status" != "$after_status" ]]; then
@@ -189,9 +195,10 @@ ensure_batch_review_accepted() {
   local base_commit="$3"
   local first_issue="$4"
   local last_issue="$5"
-  local review_effort="$6"
-  local review_fix_effort="$7"
-  local check_fix_effort="$8"
+  local issues_label="$6"
+  local review_effort="$7"
+  local review_fix_effort="$8"
+  local check_fix_effort="$9"
   local batch_review_output="${batch_dir}/batch-review.txt"
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
@@ -200,7 +207,7 @@ ensure_batch_review_accepted() {
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
-  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$review_effort" "$review_round"
+  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
 
   while ! review_output_accepted "$batch_review_output"; do
     if [[ "$review_fix_round" -ge "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" ]]; then
@@ -215,6 +222,7 @@ ensure_batch_review_accepted() {
     log_info "codex fix from batch review (round ${review_fix_round})"
     run_codex_batch_write "$fix_review_prompt" "$fix_review_log" "$review_fix_effort"
     archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
+    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
 
     if [[ -z "$(status_outside_work)" ]]; then
       printf 'Batch review fix produced no repository changes.\n' >&2
@@ -223,8 +231,8 @@ ensure_batch_review_accepted() {
     fi
 
     commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
-    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$check_fix_effort"
+    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
     review_round=$((review_round + 1))
-    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$review_effort" "$review_round"
+    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
   done
 }
