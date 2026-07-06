@@ -19,6 +19,7 @@ External consumer-facing entrypoints are:
 | Path | Arguments | Role |
 | --- | --- | --- |
 | `vendor/issue_forge/tools/consumer/init.sh` | `[--scaffold-checks\|--scaffold-run] [consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, warn about missing consumer-owned checks/README files by default, and optionally scaffold a starter checks hook or local run convenience files |
+| `vendor/issue_forge/tools/issue/create_from_zip.sh` | `[options] <issues.zip>` | Create GitHub issues from markdown files inside a zip archive; title comes from the first `# ...` heading or the markdown filename |
 | `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
@@ -27,6 +28,10 @@ External consumer-facing entrypoints are:
 | `vendor/issue_forge/tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or sync the PR title/body for the current issue branch without pushing new commits |
 | `vendor/issue_forge/tools/codex/run_codex.sh` | `<write\|read> <prompt_file>` | Invoke `codex exec` with the mode-specific sandbox and reasoning profile |
+
+`vendor/issue_forge/tools/issue/create_from_zip.sh` is a GitHub Issue creation helper, not an implementation/PR flow. It does not modify `.work/`, create branches, run Codex, or publish PRs. It requires `unzip`, `find`, `sort`, `awk`, and `mktemp`, and it requires `gh` plus a successful `gh auth status` for non-dry-run issue creation. `--login` may be used to run `gh auth login` when auth status fails.
+
+The zip importer extracts to a fresh temporary child directory, rejects unsafe zip entries with absolute paths, drive-letter absolute paths, backslash separators, or `..` path components, then imports every regular `*.md` file sorted by path. For each file, the first `# ...` heading becomes the issue title; if no such heading exists, the `.md` filename without extension becomes the title. `--create-label NAME COLOR DESCRIPTION` creates or updates a label with `gh label create --force` and applies it to every issue. `--label LABEL` applies an existing label. `--no-create-labels` skips label creation while keeping labels in issue creation arguments. `--dry-run` prints planned operations without calling `gh label create` or `gh issue create`.
 
 For this repository only, self-hosting entrypoints under `tools/codex/` and `tools/issue/` remain supported.
 

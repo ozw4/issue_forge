@@ -1037,6 +1037,24 @@ OUT
     printf 'applied review fix round %s\n' "\$fix_review_count"
     exit 0
     ;;
+  *"run_codex retry succeeds"*)
+    retry_success_count="\$(increment_counter "${state_dir}/run-codex-retry-success-count.txt")"
+    if [[ "\$retry_success_count" -eq 1 ]]; then
+      printf 'Selected model is at capacity. Please try a different model.\n'
+      exit 1
+    fi
+    printf 'valid retry output\n'
+    exit 0
+    ;;
+  *"run_codex non retryable failure"*)
+    printf 'non retryable failure output\n'
+    exit 42
+    ;;
+  *"run_codex retry exhausted"*)
+    retry_exhausted_count="\$(increment_counter "${state_dir}/run-codex-retry-exhausted-count.txt")"
+    printf 'Selected model is at capacity. Please try a different model. attempt %s\n' "\$retry_exhausted_count"
+    exit 1
+    ;;
   *"Make the required changes, then stop."*)
     implementation_count="\$(increment_counter "${state_dir}/implementation-count.txt")"
     printf 'implementation round %s\n' "\$implementation_count" >> smoke-target.txt
@@ -1572,6 +1590,64 @@ run_invalid_consumer_root_smoke() {
 
   assert_file_contains "${invalid_consumer_root_log}" 'Invalid ISSUE_FORGE_CONSUMER_ROOT'
   assert_file_not_contains "${invalid_consumer_root_log}" "loaded consumer config via current runtime path: ${repo_dir}/.issue_forge/project.sh"
+}
+
+run_run_codex_retry_smoke() {
+  log 'running run_codex.sh retry smoke'
+
+  retry_success_prompt="${prompt_dir}/run-codex-retry-success.prompt.md"
+  retry_success_stdout="${state_dir}/run-codex-retry-success.stdout"
+  retry_success_stderr="${state_dir}/run-codex-retry-success.stderr"
+  retry_success_expected="${state_dir}/run-codex-retry-success.expected"
+  printf 'run_codex retry succeeds\n' > "${retry_success_prompt}"
+  printf 'valid retry output\n' > "${retry_success_expected}"
+  rm -f "${state_dir}/run-codex-retry-success-count.txt"
+  if ! PATH="${stub_dir}:$PATH" \
+    CODEX_TRANSIENT_INITIAL_DELAY_SEC=0 \
+    CODEX_TRANSIENT_MAX_RETRIES=1 \
+    "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" read "${retry_success_prompt}" \
+    > "${retry_success_stdout}" 2> "${retry_success_stderr}"; then
+    fail 'expected transient run_codex.sh read retry to succeed'
+  fi
+  assert_files_equal "${retry_success_expected}" "${retry_success_stdout}" 'retry success stdout'
+  assert_file_not_contains "${retry_success_stdout}" 'Selected model is at capacity. Please try a different model.'
+  assert_file_contains "${retry_success_stderr}" '[codex] transient Codex failure detected; retrying attempt 2/2 after 0 seconds'
+
+  non_retryable_prompt="${prompt_dir}/run-codex-non-retryable.prompt.md"
+  non_retryable_stdout="${state_dir}/run-codex-non-retryable.stdout"
+  non_retryable_stderr="${state_dir}/run-codex-non-retryable.stderr"
+  non_retryable_expected="${state_dir}/run-codex-non-retryable.expected"
+  printf 'run_codex non retryable failure\n' > "${non_retryable_prompt}"
+  printf 'non retryable failure output\n' > "${non_retryable_expected}"
+  set +e
+  PATH="${stub_dir}:$PATH" \
+    CODEX_TRANSIENT_INITIAL_DELAY_SEC=0 \
+    "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" read "${non_retryable_prompt}" \
+    > "${non_retryable_stdout}" 2> "${non_retryable_stderr}"
+  non_retryable_status="$?"
+  set -e
+  assert_equals '42' "${non_retryable_status}" 'non-retryable failure status'
+  assert_files_equal "${non_retryable_expected}" "${non_retryable_stdout}" 'non-retryable failure stdout'
+
+  retry_exhausted_prompt="${prompt_dir}/run-codex-retry-exhausted.prompt.md"
+  retry_exhausted_stdout="${state_dir}/run-codex-retry-exhausted.stdout"
+  retry_exhausted_stderr="${state_dir}/run-codex-retry-exhausted.stderr"
+  retry_exhausted_expected="${state_dir}/run-codex-retry-exhausted.expected"
+  printf 'run_codex retry exhausted\n' > "${retry_exhausted_prompt}"
+  printf 'Selected model is at capacity. Please try a different model. attempt 2\n' > "${retry_exhausted_expected}"
+  rm -f "${state_dir}/run-codex-retry-exhausted-count.txt"
+  set +e
+  PATH="${stub_dir}:$PATH" \
+    CODEX_TRANSIENT_INITIAL_DELAY_SEC=0 \
+    CODEX_TRANSIENT_MAX_RETRIES=1 \
+    "${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_codex.sh" read "${retry_exhausted_prompt}" \
+    > "${retry_exhausted_stdout}" 2> "${retry_exhausted_stderr}"
+  retry_exhausted_status="$?"
+  set -e
+  assert_equals '1' "${retry_exhausted_status}" 'retry-exhausted failure status'
+  assert_files_equal "${retry_exhausted_expected}" "${retry_exhausted_stdout}" 'retry-exhausted failure stdout'
+  assert_file_not_contains "${retry_exhausted_stdout}" 'attempt 1'
+  assert_file_contains "${retry_exhausted_stderr}" '[codex] transient Codex failure persisted after 2 attempts; giving up'
 }
 
 run_run_codex_smoke() {
@@ -2528,6 +2604,7 @@ main() {
   run_pr_body_review_count_smoke
   run_doctor_smoke
   run_invalid_consumer_root_smoke
+  run_run_codex_retry_smoke
   run_run_codex_smoke
   run_codex_profile_smoke
   run_token_usage_parser_smoke

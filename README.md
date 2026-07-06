@@ -51,6 +51,7 @@ consumer repo root から次を直接実行します。
 
 ```bash
 ./vendor/issue_forge/tools/consumer/init.sh
+./vendor/issue_forge/tools/issue/create_from_zip.sh --repo owner/name [options] issues.zip
 ./vendor/issue_forge/tools/issue/start_from_issue.sh 123
 ./vendor/issue_forge/tools/codex/doctor.sh
 ./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
@@ -64,6 +65,23 @@ consumer repo root から次を直接実行します。
 `.work/current_issue` がある場合は issue number を省略できます。
 
 `--scaffold-run` で作る `tools/run_issue.sh` は、上の direct vendor entrypoints を短く呼ぶための任意 wrapper です。engine の contract は引き続き `vendor/issue_forge/tools/...` の直接実行です。
+
+## Issue zip import
+
+`.md` issue files をまとめた zip から GitHub Issue を一括起票する場合は `tools/issue/create_from_zip.sh` を使えます。この helper は `.work/`、branch、PR 状態を変更せず、GitHub Issue の作成だけを行います。
+
+```bash
+./vendor/issue_forge/tools/issue/create_from_zip.sh \
+  --repo ozw4/seis_hypo \
+  --create-label refactor 1D76DB "Refactoring task" \
+  --create-label codex 5319E7 "Task prepared for Codex" \
+  --create-label strict-proc-layout D93F0B "Move project code out of proc and enforce data/configs/runs layout" \
+  strict_proc_to_src_migration_issues_codex.zip
+```
+
+各 `.md` file の最初の `# ...` heading を issue title に使い、heading が無い場合は `.md` を除いた file name を title にします。`--create-label NAME COLOR DESCRIPTION` は `gh label create --force` で label を作成または更新し、その label を全 issue に付与します。既存 label を付与するだけなら `--label LABEL` を使います。事前確認には `--dry-run` を指定します。
+
+non-dry-run では `gh auth status` を確認し、未認証なら失敗します。対話 login も script 内で行いたい場合だけ `--login` を付けます。zip は一時 directory に展開され、絶対 path、drive-letter path、backslash separator、`..` component を含む entry は拒否されます。
 
 ## PR publishing
 
@@ -182,6 +200,8 @@ vendor/issue_forge/
 - `tr`
 - `cut`
 - `mktemp`
+
+`tools/issue/create_from_zip.sh` を使う場合だけ、追加で `unzip` が必要です。
 
 ## Self-hosting
 

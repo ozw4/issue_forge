@@ -8,6 +8,7 @@
 
 - external consumer entrypoints:
   - `vendor/issue_forge/tools/consumer/init.sh`
+  - `vendor/issue_forge/tools/issue/create_from_zip.sh`
   - `vendor/issue_forge/tools/issue/start_from_issue.sh`
   - `vendor/issue_forge/tools/codex/doctor.sh`
   - `vendor/issue_forge/tools/codex/run_issue_flow.sh`
@@ -20,7 +21,7 @@
 - issue branch naming rule
 - PR body format と、既存 open PR の title/body のみを同期する publish behavior
 
-この repo 自身の `tools/codex/*.sh` と `tools/issue/start_from_issue.sh` は self-hosting 用 checked-in entrypoint です。external consumer contract では必須ではありません。
+この repo 自身の `tools/codex/*.sh` と `tools/issue/*.sh` は self-hosting 用 checked-in entrypoint です。external consumer contract では必須ではありません。
 
 ## 2. Engine と consumer の境界を崩さない
 

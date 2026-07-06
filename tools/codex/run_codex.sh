@@ -103,17 +103,18 @@ run_codex_with_retries() {
     status=$?
     set -e
 
-    cat "$temp_output"
-
     if (( status == 0 )); then
+      cat "$temp_output"
       return 0
     fi
 
     if ! is_retryable_codex_failure "$temp_output"; then
+      cat "$temp_output"
       return "$status"
     fi
 
     if (( attempt > max_retries )); then
+      cat "$temp_output"
       printf '[codex] transient Codex failure persisted after %d attempts; giving up\n' "$attempt" >&2
       return "$status"
     fi
