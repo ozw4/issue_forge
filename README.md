@@ -135,7 +135,7 @@ consumer の `.issue_forge/project.sh` は空でも構いません。default は
 | `CODEX_FLOW_PROMPTS_DIR` | `${ISSUE_FORGE_ENGINE_ROOT}/tools/codex/prompts` |
 | `CODEX_FLOW_PR_DRAFT_DEFAULT` | `1` |
 | `CODEX_FLOW_PROFILE_WRITE_SANDBOX` | `danger-full-access` |
-| `CODEX_FLOW_PROFILE_WRITE_REASONING` | `xhigh` |
+| `CODEX_FLOW_PROFILE_WRITE_REASONING` | `high` |
 | `CODEX_FLOW_PROFILE_READ_SANDBOX` | `danger-full-access` |
 | `CODEX_FLOW_PROFILE_READ_REASONING` | `medium` |
 | `CODEX_FLOW_IMPLEMENTATION_REASONING` | `${CODEX_FLOW_PROFILE_WRITE_REASONING}` |

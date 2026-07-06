@@ -1678,7 +1678,7 @@ run_run_codex_smoke() {
   assert_equals 'stub codex ok' "${read_output}" 'read mode stdout'
   assert_equals 'stub codex ok' "${override_output}" 'override write mode stdout'
   assert_equals 'stub codex ok' "${post_override_write_output}" 'post-override write mode stdout'
-  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=xhigh' '2' 'write reasoning profile count'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=high' '2' 'write reasoning profile count'
   assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium' '1' 'read reasoning profile count'
   assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=override_effort' '1' 'reasoning override count'
 
@@ -1708,7 +1708,7 @@ printf "read-reasoning=%s\n" "$(resolve_codex_profile_reasoning "$CODEX_FLOW_REA
     )
   )"
 
-  assert_equals $'write-profile=write\nwrite-sandbox=danger-full-access\nwrite-reasoning=xhigh\nread-profile=read\nread-sandbox=danger-full-access\nread-reasoning=medium' "${profile_report}" 'profile resolution output'
+  assert_equals $'write-profile=write\nwrite-sandbox=danger-full-access\nwrite-reasoning=high\nread-profile=read\nread-sandbox=danger-full-access\nread-reasoning=medium' "${profile_report}" 'profile resolution output'
 
   invalid_profile_log="${state_dir}/invalid-profile.log"
   if (
@@ -1732,7 +1732,7 @@ readonly CODEX_FLOW_PROFILE_READ=read
 readonly CODEX_FLOW_WRITE_PROFILE=
 readonly CODEX_FLOW_READ_PROFILE=read
 readonly CODEX_FLOW_PROFILE_WRITE_SANDBOX=danger-full-access
-readonly CODEX_FLOW_PROFILE_WRITE_REASONING=xhigh
+readonly CODEX_FLOW_PROFILE_WRITE_REASONING=high
 readonly CODEX_FLOW_PROFILE_READ_SANDBOX=danger-full-access
 readonly CODEX_FLOW_PROFILE_READ_REASONING=medium
 source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
@@ -1752,7 +1752,7 @@ readonly CODEX_FLOW_PROFILE_READ=read
 readonly CODEX_FLOW_WRITE_PROFILE=write
 readonly CODEX_FLOW_READ_PROFILE=read
 readonly CODEX_FLOW_PROFILE_WRITE_SANDBOX=
-readonly CODEX_FLOW_PROFILE_WRITE_REASONING=xhigh
+readonly CODEX_FLOW_PROFILE_WRITE_REASONING=high
 readonly CODEX_FLOW_PROFILE_READ_SANDBOX=danger-full-access
 readonly CODEX_FLOW_PROFILE_READ_REASONING=medium
 source vendor/issue_forge/tools/codex/lib/codex_profiles.sh
@@ -2252,7 +2252,7 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/smoke-target.txt" 'implementation round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix checks round 1'
   assert_file_contains "${repo_dir}/smoke-target.txt" 'fix review round 1'
-  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=xhigh' '3' 'issue-flow write phase reasoning count'
+  assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=high' '3' 'issue-flow write phase reasoning count'
   assert_fixed_line_count "${state_dir}/codex.log" 'args: exec --sandbox danger-full-access --config model_reasoning_effort=medium' '2' 'issue-flow review phase reasoning count'
   assert_equals 'chore: address issue #40' "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" 'commit message'
   assert_staging_uses_concrete_pathspecs "${state_dir}/git.log"
