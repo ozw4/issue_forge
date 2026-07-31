@@ -1,93 +1,279 @@
 # issue_forge
 
-`issue_forge` は、GitHub Issue を起点に実装・checks・review・PR 作成までを回す shell-based engine です。
+`issue_forge` は、GitHub Issue を起点に、実装、checks、構造化 review、修正 loop、commit、push、Pull Request 作成までを実行する shell-based engine です。
 
-external consumer は engine を `vendor/issue_forge` に bind mount または symlink し、その path を直接呼びます。consumer repo に `./tools/codex/*.sh` や `./tools/issue/*.sh` の wrapper は不要です。
+external consumer は engine を `vendor/issue_forge` に bind mount または symlink し、`vendor/issue_forge/tools/...` の entrypoint を直接呼びます。consumer repo に `tools/codex/*.sh` や `tools/issue/*.sh` の shim は不要です。この repository 自体は engine 開発と regression coverage のために self-hosting しています。
 
-詳細な contract は [docs/consumer-contract.md](docs/consumer-contract.md) を参照してください。
+主な機能は次のとおりです。
 
-## First-time setup
+- 1 Issue 単位の実装、checks 修正、review 修正、PR publish
+- 複数 Issue を順番に処理し、batch review 後に 1 PR を作る local queue
+- Markdown files を含む zip から GitHub Issues を一括作成
+- review continuation、destructive restart、PR-only publish などの復旧 entrypoint
+- deterministic な PR body、review summary、Codex token usage TSV の生成
+- network-independent な smoke harness による shell contract の regression verification
 
-consumer repo では最初に次を実行できます。
+動作契約の source of truth は [docs/consumer-contract.md](docs/consumer-contract.md) です。実装時の repository rules は [AGENTS.md](AGENTS.md)、docs の入口は [docs/README.md](docs/README.md) を参照してください。
+
+## Requirements
+
+通常の Issue flow には次の command が必要です。
+
+- `bash`
+- `git`
+- `gh`
+- `codex`
+- `shellcheck`
+- `awk`
+- `sed`
+- `tr`
+- `cut`
+- `mktemp`
+
+加えて、GitHub CLI が対象 repository に対して認証済みである必要があります。
 
 ```bash
-./vendor/issue_forge/tools/consumer/init.sh [--scaffold-checks|--scaffold-run] [consumer-root]
+gh auth status
 ```
 
-この init script は consumer の `.gitignore` に `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を追記し、`.issue_forge/project.sh` が無ければ作成します。no-flag では従来どおり `.issue_forge/checks/run_changed.sh` と `README.md` が無い場合に warning を出すだけで、checks file は作りません。`README.md` と `docs/README.md` は作成せず、`docs/README.md` が無くても warning は出しません。`tools/run_issue.sh` と `.issue_forge/shell.sh` も作りません。`git add` や commit もしません。
+`tools/issue/create_from_zip.sh` を使う場合は `unzip`、`find`、`sort` も必要です。self-hosting tests を実行する場合は Python と `pytest` が必要です。
 
-`--scaffold-checks` を指定した場合だけ、`.issue_forge/checks/run_changed.sh` が無ければ consumer-owned な最小 starter を作成して executable にします。既存 file は上書きしません。この starter は changed shell files に `shellcheck -x` を走らせ、Python 関連変更がある場合だけ `pytest -q` を走らせます。consumer は必要に応じてこの file を自分たちの repo 向けに編集できます。この option は `CODEX_FLOW_CHECKS_COMMAND` の default や `doctor.sh` の engine-wide required commands を変更しません。
+> [!CAUTION]
+> default の Codex write/read sandbox はどちらも `danger-full-access` です。また、通常 flow は branch push と PR 作成・更新を行います。queue の `--auto-merge` は batch PR の auto-merge を有効化します。利用環境の security policy に合わせて `.issue_forge/project.sh` を明示的に設定してください。
 
-`--scaffold-run` を指定した場合だけ、optional な consumer-owned convenience file として `tools/run_issue.sh` と `.issue_forge/shell.sh` を作成できます。既存 file は上書きしません。`tools/run_issue.sh` は base branch を `origin/${CODEX_FLOW_BASE_BRANCH}` に同期してから `vendor/issue_forge/tools/issue/start_from_issue.sh` と `vendor/issue_forge/tools/codex/run_issue_flow.sh` を順に呼ぶ wrapper です。`.issue_forge/shell.sh` を手元の shell で `source .issue_forge/shell.sh` すると、repo の任意サブディレクトリから `run 5` のように呼べます。init はこの file を source せず、shell rc、global PATH、user dotfiles も自動変更しません。この wrapper は convenience であり、external consumer に必須ではありません。
+## Consumer setup
 
-## Consumer layout
+### 1. Engine を配置する
 
-`README.md` は consumer docs の primary entrypoint です。`docs/README.md` は追加の docs index が必要な場合だけ optional です。
+engine を consumer repository の外部に clone し、consumer root の `vendor/issue_forge` へ symlink または bind mount します。
 
-基本的な consumer-owned layout は次です。
+```bash
+git clone https://github.com/ozw4/issue_forge.git /path/to/issue_forge
+
+cd /path/to/consumer-repo
+mkdir -p vendor
+ln -s /path/to/issue_forge vendor/issue_forge
+```
+
+`vendor/issue_forge` は consumer repository に commit しません。
+
+### 2. Consumer files を初期化する
+
+```bash
+./vendor/issue_forge/tools/consumer/init.sh
+```
+
+no-flag の init は次だけを行います。
+
+- `.gitignore` に `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を追記
+- `.issue_forge/project.sh` が無ければ最小 file を作成
+- `.issue_forge/checks/run_changed.sh` と `README.md` が無ければ warning
+
+checks starter が必要な場合は明示的に scaffold します。
+
+```bash
+./vendor/issue_forge/tools/consumer/init.sh --scaffold-checks
+```
+
+この starter は changed shell files に `shellcheck -x` を実行し、Python-related files が変わった場合だけ `pytest -q` を実行します。既存 file は上書きされません。
+
+`run 123` のような local convenience command が必要な場合は、別 invocation で run wrapper を scaffold します。
+
+```bash
+./vendor/issue_forge/tools/consumer/init.sh --scaffold-run
+source .issue_forge/shell.sh
+```
+
+`--scaffold-checks` と `--scaffold-run` は 1 回の invocation では併用できません。両方必要な場合は init を 2 回実行します。init は `README.md`、`docs/README.md`、shell startup files を作成・変更せず、`git add` や commit も行いません。
+
+基本的な consumer-owned layout は次のとおりです。
 
 ```text
 <consumer-repo>/
 ├─ .issue_forge/
 │  ├─ project.sh
-│  ├─ shell.sh               # optional convenience, generated by --scaffold-run
+│  ├─ shell.sh               # optional; generated by --scaffold-run
 │  └─ checks/
-│     └─ run_changed.sh
+│     └─ run_changed.sh      # consumer-owned checks hook
 ├─ AGENTS.md
-├─ README.md
+├─ README.md                 # primary consumer docs
 ├─ docs/
-│  └─ README.md
+│  └─ README.md              # optional docs index
 ├─ tools/
-│  └─ run_issue.sh           # optional convenience, generated by --scaffold-run
+│  └─ run_issue.sh           # optional; generated by --scaffold-run
 └─ vendor/
    └─ issue_forge -> bind mount or symlink
 ```
 
-`vendor/issue_forge` は consumer repo に commit しない前提です。`tools/run_issue.sh` と `.issue_forge/shell.sh` は使う場合だけ consumer-owned file として扱います。
+`.issue_forge/project.sh` は必須ですが空でも構いません。`.issue_forge/checks/run_changed.sh` は default checks hook で、executable である必要があります。`AGENTS.md`、`README.md`、checks の内容は consumer が所有・管理します。
 
-## Direct entrypoints
-
-consumer repo root から次を直接実行します。
+### 3. Preflight を実行する
 
 ```bash
-./vendor/issue_forge/tools/consumer/init.sh
-./vendor/issue_forge/tools/issue/create_from_zip.sh --repo owner/name [options] issues.zip
-./vendor/issue_forge/tools/issue/start_from_issue.sh 123
 ./vendor/issue_forge/tools/codex/doctor.sh
-./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
-./vendor/issue_forge/tools/codex/run_issue_queue.sh [options] 123 124 125
-./vendor/issue_forge/tools/codex/continue_after_review.sh 123
-./vendor/issue_forge/tools/codex/restart_issue_flow.sh --hard 123
-./vendor/issue_forge/tools/codex/make_pr_only.sh 123
-./vendor/issue_forge/tools/codex/run_codex.sh write .work/codex/implementation.prompt.md
 ```
 
-`.work/current_issue` がある場合は issue number を省略できます。
+`doctor.sh` は required commands、`gh` authentication、consumer config、base ref、prompt templates、checks command、git state を確認します。
 
-`--scaffold-run` で作る `tools/run_issue.sh` は、上の direct vendor entrypoints を短く呼ぶための任意 wrapper です。engine の contract は引き続き `vendor/issue_forge/tools/...` の直接実行です。
+## Quick start: single Issue
+
+consumer repository root で、clean worktree から次を実行します。
+
+```bash
+./vendor/issue_forge/tools/issue/start_from_issue.sh 123
+./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
+```
+
+`start_from_issue.sh` は `origin/${CODEX_FLOW_BASE_BRANCH}` を fetch し、GitHub Issue の title から `issue/123-<slug>` branch を作成して、次の state を保存します。
+
+```text
+.work/base_commit
+.work/current_issue
+.work/current_branch
+.work/issues/123.md
+```
+
+`run_issue_flow.sh` は次を順番に実行します。
+
+1. Codex implementation
+2. consumer-owned checks と fix-from-checks loop
+3. structured review と fix-from-review loop
+4. `chore: address issue #123` commit
+5. branch push
+6. PR create、または既存 open PR の title/body sync
+
+新規 Issue PR は `CODEX_FLOW_PR_DRAFT_DEFAULT=1` により default で draft です。既存 PR を更新する場合、draft/open state、reviewers、labels は変更しません。
+
+`--scaffold-run` で生成した wrapper を使う場合は、base branch の同期、Issue bootstrap、flow 実行を 1 command にまとめられます。
+
+```bash
+source .issue_forge/shell.sh
+run 123
+```
+
+## Entrypoints
+
+| Entrypoint | Arguments | Role |
+| --- | --- | --- |
+| `tools/consumer/init.sh` | `[--scaffold-checks\|--scaffold-run] [consumer-root]` | consumer `.gitignore` と config の初期化、optional scaffold |
+| `tools/issue/create_from_zip.sh` | `[options] <issues.zip>` | zip 内の Markdown files から GitHub Issues を作成 |
+| `tools/issue/start_from_issue.sh` | `<issue_number>` | Issue context、fixed base commit、Issue branch を準備 |
+| `tools/codex/doctor.sh` | none | runtime preflight |
+| `tools/codex/run_issue_flow.sh` | `[issue_number]` | implementation、checks/review loops、commit、push、PR publish |
+| `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...` | sequential queue、batch checks/review、batch PR publish |
+| `tools/codex/continue_after_review.sh` | `[issue_number]` | current changes を review follow-up commit にして flow を再実行 |
+| `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | `.work/codex` を消して flow を再実行。`--hard` は repository changes を破棄 |
+| `tools/codex/make_pr_only.sh` | `[issue_number]` | current branch の PR title/body を作成または同期。新規 commit は push しない |
+| `tools/codex/run_codex.sh` | `<write\|read> <prompt_file>` | mode-specific sandbox/reasoning で `codex exec` を実行 |
+
+表中の path は `vendor/issue_forge/` からの相対 path です。`run_issue_flow.sh`、`continue_after_review.sh`、`restart_issue_flow.sh`、`make_pr_only.sh` は `.work/current_issue` があれば Issue number を省略できます。
+
+publish せずに single-Issue flow を実行する場合は次を使えます。この mode でも flow の commit は作成されますが、push と Issue PR 作成・更新は行いません。
+
+```bash
+CODEX_FLOW_SKIP_PUBLISH=1 \
+  ./vendor/issue_forge/tools/codex/run_issue_flow.sh 123
+```
+
+## Local issue queue
+
+`run_issue_queue.sh` は GitHub Actions や Copilot review を追加せず、local process として Issue を入力順に処理します。
+
+```bash
+./vendor/issue_forge/tools/codex/run_issue_queue.sh \
+  --review-every 3 \
+  123 124 125
+```
+
+各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
+
+```sh
+CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
+```
+
+主要 options は次のとおりです。
+
+- `--review-every N`: 1 batch あたりの Issue 数。default は `3`
+- `--batch-review-effort VALUE`: final batch review の reasoning override
+- `--batch-fix-effort VALUE`: batch review/checks fix の reasoning override
+- `--draft`: batch PR を draft で作成
+- `--auto-merge`: batch PR に squash auto-merge と branch delete を設定
+
+branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
 ## Issue zip import
 
-`.md` issue files をまとめた zip から GitHub Issue を一括起票する場合は `tools/issue/create_from_zip.sh` を使えます。この helper は `.work/`、branch、PR 状態を変更せず、GitHub Issue の作成だけを行います。
+Markdown Issue files をまとめた zip から GitHub Issues を一括作成できます。この helper は `.work/`、branch、Codex flow、PR state を変更しません。
 
 ```bash
 ./vendor/issue_forge/tools/issue/create_from_zip.sh \
-  --repo ozw4/seis_hypo \
+  --repo owner/name \
   --create-label refactor 1D76DB "Refactoring task" \
-  --create-label codex 5319E7 "Task prepared for Codex" \
-  --create-label strict-proc-layout D93F0B "Move project code out of proc and enforce data/configs/runs layout" \
-  strict_proc_to_src_migration_issues_codex.zip
+  --label codex \
+  --dry-run \
+  issues.zip
 ```
 
-各 `.md` file の最初の `# ...` heading を issue title に使い、heading が無い場合は `.md` を除いた file name を title にします。`--create-label NAME COLOR DESCRIPTION` は `gh label create --force` で label を作成または更新し、その label を全 issue に付与します。既存 label を付与するだけなら `--label LABEL` を使います。事前確認には `--dry-run` を指定します。
+各 `.md` file の最初の `# ...` heading を Issue title に使い、heading が無い場合は file name を使います。`--create-label NAME COLOR DESCRIPTION` は label を `gh label create --force` で作成・更新し、全 Issue に付与します。`--label LABEL` は既存 label を付与します。`--no-create-labels` を指定すると label の作成・更新だけを省略できます。
 
-non-dry-run では `gh auth status` を確認し、未認証なら失敗します。対話 login も script 内で行いたい場合だけ `--login` を付けます。zip は一時 directory に展開され、絶対 path、drive-letter path、backslash separator、`..` component を含む entry は拒否されます。
+non-dry-run では `gh auth status` が必要です。`--login` を付けると auth failure 時に `gh auth login` を呼びます。zip entry に absolute path、drive-letter path、backslash separator、`..` component がある場合は extraction 前に拒否します。`--keep-work-dir` を指定しない限り temporary extraction directory は削除されます。
+
+## Runtime artifacts
+
+single-Issue flow の主要 artifacts は次のとおりです。
+
+```text
+.work/
+├─ base_commit
+├─ current_branch
+├─ current_issue
+├─ issues/
+│  └─ <issue>.md
+├─ codex/
+│  ├─ implementation.prompt.md
+│  ├─ fix-from-checks.prompt.md
+│  ├─ review.prompt.md
+│  ├─ fix-from-review.prompt.md
+│  ├─ checks.log
+│  ├─ implementation.log
+│  ├─ fix-from-checks.log
+│  ├─ review.diff
+│  ├─ review.untracked.txt
+│  ├─ review.summary.txt
+│  ├─ review.raw.txt
+│  ├─ review.txt
+│  ├─ fix-from-review.log
+│  ├─ token-usage.tsv
+│  └─ history/
+└─ queue/
+   └─ batches/
+      └─ batch-<first_issue>-<last_issue>/
+```
+
+`review.txt` は次の schema を維持します。
+
+```text
+accept: yes/no
+
+blocker:
+- ...
+
+major:
+- ...
+
+minor:
+- ...
+```
+
+`accept: yes` でも `blocker:` または `major:` に実 finding がある場合は validation failure です。`minor:` は残り得ます。
+
+Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
+
+`.work` と consumer-local `vendor/issue_forge` は git discovery、diff、staging、clean から engine が明示的に除外します。`.gitignore` は local hygiene のための追加措置です。
 
 ## PR publishing
 
-`run_issue_flow.sh` と `make_pr_only.sh` は同じ publish helper を使い、PR body を deterministic に自動生成します。body は local issue context、saved fixed base commit、git diff、`.work/codex/checks.log`、`.work/codex/review.txt` から組み立てられます。
-
-生成される body は次の安定した形です。
+single-Issue PR body は local Issue context、saved fixed base commit、git diff、checks log、review output から deterministic に生成されます。
 
 ```text
 Closes #<issue>
@@ -106,25 +292,11 @@ Closes #<issue>
 - findings: blocker <n>, major <n>, minor <n>
 ```
 
-checks/review artifact がまだ無い `make_pr_only.sh` 経路では、その section に `not available yet` を出します。既存の open PR がある場合は `gh pr edit ... --title ... --body-file ...` で title/body だけを同期し、draft/open state、reviewers、labels は変更しません。新規 PR 作成時は従来どおり `CODEX_FLOW_PR_DRAFT_DEFAULT` を守ります。
+checks/review artifacts がまだ無い `make_pr_only.sh` path では該当 section に `not available yet` を出します。changed files は `.work/base_commit` から current Issue branch までの committed diff を基準にします。
 
-## Local issue queue
+## Configuration
 
-`tools/codex/run_issue_queue.sh` は local-only な sequential queue です。GitHub Actions workflow は追加せず、Copilot review も使いません。指定された issue を入力順に 1 件ずつ同じ batch branch 上で処理し、`CODEX_FLOW_SKIP_PUBLISH=1` と queue 設定から導出した `CODEX_FLOW_LIGHT_ISSUE_REVIEW` で既存の single-issue flow を再利用します。issue ごとの実装、checks、light per-issue review、fix loop、commit は `run_issue_flow.sh` が担当し、queue は issue PR を作らず、strict batch review 後に batch PR を 1 つ作ります。full per-issue review に戻したい consumer は `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0` を設定できます。
-
-```bash
-./vendor/issue_forge/tools/codex/run_issue_queue.sh --review-every 3 123 124 125
-```
-
-`--review-every N` は 1 batch PR あたりの issue 数です。default は `CODEX_FLOW_QUEUE_REVIEW_EVERY=3` です。branch 名は `batch/<first_issue>-<last_issue>`、artifact は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。
-
-複数 batch が必要な issue list では、`--auto-merge` が必須です。次の batch は前 batch PR が merge された後の updated base branch から始める必要があるためです。`--auto-merge` は `gh pr merge <number> --auto --squash --delete-branch --match-head-commit <head_sha>` を使い、merge 完了まで polling します。`--draft` と `--auto-merge` は併用できません。batch PR は default で non-draft ですが、`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=1` または `--draft` で draft にできます。
-
-batch review は通常 review と同じ `accept: yes/no` schema を使い、correctness、regressions、cross-issue interaction、scope、tests、architecture、docs/contract、shell safety、security/GitHub CLI merge risk を明示的に確認します。`--batch-review-effort` は batch review の reasoning を、`--batch-fix-effort` は batch review fix と batch checks fix の reasoning をその queue run だけで override します。custom `CODEX_FLOW_PROMPTS_DIR` を使う consumer は、queue を使う場合だけ batch prompt templates も用意する必要があります。
-
-## Defaults
-
-consumer の `.issue_forge/project.sh` は空でも構いません。default は engine 側で補完されます。
+consumer の `.issue_forge/project.sh` は空でも構いません。engine が default を補完してから validation します。
 
 | Setting | Default |
 | --- | --- |
@@ -154,28 +326,21 @@ consumer の `.issue_forge/project.sh` は空でも構いません。default は
 | `CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS` | `900` |
 | `CODEX_FLOW_AUTO_MERGE_POLL_SECONDS` | `15` |
 
-consumer-specific prompts を使いたい場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。
+Runtime-only overrides は次のとおりです。
 
-single-issue flow の phase-specific reasoning は、default では従来の write/read profile reasoning を継承します。token 節約したい consumer は `CODEX_FLOW_IMPLEMENTATION_REASONING` を低めにし、`CODEX_FLOW_CHECK_FIX_REASONING` と `CODEX_FLOW_REVIEW_FIX_REASONING` を高めに保つ progressive-effort pattern を使えます。各値は default 適用後に non-empty かつ whitespace 無しで検証されます。
+| Variable | Default / behavior |
+| --- | --- |
+| `ISSUE_FORGE_CONSUMER_ROOT` | consumer root の明示 override。指定先に `.issue_forge/project.sh` が必要 |
+| `CODEX_RUN_REASONING_EFFORT` | 1 回の `run_codex.sh` invocation だけ reasoning を override |
+| `CODEX_TRANSIENT_MAX_RETRIES` | `5`; retryable Codex availability failure の追加 retry 回数 |
+| `CODEX_TRANSIENT_INITIAL_DELAY_SEC` | `5`; exponential backoff の初期待機秒。最大 60 秒 |
+| `CODEX_FLOW_SKIP_PUBLISH` | non-zero で single-Issue flow の push/PR publish を skip |
 
-`CODEX_RUN_REASONING_EFFORT` は `run_codex.sh` の per-invocation override です。set されている場合、その 1 回だけ profile の reasoning value より優先されます。値は non-empty かつ whitespace 無しである必要があり、sandbox profile は変更しません。
-
-## Stable invariants
-
-次は current contract です。
-
-- `.work/` layout
-- `.work/codex/*` filenames
-- history naming
-- issue branch naming `issue/<number>-<slug>`
-- review output format
-- GitHub issue / PR behavior
-
-`accept: yes` は `blocker:` と `major:` に実 finding が無いことを意味します。`minor:` は残り得ます。
+consumer-specific prompt templates を使う場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。queue を使う custom prompt set には batch templates と、light review を有効にする場合は `review-light.prompt.md.tmpl` も必要です。
 
 ## Git hygiene
 
-consumer repo では次を ignore する運用を推奨します。
+consumer repository では次を ignore してください。
 
 ```gitignore
 .work
@@ -184,40 +349,34 @@ vendor/issue_forge
 vendor/issue_forge/
 ```
 
-ただし flow 自体は `.gitignore` に依存せず、`.work` と consumer repo 内の `vendor/issue_forge` を明示的に保護します。consumer-owned な他の `vendor/` 配下ファイルは `git status`、`git diff`、`git add`、review material に見える必要があります。
+flow はこれらの ignore rules に依存せず、internal paths を明示的に除外します。一方、consumer-owned な `vendor/` 配下の別 files は status、diff、staging、review material に含まれます。
 
-## Required commands
+## Self-hosting and development
 
-次の command が必要です。
+この repository は VS Code Dev Containers 用の設定を含みます。container image は Python 3.12、Node.js 22、GitHub CLI、Codex CLI、ShellCheck、`unzip` などを用意し、post-create で `pytest` を install します。
 
-- `bash`
-- `git`
-- `gh`
-- `codex`
-- `shellcheck`
-- `awk`
-- `sed`
-- `tr`
-- `cut`
-- `mktemp`
-
-`tools/issue/create_from_zip.sh` を使う場合だけ、追加で `unzip` が必要です。
-
-## Self-hosting
-
-この repo 自体は engine 開発と regression coverage のために self-hosting します。そのため次も引き続き有効です。
+self-hosted checks は次で実行できます。
 
 ```bash
 ./tools/codex/doctor.sh
+./tools/checks/run_changed.sh origin/main
 ./tools/codex/smoke_harness.sh
 python -m pytest -q
 ```
 
-smoke harness は init の no-flag warning-only behavior、`--scaffold-checks`、`--scaffold-run`、direct vendor flow を regression guard として検証します。
+`smoke_harness.sh` は external GitHub/Codex services を呼ばず、direct vendor setup、single-Issue flow、queue、PR body、review parsing、token usage、git exclusion などの checked-in contract を検証します。
 
-この repo の `.issue_forge/project.sh` は self-hosted values を明示的に持ち続けます。
+この repository の `.issue_forge/project.sh` は self-hosting のため、少なくとも次を明示しています。
 
-- `CODEX_FLOW_CHECKS_COMMAND='./tools/checks/run_changed.sh'`
-- `CODEX_FLOW_PROMPTS_DIR='tools/codex/prompts'`
+```sh
+CODEX_FLOW_CHECKS_COMMAND='./tools/checks/run_changed.sh'
+CODEX_FLOW_PROMPTS_DIR='tools/codex/prompts'
+```
 
-external consumer はこれらを書かなくても動くのが contract です。
+## Documentation map
+
+- [docs/consumer-contract.md](docs/consumer-contract.md): external consumer behavior の source of truth
+- [docs/codex_working_rules.md](docs/codex_working_rules.md): implementation と review の working rules
+- [tools/codex/README.md](tools/codex/README.md): smoke harness、reasoning、token usage、queue light review の詳細
+- [docs/README.md](docs/README.md): repository docs の navigation
+- [AGENTS.md](AGENTS.md): automation が最初に従う repository rules
