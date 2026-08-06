@@ -251,6 +251,21 @@ CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_fo
 
 After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
 
+Every accepted queue invocation creates a collision-resistant, filesystem-safe run ID and authoritative state at `.work/queue/runs/<run_id>/` before branch creation or Issue fetching. Existing `.work/queue/batches/batch-<first>-<last>/` paths remain non-authoritative artifact paths, so repeated Issue ranges have distinct authoritative state.
+
+Queue state schema version `1` uses strict `key<TAB>value` data files that are never sourced:
+
+| File | Required keys |
+| --- | --- |
+| `manifest.state` | `schema_version`, `run_id`, `created_at`, ordered comma-separated `issues`, `review_every`, `draft_pr`, `auto_merge`, `batch_review_reasoning`, `batch_fix_reasoning`, `batch_check_fix_reasoning`, `base_branch`, `base_ref` |
+| `run.state` | `schema_version`, `run_id`, `state`, `updated_at` |
+| `batches/batch-<first>-<last>/batch.state` | `schema_version`, `run_id`, `batch_id`, `first_issue`, `last_issue`, `branch`, `base_commit`, `artifact_path`, `state`, `updated_at` |
+| `batches/batch-<first>-<last>/issues/<issue>.state` | `schema_version`, `run_id`, `batch_id`, `issue_number`, `commit_sha`, `artifact_path`, `state`, `updated_at` |
+
+The manifest is immutable. Initial unavailable SHA/artifact values are `none`. Run states are `planned`, `running`, `interrupted`, `failed`, `manual_review_required`, and `completed`; batch states are `planned`, `branch_ready`, `issues_running`, `checks_running`, `review_running`, `accepted`, `publishing`, `completed`, and `failed`; Issue states are `planned`, `leased`, `running`, `committed`, `artifacts_archived`, `acknowledged`, and `failed`.
+
+State publication writes and validates a complete sibling temporary file and then performs one atomic `mv`; an interrupted pre-`mv` publication leaves the prior authoritative file intact. The next state-store operation removes abandoned `.queue-state.tmp.*` siblings deterministically. Parsing rejects unknown, duplicate, missing, or malformed fields. Mutable transitions require the expected current state and stale transitions fail without modification. Timestamps are diagnostic only; durable IDs and transitions determine correctness. Resume behavior is not implemented by this task.
+
 Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
 
 If batch review returns `accept: no`, Codex runs in write mode with the batch review fix prompt, commits any resulting changes, reruns batch checks, and reruns batch review. `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` and `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` bound the loops.

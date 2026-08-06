@@ -2386,6 +2386,45 @@ run_issue_queue_fail_fast_smoke() {
   fi
 }
 
+run_queue_state_store_smoke() {
+  local store="${state_dir}/queue-state-store" helper="${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/lib/queue_state.sh" log_file="${state_dir}/queue-state-store.log"
+  log 'running queue state store smoke'; rm -rf "$store"; mkdir -p "$store"
+  if ! QUEUE_STATE_HELPER="$helper" QUEUE_STATE_STORE="$store" bash -c '
+set -euo pipefail
+CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; source "${QUEUE_STATE_HELPER}"
+one="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"; two="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"
+[[ "${one}" != "${two}" && "${one}" =~ ^[A-Za-z0-9._-]+$ ]]
+dir_one="${CODEX_FLOW_QUEUE_RUNS_DIR}/${one}"; dir_two="${CODEX_FLOW_QUEUE_RUNS_DIR}/${two}"
+queue_state_create_manifest "$dir_one" "$one" 41,40 2 0 0 review fix check_fix main origin/main
+queue_state_create_run "${dir_one}/run.state" "$one" planned
+queue_state_create_manifest "$dir_two" "$two" 41,40 2 0 0 review fix check_fix main origin/main
+queue_state_create_run "${dir_two}/run.state" "$two" planned
+[[ "$(queue_state_read_field "${dir_one}/manifest.state" manifest issues)" == 41,40 && "$dir_one" != "$dir_two" ]]
+if QUEUE_STATE_TEST_INTERRUPT_BEFORE_MV=1 queue_state_transition "${dir_one}/run.state" run "run ${one}" planned running; then exit 10; fi
+grep -Fxq "state$(printf "\\t")planned" "${dir_one}/run.state"; compgen -G "${dir_one}/.queue-state.tmp.*" >/dev/null
+queue_state_transition "${dir_one}/run.state" run "run ${one}" planned running
+! compgen -G "${dir_one}/.queue-state.tmp.*" >/dev/null
+before="$(cksum < "${dir_one}/run.state")"
+if queue_state_transition "${dir_one}/run.state" run "run ${one}" planned completed; then exit 11; fi
+[[ "$(cksum < "${dir_one}/run.state")" == "$before" ]]
+valid="${dir_one}/run.state"
+for kind in malformed duplicate missing unknown; do
+  candidate="${QUEUE_STATE_STORE}/${kind}.state"
+  case "$kind" in
+    malformed) printf "schema_version\\t1\\nrun_id\\tbad/id\\nstate\\tplanned\\nupdated_at\\t2026-08-06T00:00:00Z\\n" > "$candidate" ;;
+    duplicate) { cat "$valid"; printf "state\\trunning\\n"; } > "$candidate" ;;
+    missing) sed "/^state/d" "$valid" > "$candidate" ;;
+    unknown) { cat "$valid"; printf "surprise\\tvalue\\n"; } > "$candidate" ;;
+  esac
+  if queue_state_validate_file "$candidate" run; then exit 12; fi
+done
+' > "$log_file" 2>&1; then cat "$log_file" >&2; fail 'queue state store scenarios should succeed'; fi
+  assert_file_contains "$log_file" "expected state 'planned', actual state 'running', requested target state 'completed'"
+  assert_file_contains "$log_file" 'Duplicate run state key'
+  assert_file_contains "$log_file" 'Missing required run state key'
+  assert_file_contains "$log_file" 'Unknown run state key'
+}
+
 run_issue_queue_strict_issue_review_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue-strict-review.log"
@@ -2426,6 +2465,7 @@ run_issue_queue_strict_issue_review_smoke() {
 run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue.log"
+  local run_dir
 
   log 'running issue queue smoke'
   clear_command_logs
@@ -2511,6 +2551,11 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+  run_dir="$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
+  assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
+  assert_file_contains "${run_dir}/manifest.state" $'batch_review_reasoning\tqueue_review'
+  assert_file_contains "${run_dir}/run.state" $'state\tcompleted'
 }
 
 run_vendor_worktree_visibility_smoke() {
@@ -2612,6 +2657,7 @@ main() {
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
+  run_queue_state_store_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
   run_issue_queue_strict_issue_review_smoke

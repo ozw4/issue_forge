@@ -201,6 +201,8 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest は入力順の Issue list と effective options を保持し、run、batch、Issue state は atomic replacement と compare-and-set で更新されます。既存の `.work/queue/batches/...` は artifact layout として維持されますが authoritative progress ではありません。この task では `--resume` は提供しません。
+
 ## Issue zip import
 
 Markdown Issue files をまとめた zip から GitHub Issues を一括作成できます。この helper は `.work/`、branch、Codex flow、PR state を変更しません。

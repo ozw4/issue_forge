@@ -11,6 +11,8 @@ source "${SCRIPT_DIR}/lib/history_helpers.sh"
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
+# shellcheck source=tools/codex/lib/queue_state.sh
+source "${SCRIPT_DIR}/lib/queue_state.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh
 source "${SCRIPT_DIR}/lib/issue_bootstrap.sh"
 # shellcheck source=tools/codex/lib/publish_helpers.sh
@@ -231,6 +233,30 @@ create_queue_lock() {
   trap 'rm -f "$queue_lock"' EXIT
 }
 
+initialize_queue_run_state() {
+  local ordered start=0 end first last batch_id branch state_dir artifact index
+  run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
+  run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
+  ordered="$(join_issue_numbers "${issue_numbers[@]}")"
+  mkdir -p "$run_state_dir"
+  queue_state_create_manifest "$run_state_dir" "$run_id" "$ordered" "$review_every" "$draft_pr" "$auto_merge" \
+    "$batch_review_effort" "$batch_review_fix_effort" "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF"
+  queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
+  while [[ "$start" -lt "${#issue_numbers[@]}" ]]; do
+    end=$((start + review_every)); [[ "$end" -le "${#issue_numbers[@]}" ]] || end="${#issue_numbers[@]}"
+    first="${issue_numbers[$start]}"; last="${issue_numbers[$((end - 1))]}"
+    batch_id="$(batch_id_for_range "$first" "$last")"; branch="$(batch_branch_name_for_range "$first" "$last")"
+    state_dir="${run_state_dir}/batches/${batch_id}"; artifact="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
+    queue_state_create_batch "${state_dir}/batch.state" "$run_id" "$batch_id" "$first" "$last" "$branch" "$artifact"
+    mkdir -p "${state_dir}/issues"
+    for ((index = start; index < end; index += 1)); do
+      queue_state_create_issue "${state_dir}/issues/${issue_numbers[$index]}.state" "$run_id" "$batch_id" "${issue_numbers[$index]}"
+    done
+    start="$end"
+  done
+  queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
+}
+
 append_issue_context_to_batch_file() {
   local issue_number="$1"
   local issue_file="$2"
@@ -448,6 +474,7 @@ main() {
   ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
   ensure_planned_batch_branches_available
   create_queue_lock
+  initialize_queue_run_state
 
   while [[ "$start_index" -lt "$issue_count" ]]; do
     end_index=$((start_index + review_every))
@@ -458,6 +485,7 @@ main() {
     process_batch "$start_index" "$end_index"
     start_index="$end_index"
   done
+  queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running completed
 }
 
 main "$@"
