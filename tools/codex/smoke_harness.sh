@@ -2391,15 +2391,7 @@ run_queue_state_store_smoke() {
   log 'running queue state store smoke'; rm -rf "$store"; mkdir -p "$store"
   if ! QUEUE_STATE_HELPER="$helper" QUEUE_STATE_STORE="$store" bash -c '
 set -euo pipefail
-CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; source "${QUEUE_STATE_HELPER}"
-barrier="${QUEUE_STATE_STORE}/lease-barrier"; lease_dir="${QUEUE_STATE_STORE}/atomic-lease.lock"; mkdir -p "$barrier"
-for runner in one two; do
-  ( touch "$barrier/ready-$runner"; while [[ ! -f "$barrier/release" ]]; do :; done
-    if queue_state_acquire_lease_directory "$lease_dir"; then printf "%s\n" "$runner" >> "$barrier/winners"; else printf "%s\n" "$runner" >> "$barrier/losers"; fi ) &
-done
-while [[ ! -f "$barrier/ready-one" || ! -f "$barrier/ready-two" ]]; do :; done
-touch "$barrier/release"; wait
-[[ "$(wc -l < "$barrier/winners")" -eq 1 && "$(wc -l < "$barrier/losers")" -eq 1 ]]
+CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_STATE_STORE}/control.guard"; source "${QUEUE_STATE_HELPER}"
 one="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"; two="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"
 [[ "${one}" != "${two}" && "${one}" =~ ^[A-Za-z0-9._-]+$ ]]
 dir_one="${CODEX_FLOW_QUEUE_RUNS_DIR}/${one}"; dir_two="${CODEX_FLOW_QUEUE_RUNS_DIR}/${two}"
@@ -2418,6 +2410,35 @@ queue_state_transition "${dir_one}/run.state" run "run ${one}" planned running
 before="$(cksum < "${dir_one}/run.state")"
 if queue_state_transition "${dir_one}/run.state" run "run ${one}" planned completed; then exit 11; fi
 [[ "$(cksum < "${dir_one}/run.state")" == "$before" ]]
+queue_state_create_batch "${dir_one}/batch.state" "$one" batch-41-40 41 40 batch/41-40 .work/queue/batches/batch-41-40
+queue_state_create_issue "${dir_one}/issue.state" "$one" batch-41-40 41
+queue_state_publish_pointer "${QUEUE_STATE_STORE}/current" "$one" owner-token 1
+printf "schema_version\t2\nrun_id\t%s\nstate\tcompleted\nupdated_at\t2026-08-06T00:00:00Z\n" "$one" > "${QUEUE_STATE_STORE}/candidate"
+deny_owner() { return 1; }
+invoke_denied() {
+  local context="$1"; shift
+  case "$context" in
+    or) "$@" || true ;;
+    if) if "$@"; then exit 21; fi ;;
+    not) if ! "$@"; then :; else exit 22; fi ;;
+  esac
+}
+
+QUEUE_STATE_ASSERT_OWNED_FUNCTION=deny_owner
+for context in or if not; do
+  snapshot="$(find "$QUEUE_STATE_STORE" -type f ! -name control.guard -printf "%p " -exec cksum {} \; | LC_ALL=C sort)"
+  invoke_denied "$context" queue_state_publish_file "${dir_one}/run.state" run "${QUEUE_STATE_STORE}/candidate"
+  invoke_denied "$context" queue_state_read_field "${dir_one}/run.state" run state
+  invoke_denied "$context" queue_state_transition "${dir_one}/run.state" run "run ${one}" running completed
+  invoke_denied "$context" queue_state_update_batch "${dir_one}/batch.state" batch-41-40 planned branch_ready 0123456789012345678901234567890123456789
+  invoke_denied "$context" queue_state_update_issue "${dir_one}/issue.state" Issue-41 planned leased none none
+  invoke_denied "$context" queue_state_set_issue_base "${dir_one}/issue.state" planned 0123456789012345678901234567890123456789
+  invoke_denied "$context" queue_state_publish_pointer "${QUEUE_STATE_STORE}/current" "$one" replacement-token 2
+  invoke_denied "$context" queue_state_remove_pointer_if_matches "${QUEUE_STATE_STORE}/current" "$one" owner-token 1
+  [[ "$(find "$QUEUE_STATE_STORE" -type f ! -name control.guard -printf "%p " -exec cksum {} \; | LC_ALL=C sort)" == "$snapshot" ]]
+  ! find "$QUEUE_STATE_STORE" -type f -name ".queue-state.tmp.*" -print -quit | grep -q .
+done
+QUEUE_STATE_ASSERT_OWNED_FUNCTION=
 valid="${dir_one}/run.state"
 for kind in malformed duplicate missing unknown; do
   candidate="${QUEUE_STATE_STORE}/${kind}.state"
@@ -2437,9 +2458,115 @@ done
   assert_file_contains "$log_file" 'Unsupported run schema version: 1'
 }
 
+run_queue_full_contention_smoke() {
+  local barrier="${state_dir}/queue-contention-barrier" pause="${state_dir}/queue-contention-pause"
+  local first_log="${state_dir}/queue-contention-first.log" second_log="${state_dir}/queue-contention-second.log"
+  local first_pid second_pid winner loser winner_label owner_count issue_fetch_count gh_call_count git_mutation_count attempt
+  log 'running full queue runner contention smoke'
+  rm -rf "$barrier" "$pause"; mkdir -p "$barrier" "$pause"
+  clear_command_logs; reset_flow_counters
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+      CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=first \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
+  ) > "$first_log" 2>&1 & first_pid=$!
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+      CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=second \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
+  ) > "$second_log" 2>&1 & second_pid=$!
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    [[ -f "$barrier/ready.lease_acquire.first" && -f "$barrier/ready.lease_acquire.second" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$barrier/ready.lease_acquire.first" && -f "$barrier/ready.lease_acquire.second" ]] || fail 'queue contention runners did not reach the acquisition barrier'
+  touch "$barrier/release.lease_acquire"
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    compgen -G "$pause/paused.after_acquire.*" >/dev/null && break
+    sleep 0.01
+  done
+  if [[ -f "$pause/paused.after_acquire.first" ]]; then
+    winner="$first_pid"; loser="$second_pid"; winner_label=first
+  elif [[ -f "$pause/paused.after_acquire.second" ]]; then
+    winner="$second_pid"; loser="$first_pid"; winner_label=second
+  else
+    fail 'queue contention produced no lease owner'
+  fi
+  if wait "$loser"; then fail 'queue contention loser unexpectedly succeeded'; fi
+  owner_count="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)"
+  assert_equals 1 "$owner_count" 'complete authoritative lease owner count during contention'
+  assert_file_not_contains "$first_log" 'command not found'
+  assert_file_not_contains "$second_log" 'command not found'
+  touch "$pause/release.after_acquire.${winner_label}"
+  if wait "$winner"; then fail 'queue contention winner should stop at the deterministic post-acquire failpoint'; fi
+  issue_fetch_count="$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  gh_call_count="$(awk 'NF { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  git_mutation_count="$(awk '$1 == "switch" || $1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  assert_equals 0 "$issue_fetch_count" 'contention pre-boundary Issue fetch count'
+  assert_equals 0 "$gh_call_count" 'contention pre-boundary GitHub call count'
+  assert_equals 0 "$git_mutation_count" 'contention pre-boundary repository mutation count'
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume current) > "${state_dir}/queue-contention-resume.log" 2>&1; then
+    cat "${state_dir}/queue-contention-resume.log" >&2; fail 'contention winner run should resume deterministically'
+  fi
+  rm -f "${state_dir}/batch-pr-url.txt"
+}
+
+run_queue_acquisition_crash_smoke() {
+  local first_log="${state_dir}/queue-claim-crash.log" second_log="${state_dir}/queue-owner-crash.log" run_id
+  log 'running queue acquisition crash-window smoke'
+  clear_command_logs; reset_flow_counters
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_QUEUE_FAILPOINT=after_exclusive_claim_before_owner_record \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}") > "$first_log" 2>&1; then
+    fail 'exclusive-claim failpoint should stop the queue'
+  fi
+  run_id="$(sed -n 's/^\[queue\] run ID: //p' "$first_log" | head -n 1)"
+  [[ -n "$run_id" && -f "${repo_dir}/.work/queue/runs/${run_id}/manifest.state" && -f "${repo_dir}/.work/queue/runs/${run_id}/run.state" ]] || fail 'claim crash must retain a resumable minimal run'
+  [[ -d "${repo_dir}/.work/queue/lease.lock" ]] || fail 'claim crash should expose the tested empty lease boundary'
+  assert_equals 0 "$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)" 'empty claim owner count'
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_QUEUE_FAILPOINT=after_complete_owner_publication \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$second_log" 2>&1; then
+    fail 'complete-owner failpoint should stop the queue'
+  fi
+  assert_file_contains "$second_log" 'recovering incomplete empty queue lease claim'
+  assert_file_not_contains "$second_log" 'Unknown queue run ID'
+  assert_file_not_contains "$second_log" 'command not found'
+  assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-claim-resume.log" 2>&1; then
+    cat "${state_dir}/queue-claim-resume.log" >&2; fail 'queue acquisition crash windows should resume without manual deletion'
+  fi
+  rm -f "${state_dir}/batch-pr-url.txt"
+}
+
+run_queue_legacy_control_plane_smoke() {
+  local lease_log="${state_dir}/queue-legacy-lease.log" current_log="${state_dir}/queue-legacy-current.log"
+  log 'running legacy queue control-plane rejection smoke'
+  mkdir -p "${repo_dir}/.work/queue"
+  printf 'schema_version\t1\nrun_id\tlegacy\n' > "${repo_dir}/.work/queue/lease.state"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}") > "$lease_log" 2>&1; then
+    fail 'legacy v1 lease artifact must be rejected'
+  fi
+  assert_file_contains "$lease_log" 'Unsupported legacy queue lease schema/path'
+  assert_file_not_contains "$lease_log" 'command not found'
+  rm -f "${repo_dir}/.work/queue/lease.state"
+  printf 'legacy-run\n' > "${repo_dir}/.work/queue/current"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume current) > "$current_log" 2>&1; then
+    fail 'legacy v1 current artifact must be rejected'
+  fi
+  assert_file_contains "$current_log" 'Unsupported legacy queue current schema v1'
+  assert_file_not_contains "$current_log" 'command not found'
+  rm -f "${repo_dir}/.work/queue/current"
+}
+
 run_issue_queue_strict_issue_review_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
-  local queue_log="${state_dir}/queue-strict-review.log"
+  local queue_log="${state_dir}/queue-strict-review.log" run_id
 
   log 'running issue queue strict per-issue review smoke'
   clear_command_logs
@@ -2456,8 +2583,23 @@ run_issue_queue_strict_issue_review_smoke() {
   fi
   assert_file_contains "${state_dir}/queue-after-manifest.log" 'Queue failpoint triggered: after_minimal_run_publication'
   assert_file_contains "${state_dir}/queue-after-manifest.log" 'resume with:'
-  assert_file_exists "${repo_dir}/.work/queue/current"
+  run_id="$(sed -n 's/^\[queue\] run ID: //p' "${state_dir}/queue-after-manifest.log" | head -n 1)"
+  assert_path_not_exists "${repo_dir}/.work/queue/current"
   assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
+  mkdir -p "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues"
+  printf 'schema_version\t2\nrun_id\t%s\nbatch_id\tbatch-%s-%s\nfirst_issue\t%s\nlast_issue\t%s\nbranch\tbatch/%s-%s\nbase_commit\tnone\nartifact_path\t.work/queue/batches/batch-%s-%s\nstate\tplanned\nupdated_at\t2026-08-06T00:00:00Z\n' \
+    "$run_id" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" \
+    > "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/batch.state"
+  printf 'schema_version\t2\nrun_id\t%s\nbatch_id\tbatch-%s-%s\nissue_number\t%s\nbase_commit\tnone\ncommit_sha\tnone\nartifact_path\tnone\nstate\tleased\nupdated_at\t2026-08-06T00:00:00Z\n' \
+    "$run_id" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
+    > "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-partial-reconcile.log" 2>&1; then
+    fail 'partial initialization reconciliation failpoint should stop before Issue work'
+  fi
+  assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tleased'
+  assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" $'state\tplanned'
+  assert_file_contains "${repo_dir}/.work/queue/current" "run_id$(printf '\t')${run_id}"
 
   if (
     cd "${repo_dir}"
@@ -2582,7 +2724,8 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
-  run_dir="$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  run_dir="$(grep -l $'^issues\t41,40$' "${repo_dir}"/.work/queue/runs/*/manifest.state | head -n 1)"
+  run_dir="${run_dir%/manifest.state}"
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
   assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
   assert_file_contains "${run_dir}/manifest.state" $'batch_review_reasoning\tqueue_review'
@@ -2610,12 +2753,15 @@ run_issue_queue_smoke() {
 }
 
 run_queue_lease_smoke() {
-  local helper="${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/lib/queue_state.sh" lease="${repo_dir}/.work/queue/lease.lock" log_file run_id token='smoke-owner-token'
+  local helper="${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/lib/queue_state.sh" lease="${repo_dir}/.work/queue/lease.lock" log_file run_id other_run token='smoke-owner-token' owner_start
+  local pause="${state_dir}/queue-takeover-pause" takeover_barrier="${state_dir}/queue-takeover-barrier"
+  local takeover_pid takeover_two_pid takeover_winner takeover_loser takeover_label replacement_record replacement_token replacement_generation attempt
   log 'running queue lease smoke'
   run_id="$(basename "$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)")"
+  owner_start="$(awk '{print $22}' "/proc/$$/stat")"
   mkdir -p "$lease"
-  QUEUE_STATE_HELPER="$helper" QUEUE_LEASE="$lease" QUEUE_OWNER_PID="$$" QUEUE_RUN_ID="$run_id" QUEUE_TOKEN="$token" bash -c '
-set -euo pipefail; source "$QUEUE_STATE_HELPER"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 "$QUEUE_OWNER_PID" "$(hostname 2>/dev/null || uname -n)" unavailable
+  QUEUE_STATE_HELPER="$helper" QUEUE_LEASE="$lease" QUEUE_OWNER_PID="$$" QUEUE_OWNER_START="$owner_start" QUEUE_RUN_ID="$run_id" QUEUE_TOKEN="$token" bash -c '
+set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 "$QUEUE_OWNER_PID" "$(hostname 2>/dev/null || uname -n)" "$QUEUE_OWNER_START"
 '
   log_file="${state_dir}/queue-live-lease.log"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
@@ -2625,14 +2771,63 @@ set -euo pipefail; source "$QUEUE_STATE_HELPER"; queue_state_write_lease "$QUEUE
 
   rm -rf "$lease"; mkdir -p "$lease"
   QUEUE_STATE_HELPER="$helper" QUEUE_LEASE="$lease" QUEUE_RUN_ID="$run_id" QUEUE_TOKEN="$token" bash -c '
-set -euo pipefail; source "$QUEUE_STATE_HELPER"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 999999 different-host unavailable
+set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 999999 different-host unavailable
 '
   log_file="${state_dir}/queue-foreign-lease.log"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
     fail 'different-host queue lease must require explicit takeover'
   fi
   assert_file_contains "$log_file" 'with --take-over-lease'
-  rm -rf "$lease"
+  log_file="${state_dir}/queue-stale-new-run.log"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99) > "$log_file" 2>&1; then
+    fail 'fresh run must reject a stale unfinished lease'
+  fi
+  assert_file_contains "$log_file" "resume with: ${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh --resume ${run_id}"
+  assert_file_not_contains "$log_file" 'command not found'
+  other_run="$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d ! -name "$run_id" -printf '%f\n' | head -n 1)"
+  log_file="${state_dir}/queue-lease-run-mismatch.log"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$other_run" --take-over-lease) > "$log_file" 2>&1; then
+    fail 'resume run-ID mismatch must not consume another run lease'
+  fi
+  assert_file_contains "$log_file" "Queue lease run ${run_id} conflicts with requested run ${other_run}"
+  rm -rf "$pause" "$takeover_barrier"; mkdir -p "$pause" "$takeover_barrier"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=takeover-one "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id" --take-over-lease
+  ) > "${state_dir}/queue-takeover-one.log" 2>&1 & takeover_pid=$!
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=takeover-two "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id" --take-over-lease
+  ) > "${state_dir}/queue-takeover-two.log" 2>&1 & takeover_two_pid=$!
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    [[ -f "$takeover_barrier/ready.lease_acquire.takeover-one" && -f "$takeover_barrier/ready.lease_acquire.takeover-two" ]] && break
+    sleep 0.01
+  done
+  touch "$takeover_barrier/release.lease_acquire"
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do compgen -G "$pause/paused.after_acquire.takeover-*" >/dev/null && break; sleep 0.01; done
+  if [[ -f "$pause/paused.after_acquire.takeover-one" ]]; then
+    takeover_winner="$takeover_pid"; takeover_loser="$takeover_two_pid"; takeover_label=takeover-one
+  elif [[ -f "$pause/paused.after_acquire.takeover-two" ]]; then
+    takeover_winner="$takeover_two_pid"; takeover_loser="$takeover_pid"; takeover_label=takeover-two
+  else
+    fail 'explicit takeover contention produced no replacement owner'
+  fi
+  if wait "$takeover_loser"; then fail 'second takeover contender unexpectedly succeeded'; fi
+  replacement_record="$(find "$lease" -maxdepth 1 -type f -name 'owner.*.state')"
+  replacement_token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$replacement_record")"
+  replacement_generation="$(awk -F '\t' '$1 == "lease_generation" { print $2 }' "$replacement_record")"
+  [[ "$replacement_token" != "$token" ]] || fail 'takeover must rotate owner token'
+  assert_equals 2 "$replacement_generation" 'takeover lease generation'
+  assert_equals 1 "$(find "$lease" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)" 'takeover authoritative owner count'
+  if find "${repo_dir}/.work/queue" -path '*/lease.lock/lease.lock' -print -quit | grep -q .; then fail 'takeover must not nest lease.lock'; fi
+  touch "$pause/release.after_acquire.${takeover_label}"
+  if wait "$takeover_winner"; then fail 'completed run takeover should stop during run validation'; fi
+  if ! grep -Fq 'explicitly taking over lease' "${state_dir}/queue-takeover-one.log" && ! grep -Fq 'explicitly taking over lease' "${state_dir}/queue-takeover-two.log"; then
+    fail 'takeover winner did not report explicit displacement'
+  fi
+  assert_path_not_exists "$lease"
 }
 
 run_vendor_worktree_visibility_smoke() {
@@ -2736,6 +2931,9 @@ main() {
   run_continue_after_review_smoke
   run_queue_state_store_smoke
   run_issue_queue_fail_fast_smoke
+  run_queue_legacy_control_plane_smoke
+  run_queue_acquisition_crash_smoke
+  run_queue_full_contention_smoke
   run_issue_queue_smoke
   run_queue_lease_smoke
   run_issue_queue_strict_issue_review_smoke

@@ -26,6 +26,10 @@ log_info() {
   printf '[queue] %s\n' "$1"
 }
 
+log_error() {
+  printf '[queue] %s\n' "$1" >&2
+}
+
 fail() {
   printf '[queue] %s\n' "$1" >&2
   exit 1
@@ -33,6 +37,22 @@ fail() {
 
 queue_failpoint() {
   [[ "${CODEX_FLOW_QUEUE_FAILPOINT:-}" != "$1" ]] || fail "Queue failpoint triggered: $1"
+}
+
+queue_test_barrier() {
+  local name="$1" directory="${CODEX_FLOW_QUEUE_TEST_BARRIER_DIR:-}" label="${CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL:-$$}"
+  [[ -n "$directory" ]] || return 0
+  mkdir -p "$directory"
+  : > "${directory}/ready.${name}.${label}"
+  while [[ ! -f "${directory}/release.${name}" ]]; do sleep 0.01; done
+}
+
+queue_test_pause() {
+  local name="$1" directory="${CODEX_FLOW_QUEUE_TEST_PAUSE_DIR:-}" label="${CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL:-$$}"
+  [[ -n "$directory" && "${CODEX_FLOW_QUEUE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
+  mkdir -p "$directory"
+  : > "${directory}/paused.${name}.${label}"
+  while [[ ! -f "${directory}/release.${name}.${label}" ]]; do sleep 0.01; done
 }
 
 usage() {
@@ -269,36 +289,55 @@ print_resume_hint() {
 }
 
 release_queue_lease() {
+  local status=0
   [[ "${lease_owned:-0}" -eq 1 ]] || return 0
+  queue_state_guard_enter || { log_error 'Cannot acquire queue serialization guard for lease release'; return 1; }
   if ! assert_queue_lease_owned; then
     log_error "Queue lease ownership was lost; refusing to delete replacement lease"
     lease_owned=0
+    queue_state_guard_leave || true
     return 1
   fi
-  if ! rm -f -- "${queue_lock}/owner.${lease_owner_token}.state"; then
+  queue_test_pause before_lease_release
+  if [[ ! -f "${queue_lock}/owner.${lease_owner_token}.state" ]] || ! rm -- "${queue_lock}/owner.${lease_owner_token}.state"; then
     log_error 'Queue lease owner record disappeared during compare-and-delete'
     lease_owned=0
+    queue_state_guard_leave || true
     return 1
   fi
   if ! rmdir -- "$queue_lock"; then
     log_error 'Queue lease changed during compare-and-delete; replacement was not deleted'
     lease_owned=0
+    queue_state_guard_leave || true
     return 1
   fi
   lease_owned=0
+  QUEUE_STATE_ASSERT_OWNED_FUNCTION=''
+  queue_state_guard_leave || status=1
+  return "$status"
 }
 
 assert_queue_lease_owned() {
-  local record="${queue_lock}/owner.${lease_owner_token}.state"
-  [[ "${lease_owned:-0}" -eq 1 && -f "$record" ]] || { log_error "Queue lease ownership lost for run ${run_id}"; return 1; }
-  queue_state_validate_file "$record" lease >/dev/null || return 1
-  [[ "$(queue_state_read_field "$record" lease owner_token)" == "$lease_owner_token" && \
-     "$(queue_state_read_field "$record" lease lease_generation)" == "$lease_generation" && \
-     "$(queue_state_read_field "$record" lease run_id)" == "$run_id" && \
-     "$(queue_state_read_field "$record" lease owner_pid)" == "$$" && \
-     "$(queue_state_read_field "$record" lease owner_host)" == "$lease_owner_host" ]] || {
-    log_error "Queue lease fencing identity no longer matches run ${run_id}"; return 1;
-  }
+  local record="${queue_lock}/owner.${lease_owner_token}.state" current_start entered=0 found
+  local -A fields=()
+  if [[ "${QUEUE_STATE_GUARD_DEPTH:-0}" -eq 0 ]]; then queue_state_guard_enter || return 1; entered=1; fi
+  found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+  if [[ "${lease_owned:-0}" -ne 1 || ! -f "$record" || "$found" != "$record" ]] || \
+     ! queue_state_parse_file "$record" lease fields || ! queue_state_validate_file "$record" lease; then
+    log_error "Queue lease ownership lost for run ${run_id}"
+    [[ "$entered" -eq 0 ]] || queue_state_guard_leave || true
+    return 1
+  fi
+  current_start="$(queue_process_start_identity "$$")"
+  if [[ "${fields[owner_token]}" != "$lease_owner_token" || "${fields[lease_generation]}" != "$lease_generation" || \
+        "${fields[run_id]}" != "$run_id" || "${fields[owner_pid]}" != "$$" || "${fields[owner_host]}" != "$lease_owner_host" || \
+        "${fields[process_start]}" == unavailable || "$current_start" == unavailable || "${fields[process_start]}" != "$current_start" || \
+        "${record##*/}" != "owner.${fields[owner_token]}.state" ]]; then
+    log_error "Queue lease fencing identity no longer matches run ${run_id}"
+    [[ "$entered" -eq 0 ]] || queue_state_guard_leave || true
+    return 1
+  fi
+  [[ "$entered" -eq 0 ]] || queue_state_guard_leave
 }
 
 record_abnormal_exit() {
@@ -317,7 +356,7 @@ record_abnormal_exit() {
       queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" failed 2>/dev/null || true
     print_resume_hint >&2
   fi
-  release_queue_lease
+  release_queue_lease || true
   if [[ -n "$signal_name" ]]; then exit "$status"; fi
   exit "$status"
 }
@@ -329,41 +368,95 @@ install_queue_traps() {
 }
 
 acquire_queue_lease() {
-  local owner_host owner_pid owner_run owner_token owner_generation owner_start local_host local_start record audit
+  local owner_host owner_pid owner_run owner_token owner_generation owner_start local_host local_start record audit found owner_status
+  local -A owner_fields=()
   mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"; local_host="$(queue_host_identity)"
   lease_owner_token="$(queue_owner_token)"; lease_owner_host="$local_host"; local_start="$(queue_process_start_identity "$$")"; lease_generation=1
-  if ! queue_state_acquire_lease_directory "$queue_lock"; then
-    record="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
-    [[ -n "$record" && "$record" != *$'\n'* ]] || fail "Invalid queue lease requires manual repair: ${queue_lock}"
-    queue_state_validate_file "$record" lease || fail "Invalid queue lease requires manual repair: ${queue_lock}"
-    owner_run="$(queue_state_read_field "$record" lease run_id)"; owner_host="$(queue_state_read_field "$record" lease owner_host)"
-    owner_pid="$(queue_state_read_field "$record" lease owner_pid)"; owner_token="$(queue_state_read_field "$record" lease owner_token)"
-    owner_generation="$(queue_state_read_field "$record" lease lease_generation)"; owner_start="$(queue_state_read_field "$record" lease process_start)"
+  [[ "$local_start" != unavailable ]] || fail 'Cannot establish local process-start identity; queue lease acquisition is unverifiable'
+  queue_test_barrier lease_acquire
+  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard'
+  if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
+    queue_state_guard_leave || true
+    fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
+  fi
+  if [[ -d "$queue_lock" ]]; then
+    found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+    if [[ -z "$found" ]]; then
+      log_info 'recovering incomplete empty queue lease claim'
+      rmdir -- "$queue_lock" || { queue_state_guard_leave || true; fail "Incomplete lease claim is not empty: ${queue_lock}"; }
+    elif [[ "$found" == *$'\n'* ]]; then
+      queue_state_guard_leave || true
+      fail "Invalid queue lease has multiple owner records: ${queue_lock}"
+    else
+      record="$found"
+      if ! queue_state_parse_file "$record" lease owner_fields || ! queue_state_validate_file "$record" lease || \
+         [[ "${record##*/}" != "owner.${owner_fields[owner_token]}.state" ]]; then
+        queue_state_guard_leave || true
+        fail "Invalid queue lease owner identity: ${queue_lock}"
+      fi
+      owner_run="${owner_fields[run_id]}"; owner_host="${owner_fields[owner_host]}"; owner_pid="${owner_fields[owner_pid]}"
+      owner_token="${owner_fields[owner_token]}"; owner_generation="${owner_fields[lease_generation]}"; owner_start="${owner_fields[process_start]}"
+      queue_test_pause after_displaced_lease_read
+    fi
+  elif [[ -e "$queue_lock" ]]; then
+    queue_state_guard_leave || true
+    fail "Invalid queue lease path is not a directory: ${queue_lock}"
+  fi
+  if [[ -n "${owner_run:-}" ]]; then
     if [[ "$resume_requested" -ne 1 || "$owner_run" != "$run_id" ]]; then
       log_error "Queue lease records unfinished run ${owner_run}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${owner_run}"
+      if [[ "$resume_requested" -eq 0 ]]; then discard_preflight_run; fi
+      queue_state_guard_leave || true
       fail "Queue lease run ${owner_run} conflicts with requested run ${run_id}"
     fi
     if [[ "$owner_host" == "$local_host" ]]; then
-      if kill -0 "$owner_pid" 2>/dev/null && { [[ "$owner_start" == unavailable ]] || [[ "$(queue_process_start_identity "$owner_pid")" == "$owner_start" ]]; }; then
+      owner_status=unverifiable
+      if kill -0 "$owner_pid" 2>/dev/null; then
+        if [[ "$owner_start" != unavailable && "$(queue_process_start_identity "$owner_pid")" == "$owner_start" ]]; then owner_status=live; fi
+      elif [[ -d /proc && ! -e "/proc/${owner_pid}" ]]; then
+        owner_status=dead
+      elif [[ -e "/proc/${owner_pid}" ]]; then
+        owner_status=live
+      fi
+      if [[ "$owner_status" == live ]]; then
+        queue_state_guard_leave || true
         fail "Queue run is leased by live same-host PID ${owner_pid} on ${owner_host}"
+      fi
+      if [[ "$owner_status" != dead && "$take_over_lease" -ne 1 ]]; then
+        queue_state_guard_leave || true
+        fail "Queue lease owner PID ${owner_pid} on ${owner_host} is unverifiable; resume with --take-over-lease only after asserting it stopped"
       fi
       log_info "recovering dead same-host lease for explicit resume ${run_id}"
     elif [[ "$take_over_lease" -ne 1 ]]; then
+      queue_state_guard_leave || true
       fail "Queue lease belongs to different or unverifiable host ${owner_host}; resume ${run_id} with --take-over-lease"
     else
       log_info "explicitly taking over lease from host ${owner_host}; operator asserts the old process has stopped"
     fi
     lease_generation=$((owner_generation + 1)); audit="${CODEX_FLOW_QUEUE_DIR}/lease.displaced.${owner_generation}.${owner_token}"
-    mv -- "$queue_lock" "$audit" 2>/dev/null || fail 'Queue lease changed while attempting takeover; retry'
-    queue_state_acquire_lease_directory "$queue_lock" || fail 'Another runner acquired the queue lease during takeover'
+    [[ ! -e "$audit" ]] || { queue_state_guard_leave || true; fail "Lease audit destination already exists: ${audit}"; }
+    mv -T -- "$queue_lock" "$audit" || { queue_state_guard_leave || true; fail 'Queue lease displacement failed'; }
   fi
+  mkdir "$queue_lock" || { queue_state_guard_leave || true; fail 'Queue lease claim publication failed'; }
+  queue_failpoint after_exclusive_claim_before_owner_record
   record="${queue_lock}/owner.${lease_owner_token}.state"
-  queue_state_write_lease "$record" "$run_id" "$lease_owner_token" "$lease_generation" "$$" "$local_host" "$local_start" \
-    "${owner_run:-none}" "${owner_token:-none}" "${owner_generation:-none}"
+  if ! queue_state_write_lease "$record" "$run_id" "$lease_owner_token" "$lease_generation" "$$" "$local_host" "$local_start" \
+    "${owner_run:-none}" "${owner_token:-none}" "${owner_generation:-none}"; then
+    queue_state_guard_leave || true
+    fail 'Queue lease owner-record publication failed'
+  fi
   lease_owned=1; QUEUE_STATE_ASSERT_OWNED_FUNCTION=assert_queue_lease_owned
+  queue_failpoint after_complete_owner_publication
+  queue_state_guard_leave || fail 'Cannot release queue serialization guard after lease acquisition'
 }
 
-initialize_queue_run_state() {
+discard_preflight_run() {
+  run_initialized=0
+  rm -f -- "${run_state_dir}/manifest.state" "${run_state_dir}/run.state" "${run_state_dir}/checkpoint.state" || return 1
+  rmdir -- "$run_state_dir" || return 1
+}
+
+initialize_queue_run_minimal() {
   local ordered
   run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
   ordered="$(join_issue_numbers "${issue_numbers[@]}")"
@@ -373,9 +466,12 @@ initialize_queue_run_state() {
     "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(canonical_repository_identity)"
   queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
   run_initialized=1
-  reconcile_current_pointer
   print_resume_hint
   queue_failpoint after_minimal_run_publication
+}
+
+complete_queue_run_initialization() {
+  reconcile_current_pointer
   reconcile_queue_run_entities
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
 }
@@ -666,6 +762,7 @@ process_batch() {
   local batch_state_file batch_state
   local publish_state_file publish_line published_state published_merged published_head published_base published_sha
 
+  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard before batch phase'
   assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
@@ -674,7 +771,7 @@ process_batch() {
   batch_state_file="${run_state_dir}/batches/${batch_id}/batch.state"
   publish_state_file="${run_state_dir}/batches/${batch_id}/publish.state"
   batch_state="$(queue_state_read_field "$batch_state_file" batch state)"
-  [[ "$batch_state" != completed ]] || return 0
+  if [[ "$batch_state" == completed ]]; then queue_state_guard_leave || fail 'Cannot release queue serialization guard'; return 0; fi
   issues_file="${batch_dir}/issues.txt"
 
   mkdir -p "${batch_dir}/history"
@@ -775,6 +872,7 @@ process_batch() {
   fi
   queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
   assert_queue_lease_owned || fail 'Queue lease lost after batch phase'
+  queue_state_guard_leave || fail 'Cannot release queue serialization guard after batch phase'
 }
 
 main() {
@@ -801,6 +899,7 @@ main() {
   fi
 
   require_command awk
+  require_command flock
   require_command gh
   require_command git
   require_command mktemp
@@ -810,6 +909,14 @@ main() {
   enter_repo_root
   require_queue_prompt_templates
   lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; QUEUE_STATE_ASSERT_OWNED_FUNCTION=''
+  QUEUE_STATE_SERIALIZATION_GUARD="${CODEX_FLOW_QUEUE_DIR}/control.guard"
+  if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
+    fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
+  fi
+  if [[ -f "${CODEX_FLOW_QUEUE_DIR}/current" ]] && ! grep -q $'^schema_version\t' "${CODEX_FLOW_QUEUE_DIR}/current"; then
+    fail 'Unsupported legacy queue current schema v1; manual migration is required'
+  fi
+  install_queue_traps
   if [[ "$resume_requested" -eq 1 ]]; then
     if [[ "$resume_target" == current ]]; then
       current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
@@ -828,7 +935,7 @@ main() {
     run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
     [[ -d "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
     acquire_queue_lease
-    install_queue_traps
+    queue_test_pause after_acquire
     load_queue_run_state
     issue_count="${#issue_numbers[@]}"
   else
@@ -843,10 +950,11 @@ main() {
       queue_state_remove_pointer_if_matches "$current_pointer" "$pointed_run"
     fi
     run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
+    initialize_queue_run_minimal
     acquire_queue_lease
-    install_queue_traps
+    complete_queue_run_initialization
+    queue_test_pause after_acquire
     ensure_planned_batch_branches_available
-    initialize_queue_run_state
   fi
   print_resume_hint
   queue_failpoint after_lease_before_issue_fetch
