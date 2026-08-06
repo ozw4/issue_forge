@@ -206,7 +206,7 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest は入力順の Issue list、effective options、base、repository identity を保持し、run、batch、Issue state は atomic replacement と compare-and-set で更新されます。lease は PID/host で並行実行を防ぎ、`current` pointer は active run の間だけ atomic publish されます。Issue は commit SHA と archive を検証してから acknowledge され、resume は manifest 順の最初の未 acknowledge Issue から commit/archive/PR/merge の kill window を厳密に reconcile します。既存の `.work/queue/batches/...` は artifact layout として維持されますが authoritative progress ではありません。
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v2 の authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest と最小 `run.state` が最初の resumable boundary で、resume は manifest から不足 batch/Issue entity だけを再作成します。`.work/queue/lease.lock` の atomic `mkdir` が排他的取得点で、random owner token と世代により全 state mutation と外部 phase boundary を fence します。dead same-host lease は同じ run ID の明示 resume だけが回収でき、別 host takeover は old process 停止を operator が保証する `--take-over-lease` が必要です。credential-free canonical repository identity は同じ repository の SSH/HTTPS origin を同一視します。ownership-aware な `current` pointer は explicit resume でも再 publish され、completion kill window の completed pointer は `--resume current` が安全に除去します。
 
 ## Issue zip import
 

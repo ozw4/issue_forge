@@ -240,7 +240,7 @@ Options:
 - `--auto-merge` requests auto-merge for each batch PR and waits for it to merge before starting the next batch
 - `--draft` creates draft batch PRs; it cannot be combined with `--auto-merge`
 - `--resume <run_id|current>` resumes only the immutable manifest identified by the run ID. It rejects Issue arguments and all queue-shaping options.
-- `--take-over-lease` is valid only with `--resume`; it is required for a lease owned by another or unverifiable host. A dead same-host owner is recovered without this option, while a live same-host owner always blocks takeover.
+- `--take-over-lease` is valid only with `--resume`; it is required for a lease owned by another or unverifiable host. A dead same-host owner is recoverable without this option only by explicit resume of the lease's same run ID. A live same-host owner always blocks takeover. By using different-host takeover, the operator asserts that the displaced process has stopped; elapsed time alone is never proof of death.
 
 The queue processes issues strictly in the input order. It creates one deterministic batch branch per batch, named `${CODEX_FLOW_BATCH_BRANCH_PREFIX}<first_issue>-<last_issue>`; with defaults this is `batch/<first_issue>-<last_issue>`. The branch is created from `CODEX_FLOW_BASE_REF` after fetching `origin/${CODEX_FLOW_BASE_BRANCH}`. If the planned branch already exists locally or remotely, the queue fails before creating it.
 
@@ -256,7 +256,7 @@ After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<fi
 
 Every accepted queue invocation creates a collision-resistant, filesystem-safe run ID and authoritative state at `.work/queue/runs/<run_id>/` before branch creation or Issue fetching. Existing `.work/queue/batches/batch-<first>-<last>/` paths remain non-authoritative artifact paths, so repeated Issue ranges have distinct authoritative state.
 
-Queue state schema version `1` uses strict `key<TAB>value` data files that are never sourced:
+Queue state schema version `2` uses strict `key<TAB>value` data files that are never sourced. Version `1` is unsupported and fails explicitly rather than being guessed or migrated:
 
 | File | Required keys |
 | --- | --- |
@@ -264,12 +264,18 @@ Queue state schema version `1` uses strict `key<TAB>value` data files that are n
 | `run.state` | `schema_version`, `run_id`, `state`, `updated_at` |
 | `batches/batch-<first>-<last>/batch.state` | `schema_version`, `run_id`, `batch_id`, `first_issue`, `last_issue`, `branch`, `base_commit`, `artifact_path`, `state`, `updated_at` |
 | `batches/batch-<first>-<last>/issues/<issue>.state` | `schema_version`, `run_id`, `batch_id`, `issue_number`, `base_commit`, `commit_sha`, `artifact_path`, `state`, `updated_at` |
+| `current` | `schema_version`, `run_id`, `owner_token`, `lease_generation`, `updated_at` |
+| `lease.lock/owner.<token>.state` | `schema_version`, `run_id`, unpredictable `owner_token`, monotonic `lease_generation`, `owner_pid`, `owner_host`, `process_start`, `acquired_at`, and displaced-lease audit identity |
 
 The manifest is immutable. Initial unavailable SHA/artifact values are `none`. Run states are `planned`, `running`, `interrupted`, `failed`, `manual_review_required`, and `completed`; batch states are `planned`, `branch_ready`, `issues_running`, `checks_running`, `review_running`, `accepted`, `publishing`, `completed`, and `failed`; Issue states are `planned`, `leased`, `running`, `committed`, `artifacts_archived`, `acknowledged`, and `failed`.
 
 State publication writes and validates a complete sibling temporary file and then performs one atomic `mv`; an interrupted pre-`mv` publication leaves the prior authoritative file intact. The next state-store operation removes abandoned `.queue-state.tmp.*` siblings deterministically. Parsing rejects unknown, duplicate, missing, or malformed fields. Mutable transitions require the expected current state and stale transitions fail without modification. Timestamps are diagnostic only; durable IDs and transitions determine correctness.
 
-The queue atomically publishes `.work/queue/current` for the active resumable run and removes it after completion. A durable `.work/queue/lease.state` records run ID, PID, host, and acquisition time. SIGINT, SIGTERM, and ordinary failures record an interrupted/failed run checkpoint and print the exact resume command before releasing the lease when possible. SIGKILL may leave a stale lease; an explicit resume recovers a demonstrably dead same-host PID.
+Exclusive acquisition is the atomic creation of `.work/queue/lease.lock`; regular-file replacement is not used as a lock primitive. The owner record carries a random token and generation retained in process memory. Every authoritative state publication and every external phase boundary revalidates run ID, token, generation, PID, and host. Takeover moves the displaced directory to an audit path and increments the generation. Release removes only the caller's token-named record and then removes the empty directory, so an old owner cannot delete a replacement lease.
+
+The queue publishes the strict `.work/queue/current` pointer only after immutable manifest and minimal `run.state` publication. Explicit run-ID resume validates and republishes that run; a different nonterminal pointer is a conflict. Completion compare-removes only its own pointer. `--resume current` compare-removes a completed target left by the completion kill window and reports that no resumable current run exists.
+
+The manifest and minimal planned run are the first resumable boundary and precede branch creation or Issue fetch. Resume derives the entire expected batch/Issue graph from that immutable manifest, creates only missing planned entities, and rejects immutable-field mismatches without overwriting valid mutable entities. Repository identity is canonical and credential-free; equivalent SSH and HTTP(S) origin forms resolve to the same host/owner/name identity.
 
 Every externally visible queue phase records `before` and `after` checkpoints. Issues advance `planned -> leased -> running -> committed -> artifacts_archived -> acknowledged`. Ack validates the saved Issue base, deterministic Issue commit and ancestry, archive, expected batch branch, and clean consumer worktree. Resume always scans the immutable Issue order and starts with the first non-acknowledged Issue. Existing deterministic commits and archives are validated and adopted; ambiguous ancestry, message, ownership, branch, worktree, or PR head/base/SHA fails explicitly. Published PR identity is stored in `publish.state`, so resume validates and reuses the exact PR and never creates a second PR after the publish boundary. A merge already visible on that PR is recorded without issuing another merge request.
 

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 
-readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION='1'
+readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION='2'
 
 queue_state_error() { printf '[queue-state] %s\n' "$1" >&2; return 1; }
 queue_state_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 queue_state_cleanup_temporary_files() {
   local directory="$1" path
+  if [[ -n "${QUEUE_STATE_ASSERT_OWNED_FUNCTION:-}" && "${QUEUE_STATE_ASSERT_IN_PROGRESS:-0}" -ne 1 ]]; then
+    QUEUE_STATE_ASSERT_IN_PROGRESS=1
+    if ! "${QUEUE_STATE_ASSERT_OWNED_FUNCTION}"; then QUEUE_STATE_ASSERT_IN_PROGRESS=0; return 1; fi
+    QUEUE_STATE_ASSERT_IN_PROGRESS=0
+  fi
   [[ -d "$directory" ]] || return 0
   while IFS= read -r path; do rm -f -- "$path"; done \
     < <(find "$directory" -maxdepth 1 -type f -name '.queue-state.tmp.*' -print | LC_ALL=C sort)
@@ -49,6 +54,22 @@ queue_state_require_issues() {
   [[ "$reconstructed" == "$value" ]] || queue_state_error "Malformed ordered Issue list: ${value}"
 }
 
+queue_state_canonical_repository_identity() {
+  local remote="$1" host path
+  case "$remote" in
+    *@*:*) host="${remote#*@}"; host="${host%%:*}"; path="${remote#*:}" ;;
+    ssh://*|http://*|https://*)
+      remote="${remote#*://}"; remote="${remote#*@}"; host="${remote%%/*}"; host="${host%%:*}"; path="${remote#*/}" ;;
+    /*) printf 'local-path:%s\n' "$remote"; return 0 ;;
+    *) queue_state_error "Unsupported repository remote URL: ${remote}"; return 1 ;;
+  esac
+  path="${path#/}"; path="${path%.git}"
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$path" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {
+    queue_state_error 'Cannot derive credential-free repository identity'; return 1;
+  }
+  printf '%s/%s\n' "${host,,}" "$path"
+}
+
 queue_state_parse_file() {
   local file="$1" schema="$2" output_name="$3" line key value
   local -n output="$output_name"
@@ -59,7 +80,8 @@ queue_state_parse_file() {
     run) required=(schema_version run_id state updated_at) ;;
     batch) required=(schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at) ;;
     issue) required=(schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at) ;;
-    lease) required=(schema_version run_id owner_pid owner_host acquired_at) ;;
+    lease) required=(schema_version run_id owner_token lease_generation owner_pid owner_host process_start acquired_at displaced_run_id displaced_owner_token displaced_generation) ;;
+    pointer) required=(schema_version run_id owner_token lease_generation updated_at) ;;
     checkpoint) required=(schema_version run_id entity phase status updated_at) ;;
     publish) required=(schema_version run_id batch_id pr_number pr_url head_branch base_branch head_sha state updated_at) ;;
     *) queue_state_error "Unknown state schema: ${schema}"; return 1 ;;
@@ -132,8 +154,18 @@ queue_state_validate_file() {
         || { queue_state_error "Malformed Issue state: ${fields[state]}"; return 1; }
       ;;
     lease)
+      queue_state_require_token 'lease owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed lease generation: ${fields[lease_generation]}"; return 1; }
       [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed lease owner PID: ${fields[owner_pid]}"; return 1; }
       queue_state_require_token 'lease owner host' "${fields[owner_host]}" || return 1
+      [[ "${fields[process_start]}" == unavailable || "${fields[process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed process-start identity: ${fields[process_start]}"; return 1; }
+      [[ "${fields[displaced_run_id]}" == none ]] || queue_state_require_token 'displaced run ID' "${fields[displaced_run_id]}" || return 1
+      [[ "${fields[displaced_owner_token]}" == none ]] || queue_state_require_token 'displaced owner token' "${fields[displaced_owner_token]}" || return 1
+      [[ "${fields[displaced_generation]}" == none || "${fields[displaced_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed displaced generation: ${fields[displaced_generation]}"; return 1; }
+      ;;
+    pointer)
+      queue_state_require_token 'current owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed current lease generation: ${fields[lease_generation]}"; return 1; }
       ;;
     checkpoint)
       queue_state_require_token 'checkpoint entity' "${fields[entity]}" || return 1
@@ -155,6 +187,7 @@ queue_state_validate_file() {
 
 queue_state_publish_file() {
   local target="$1" schema="$2" content_file="$3" directory temporary_file
+  if [[ -n "${QUEUE_STATE_ASSERT_OWNED_FUNCTION:-}" ]]; then "${QUEUE_STATE_ASSERT_OWNED_FUNCTION}"; fi
   directory="$(dirname "$target")"; mkdir -p "$directory"
   queue_state_cleanup_temporary_files "$directory"
   temporary_file="$(mktemp "${directory}/.queue-state.tmp.XXXXXX")"
@@ -177,6 +210,10 @@ queue_state_generate_run_id() {
   mkdir -p "$runs_dir"; queue_state_cleanup_temporary_files "$runs_dir"
   unique_dir="$(mktemp -d "${runs_dir}/.run-id.XXXXXX")"; suffix="${unique_dir##*.run-id.}"; rmdir "$unique_dir"
   printf '%s-%s\n' "$(date -u '+%Y%m%dT%H%M%SZ')" "$suffix"
+}
+
+queue_state_acquire_lease_directory() {
+  mkdir "$1" 2>/dev/null
 }
 
 queue_state_create_manifest() {
@@ -242,7 +279,6 @@ queue_state_transition() {
 queue_state_update_issue() {
   local target="$1" entity="$2" expected="$3" requested="$4" commit_sha="$5" artifact_path="$6" staging status key
   local -A fields=()
-  local -A fields=()
   queue_state_parse_file "$target" issue fields || return 1; queue_state_validate_file "$target" issue || return 1
   [[ "${fields[state]}" == "$expected" ]] || { queue_state_error "Cannot update ${entity}: expected state '${expected}', actual state '${fields[state]}'"; return 1; }
   fields[state]="$requested"; fields[commit_sha]="$commit_sha"; fields[artifact_path]="$artifact_path"; fields[updated_at]="$(queue_state_now)"
@@ -278,15 +314,30 @@ queue_state_checkpoint() {
 }
 
 queue_state_write_lease() {
-  queue_state_write_content "$1" lease "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
-    "owner_pid	$3" "owner_host	$4" "acquired_at	$(queue_state_now)"
+  local target="$1" id="$2" token="$3" generation="$4" pid="$5" host="$6" process_start="$7" displaced_run="${8:-none}" displaced_token="${9:-none}" displaced_generation="${10:-none}"
+  queue_state_write_content "$target" lease "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	${id}" \
+    "owner_token	${token}" "lease_generation	${generation}" "owner_pid	${pid}" "owner_host	${host}" \
+    "process_start	${process_start}" "acquired_at	$(queue_state_now)" "displaced_run_id	${displaced_run}" \
+    "displaced_owner_token	${displaced_token}" "displaced_generation	${displaced_generation}"
 }
 
 queue_state_publish_pointer() {
-  local target="$1" value="$2" directory temporary
-  queue_state_require_token 'current run ID' "$value" || return 1
-  directory="$(dirname "$target")"; mkdir -p "$directory"; temporary="$(mktemp "${directory}/.queue-state.tmp.XXXXXX")"
-  printf '%s\n' "$value" > "$temporary"; mv -f "$temporary" "$target"
+  queue_state_write_content "$1" pointer "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "owner_token	$3" "lease_generation	$4" "updated_at	$(queue_state_now)"
+}
+
+queue_state_remove_pointer_if_matches() {
+  local target="$1" expected_run="$2" expected_token="${3:-}" expected_generation="${4:-}" actual
+  if [[ -n "${QUEUE_STATE_ASSERT_OWNED_FUNCTION:-}" ]]; then "${QUEUE_STATE_ASSERT_OWNED_FUNCTION}"; fi
+  [[ -f "$target" ]] || return 0
+  actual="$(queue_state_read_field "$target" pointer run_id)" || return 1
+  [[ "$actual" == "$expected_run" ]] || { queue_state_error "Current pointer belongs to run ${actual}, not ${expected_run}"; return 1; }
+  if [[ -n "$expected_token" ]]; then
+    [[ "$(queue_state_read_field "$target" pointer owner_token)" == "$expected_token" && "$(queue_state_read_field "$target" pointer lease_generation)" == "$expected_generation" ]] || {
+      queue_state_error "Current pointer ownership changed for run ${expected_run}"; return 1;
+    }
+  fi
+  rm -f -- "$target"
 }
 
 queue_state_record_publish() {

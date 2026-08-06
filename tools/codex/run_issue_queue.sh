@@ -247,6 +247,22 @@ ensure_planned_batch_branches_available() {
 
 queue_host_identity() { hostname 2>/dev/null || uname -n; }
 
+queue_process_start_identity() {
+  local value
+  value="$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf 'unavailable\n'
+}
+
+queue_owner_token() {
+  od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+canonical_repository_identity() {
+  local remote
+  remote="$(git config --get remote.origin.url)" || fail 'Missing remote.origin.url'
+  queue_state_canonical_repository_identity "$remote" || fail 'Cannot derive canonical repository identity from remote.origin.url'
+}
+
 print_resume_hint() {
   log_info "run ID: ${run_id}"
   log_info "resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${run_id}"
@@ -254,8 +270,35 @@ print_resume_hint() {
 
 release_queue_lease() {
   [[ "${lease_owned:-0}" -eq 1 ]] || return 0
-  rm -f -- "$queue_lock"
+  if ! assert_queue_lease_owned; then
+    log_error "Queue lease ownership was lost; refusing to delete replacement lease"
+    lease_owned=0
+    return 1
+  fi
+  if ! rm -f -- "${queue_lock}/owner.${lease_owner_token}.state"; then
+    log_error 'Queue lease owner record disappeared during compare-and-delete'
+    lease_owned=0
+    return 1
+  fi
+  if ! rmdir -- "$queue_lock"; then
+    log_error 'Queue lease changed during compare-and-delete; replacement was not deleted'
+    lease_owned=0
+    return 1
+  fi
   lease_owned=0
+}
+
+assert_queue_lease_owned() {
+  local record="${queue_lock}/owner.${lease_owner_token}.state"
+  [[ "${lease_owned:-0}" -eq 1 && -f "$record" ]] || { log_error "Queue lease ownership lost for run ${run_id}"; return 1; }
+  queue_state_validate_file "$record" lease >/dev/null || return 1
+  [[ "$(queue_state_read_field "$record" lease owner_token)" == "$lease_owner_token" && \
+     "$(queue_state_read_field "$record" lease lease_generation)" == "$lease_generation" && \
+     "$(queue_state_read_field "$record" lease run_id)" == "$run_id" && \
+     "$(queue_state_read_field "$record" lease owner_pid)" == "$$" && \
+     "$(queue_state_read_field "$record" lease owner_host)" == "$lease_owner_host" ]] || {
+    log_error "Queue lease fencing identity no longer matches run ${run_id}"; return 1;
+  }
 }
 
 record_abnormal_exit() {
@@ -286,73 +329,133 @@ install_queue_traps() {
 }
 
 acquire_queue_lease() {
-  local owner_host owner_pid local_host
-  mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.state"; local_host="$(queue_host_identity)"
-  if [[ -e "$queue_lock" ]]; then
-    queue_state_validate_file "$queue_lock" lease || fail "Invalid queue lease requires manual repair: ${queue_lock}"
-    owner_host="$(queue_state_read_field "$queue_lock" lease owner_host)"; owner_pid="$(queue_state_read_field "$queue_lock" lease owner_pid)"
-    if [[ "$owner_host" == "$local_host" ]]; then
-      if kill -0 "$owner_pid" 2>/dev/null; then fail "Queue run is leased by live same-host PID ${owner_pid} on ${owner_host}"; fi
-      log_info "recovering stale same-host lease from PID ${owner_pid}"
-    elif [[ "$take_over_lease" -ne 1 ]]; then
-      fail "Queue lease belongs to different or unverifiable host ${owner_host}; resume with --take-over-lease"
-    else
-      log_info "explicitly taking over lease from host ${owner_host}"
+  local owner_host owner_pid owner_run owner_token owner_generation owner_start local_host local_start record audit
+  mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"; local_host="$(queue_host_identity)"
+  lease_owner_token="$(queue_owner_token)"; lease_owner_host="$local_host"; local_start="$(queue_process_start_identity "$$")"; lease_generation=1
+  if ! queue_state_acquire_lease_directory "$queue_lock"; then
+    record="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+    [[ -n "$record" && "$record" != *$'\n'* ]] || fail "Invalid queue lease requires manual repair: ${queue_lock}"
+    queue_state_validate_file "$record" lease || fail "Invalid queue lease requires manual repair: ${queue_lock}"
+    owner_run="$(queue_state_read_field "$record" lease run_id)"; owner_host="$(queue_state_read_field "$record" lease owner_host)"
+    owner_pid="$(queue_state_read_field "$record" lease owner_pid)"; owner_token="$(queue_state_read_field "$record" lease owner_token)"
+    owner_generation="$(queue_state_read_field "$record" lease lease_generation)"; owner_start="$(queue_state_read_field "$record" lease process_start)"
+    if [[ "$resume_requested" -ne 1 || "$owner_run" != "$run_id" ]]; then
+      log_error "Queue lease records unfinished run ${owner_run}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${owner_run}"
+      fail "Queue lease run ${owner_run} conflicts with requested run ${run_id}"
     fi
-    rm -f -- "$queue_lock"
+    if [[ "$owner_host" == "$local_host" ]]; then
+      if kill -0 "$owner_pid" 2>/dev/null && { [[ "$owner_start" == unavailable ]] || [[ "$(queue_process_start_identity "$owner_pid")" == "$owner_start" ]]; }; then
+        fail "Queue run is leased by live same-host PID ${owner_pid} on ${owner_host}"
+      fi
+      log_info "recovering dead same-host lease for explicit resume ${run_id}"
+    elif [[ "$take_over_lease" -ne 1 ]]; then
+      fail "Queue lease belongs to different or unverifiable host ${owner_host}; resume ${run_id} with --take-over-lease"
+    else
+      log_info "explicitly taking over lease from host ${owner_host}; operator asserts the old process has stopped"
+    fi
+    lease_generation=$((owner_generation + 1)); audit="${CODEX_FLOW_QUEUE_DIR}/lease.displaced.${owner_generation}.${owner_token}"
+    mv -- "$queue_lock" "$audit" 2>/dev/null || fail 'Queue lease changed while attempting takeover; retry'
+    queue_state_acquire_lease_directory "$queue_lock" || fail 'Another runner acquired the queue lease during takeover'
   fi
-  queue_state_write_lease "$queue_lock" "$run_id" "$$" "$local_host"
-  lease_owned=1
+  record="${queue_lock}/owner.${lease_owner_token}.state"
+  queue_state_write_lease "$record" "$run_id" "$lease_owner_token" "$lease_generation" "$$" "$local_host" "$local_start" \
+    "${owner_run:-none}" "${owner_token:-none}" "${owner_generation:-none}"
+  lease_owned=1; QUEUE_STATE_ASSERT_OWNED_FUNCTION=assert_queue_lease_owned
 }
 
 initialize_queue_run_state() {
-  local ordered start=0 end first last batch_id branch state_dir artifact index
+  local ordered
   run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
   ordered="$(join_issue_numbers "${issue_numbers[@]}")"
   mkdir -p "$run_state_dir"
   queue_state_create_manifest "$run_state_dir" "$run_id" "$ordered" "$review_every" "$draft_pr" "$auto_merge" \
     "$([[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -eq 0 ]] && printf 0 || printf 1)" "$batch_review_effort" "$batch_review_fix_effort" \
-    "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(git config --get remote.origin.url)"
+    "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(canonical_repository_identity)"
   queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
+  run_initialized=1
+  reconcile_current_pointer
+  print_resume_hint
+  queue_failpoint after_minimal_run_publication
+  reconcile_queue_run_entities
+  queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
+}
+
+validate_initial_entity() {
+  local file="$1" schema="$2" label="$3"; shift 3
+  local pair key expected
+  queue_state_validate_file "$file" "$schema" || fail "Invalid existing ${label}: ${file}"
+  for pair in "$@"; do key="${pair%%=*}"; expected="${pair#*=}"
+    [[ "$(queue_state_read_field "$file" "$schema" "$key")" == "$expected" ]] || fail "Immutable ${label} field ${key} differs in ${file}"
+  done
+}
+
+reconcile_queue_run_entities() {
+  local start=0 end first last batch_id branch state_dir artifact index batch_file issue_file
   while [[ "$start" -lt "${#issue_numbers[@]}" ]]; do
     end=$((start + review_every)); [[ "$end" -le "${#issue_numbers[@]}" ]] || end="${#issue_numbers[@]}"
     first="${issue_numbers[$start]}"; last="${issue_numbers[$((end - 1))]}"
     batch_id="$(batch_id_for_range "$first" "$last")"; branch="$(batch_branch_name_for_range "$first" "$last")"
     state_dir="${run_state_dir}/batches/${batch_id}"; artifact="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
-    queue_state_create_batch "${state_dir}/batch.state" "$run_id" "$batch_id" "$first" "$last" "$branch" "$artifact"
+    batch_file="${state_dir}/batch.state"
+    if [[ -f "$batch_file" ]]; then
+      validate_initial_entity "$batch_file" batch "batch ${batch_id}" "run_id=${run_id}" "batch_id=${batch_id}" "first_issue=${first}" "last_issue=${last}" "branch=${branch}" "artifact_path=${artifact}"
+    else
+      queue_state_create_batch "$batch_file" "$run_id" "$batch_id" "$first" "$last" "$branch" "$artifact"
+    fi
     mkdir -p "${state_dir}/issues"
     for ((index = start; index < end; index += 1)); do
-      queue_state_create_issue "${state_dir}/issues/${issue_numbers[$index]}.state" "$run_id" "$batch_id" "${issue_numbers[$index]}"
+      issue_file="${state_dir}/issues/${issue_numbers[$index]}.state"
+      if [[ -f "$issue_file" ]]; then
+        validate_initial_entity "$issue_file" issue "Issue ${issue_numbers[$index]}" "run_id=${run_id}" "batch_id=${batch_id}" "issue_number=${issue_numbers[$index]}"
+      else
+        queue_state_create_issue "$issue_file" "$run_id" "$batch_id" "${issue_numbers[$index]}"
+      fi
     done
     start="$end"
   done
-  queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
-  queue_state_publish_pointer "${CODEX_FLOW_QUEUE_DIR}/current" "$run_id"
-  run_initialized=1
+}
+
+reconcile_current_pointer() {
+  local pointer="${CODEX_FLOW_QUEUE_DIR}/current" pointed state
+  if [[ -f "$pointer" ]]; then
+    queue_state_validate_file "$pointer" pointer || fail "Invalid current queue pointer: ${pointer}"
+    pointed="$(queue_state_read_field "$pointer" pointer run_id)"
+    if [[ "$pointed" != "$run_id" ]]; then
+      [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed}/run.state" ]] || fail "Current pointer names unknown run ${pointed}"
+      state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed}/run.state" run state)"
+      [[ "$state" == completed ]] || fail "Current pointer names conflicting nonterminal run ${pointed}"
+      queue_state_remove_pointer_if_matches "$pointer" "$pointed"
+    fi
+  fi
+  queue_state_publish_pointer "$pointer" "$run_id" "$lease_owner_token" "$lease_generation"
 }
 
 load_queue_run_state() {
-  local manifest="${run_state_dir}/manifest.state" issue_csv manifest_base_branch manifest_base_ref
+  local manifest="${run_state_dir}/manifest.state" issue_csv manifest_base_branch manifest_base_ref existing_run_state
   local -A manifest_fields=()
   queue_state_parse_file "$manifest" manifest manifest_fields; queue_state_validate_file "$manifest" manifest
   [[ "${manifest_fields[run_id]}" == "$run_id" ]] || fail "Manifest run ID mismatch for ${run_id}"
   manifest_base_branch="${manifest_fields[base_branch]}"; manifest_base_ref="${manifest_fields[base_ref]}"
   [[ "$manifest_base_branch" == "$CODEX_FLOW_BASE_BRANCH" && "$manifest_base_ref" == "$CODEX_FLOW_BASE_REF" ]] || \
     fail "Resume repository configuration mismatch: manifest uses ${manifest_base_branch}/${manifest_base_ref}, current config uses ${CODEX_FLOW_BASE_BRANCH}/${CODEX_FLOW_BASE_REF}"
-  [[ "${manifest_fields[repository_identity]}" == "$(git config --get remote.origin.url)" ]] || fail 'Resume repository identity does not match the immutable manifest'
+  [[ "${manifest_fields[repository_identity]}" == "$(canonical_repository_identity)" ]] || fail 'Resume repository identity does not match the immutable manifest'
   issue_csv="${manifest_fields[issues]}"; IFS=',' read -r -a issue_numbers <<< "$issue_csv"
   review_every="${manifest_fields[review_every]}"; draft_pr="${manifest_fields[draft_pr]}"; auto_merge="${manifest_fields[auto_merge]}"
   batch_review_effort="${manifest_fields[batch_review_reasoning]}"; batch_review_fix_effort="${manifest_fields[batch_fix_reasoning]}"
   batch_check_fix_effort="${manifest_fields[batch_check_fix_reasoning]}"
   CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW="${manifest_fields[light_issue_review]}"
-  case "$(queue_state_read_field "${run_state_dir}/run.state" run state)" in
-    completed) fail "Queue run ${run_id} is already completed" ;;
+  run_initialized=1
+  existing_run_state="$(queue_state_read_field "${run_state_dir}/run.state" run state)"
+  [[ "$existing_run_state" != completed ]] || fail "Queue run ${run_id} is already completed"
+  reconcile_queue_run_entities
+  reconcile_current_pointer
+  case "$existing_run_state" in
     running) ;;
     interrupted|failed|manual_review_required)
       queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" "$(queue_state_read_field "${run_state_dir}/run.state" run state)" running ;;
+    planned) queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running ;;
     *) fail "Queue run ${run_id} is not resumable" ;;
   esac
-  run_initialized=1
 }
 
 append_issue_context_to_batch_file() {
@@ -405,6 +508,7 @@ process_issue_on_batch_branch() {
   local issue_state_file="${run_state_dir}/batches/${current_batch_id}/issues/${issue_number}.state"
   local issue_state commit_sha recorded_sha artifact_rel destination expected_message
 
+  assert_queue_lease_owned || fail "Queue lease lost before Issue ${issue_number}"
   issue_state="$(queue_state_read_field "$issue_state_file" issue state)"
   [[ "$issue_state" != acknowledged ]] || return 0
 
@@ -562,6 +666,7 @@ process_batch() {
   local batch_state_file batch_state
   local publish_state_file publish_line published_state published_merged published_head published_base published_sha
 
+  assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
   batch_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
@@ -669,6 +774,7 @@ process_batch() {
       "$CODEX_FLOW_BASE_BRANCH" "$(git rev-parse HEAD)" merged
   fi
   queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
+  assert_queue_lease_owned || fail 'Queue lease lost after batch phase'
 }
 
 main() {
@@ -677,7 +783,7 @@ main() {
   local start_index=0
   local end_index
 
-  local arg resume_option_count=0 allowed_resume_args=0 current_pointer
+  local arg resume_option_count=0 allowed_resume_args=0 current_pointer current_state pointed_run
   for arg in "$@"; do [[ "$arg" == --resume ]] && resume_option_count=$((resume_option_count + 1)); done
   if [[ "$resume_option_count" -gt 0 ]]; then
     for arg in "$@"; do case "$arg" in --resume|--take-over-lease|current|[A-Za-z0-9._-]*) allowed_resume_args=$((allowed_resume_args + 1));; *) fail '--resume rejects queue-shaping options and Issue arguments';; esac; done
@@ -698,16 +804,24 @@ main() {
   require_command gh
   require_command git
   require_command mktemp
+  require_command od
   require_command sed
 
   enter_repo_root
   require_queue_prompt_templates
-  lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup
+  lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; QUEUE_STATE_ASSERT_OWNED_FUNCTION=''
   if [[ "$resume_requested" -eq 1 ]]; then
     if [[ "$resume_target" == current ]]; then
       current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
       [[ -f "$current_pointer" ]] || fail 'No current resumable queue run is published'
-      run_id="$(< "$current_pointer")"; queue_state_require_token 'current run ID' "$run_id"
+      queue_state_validate_file "$current_pointer" pointer || fail "Invalid current queue pointer: ${current_pointer}"
+      run_id="$(queue_state_read_field "$current_pointer" pointer run_id)"
+      [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" ]] || fail "Current pointer names unknown queue run ${run_id}"
+      current_state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" run state)"
+      if [[ "$current_state" == completed ]]; then
+        queue_state_remove_pointer_if_matches "$current_pointer" "$run_id" || fail 'Current pointer changed while repairing completed run'
+        fail 'No current resumable queue run is published (removed stale completed pointer)'
+      fi
     else
       run_id="$resume_target"; queue_state_require_token 'resume run ID' "$run_id"
     fi
@@ -719,12 +833,20 @@ main() {
     issue_count="${#issue_numbers[@]}"
   else
     ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
+    current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
+    if [[ -f "$current_pointer" ]]; then
+      queue_state_validate_file "$current_pointer" pointer || fail "Invalid current queue pointer: ${current_pointer}"
+      pointed_run="$(queue_state_read_field "$current_pointer" pointer run_id)"
+      [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed_run}/run.state" ]] || fail "Current pointer names unknown queue run ${pointed_run}"
+      current_state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed_run}/run.state" run state)"
+      [[ "$current_state" == completed ]] || fail "Current pointer names unfinished run ${pointed_run}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${pointed_run}"
+      queue_state_remove_pointer_if_matches "$current_pointer" "$pointed_run"
+    fi
     run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
     acquire_queue_lease
     install_queue_traps
     ensure_planned_batch_branches_available
     initialize_queue_run_state
-    queue_failpoint after_manifest
   fi
   print_resume_hint
   queue_failpoint after_lease_before_issue_fetch
@@ -739,7 +861,10 @@ main() {
     start_index="$end_index"
   done
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running completed
-  rm -f -- "${CODEX_FLOW_QUEUE_DIR}/current" "${CODEX_FLOW_QUEUE_DIR}/current_batch"
+  queue_failpoint after_run_completed_before_current_cleanup
+  assert_queue_lease_owned || fail 'Queue lease lost before completion pointer cleanup'
+  queue_state_remove_pointer_if_matches "${CODEX_FLOW_QUEUE_DIR}/current" "$run_id" "$lease_owner_token" "$lease_generation"
+  rm -f -- "${CODEX_FLOW_QUEUE_DIR}/current_batch"
   run_completed=1
   release_queue_lease
   trap - EXIT INT TERM
