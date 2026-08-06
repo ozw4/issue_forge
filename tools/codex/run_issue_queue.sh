@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+queue_bootstrap_private_environment() {
+  local name requested_test_mode="${CODEX_FLOW_QUEUE_TEST_MODE:-0}"
+  [[ "$requested_test_mode" == 0 || "$requested_test_mode" == 1 ]] || {
+    printf '[queue] CODEX_FLOW_QUEUE_TEST_MODE must be 0 or 1\n' >&2
+    exit 1
+  }
+  for name in \
+    QUEUE_STATE_GUARD_DEPTH \
+    QUEUE_STATE_GUARD_FD \
+    QUEUE_STATE_ASSERT_IN_PROGRESS \
+    QUEUE_STATE_ASSERT_OWNED_FUNCTION \
+    QUEUE_STATE_SERIALIZATION_GUARD \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD \
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS \
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION \
+    ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD \
+    ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION \
+    ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE; do
+    if ! unset "$name" 2>/dev/null; then
+      printf '[queue] Private queue state variable is readonly and cannot be initialized: %s\n' "$name" >&2
+      exit 1
+    fi
+  done
+  unset CODEX_FLOW_QUEUE_TEST_MODE
+  readonly ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE="$requested_test_mode"
+}
+
+queue_bootstrap_private_environment
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 # shellcheck source=tools/codex/lib/config.sh
@@ -36,12 +67,14 @@ fail() {
 }
 
 queue_failpoint() {
-  [[ "${CODEX_FLOW_QUEUE_FAILPOINT:-}" != "$1" ]] || fail "Queue failpoint triggered: $1"
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE" == 1 && "${CODEX_FLOW_QUEUE_FAILPOINT:-}" == "$1" ]] \
+    || return 0
+  fail "Queue failpoint triggered: $1"
 }
 
 queue_test_barrier() {
   local name="$1" directory="${CODEX_FLOW_QUEUE_TEST_BARRIER_DIR:-}" label="${CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL:-$$}"
-  [[ -n "$directory" ]] || return 0
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE" == 1 && -n "$directory" ]] || return 0
   mkdir -p "$directory"
   : > "${directory}/ready.${name}.${label}"
   while [[ ! -f "${directory}/release.${name}" ]]; do sleep 0.01; done
@@ -49,10 +82,41 @@ queue_test_barrier() {
 
 queue_test_pause() {
   local name="$1" directory="${CODEX_FLOW_QUEUE_TEST_PAUSE_DIR:-}" label="${CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL:-$$}"
-  [[ -n "$directory" && "${CODEX_FLOW_QUEUE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE" == 1 && -n "$directory" && "${CODEX_FLOW_QUEUE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
   mkdir -p "$directory"
   : > "${directory}/paused.${name}.${label}"
   while [[ ! -f "${directory}/release.${name}.${label}" ]]; do sleep 0.01; done
+}
+
+validate_queue_private_environment() {
+  local name
+  for name in \
+    QUEUE_STATE_GUARD_DEPTH \
+    QUEUE_STATE_GUARD_FD \
+    QUEUE_STATE_ASSERT_IN_PROGRESS \
+    QUEUE_STATE_ASSERT_OWNED_FUNCTION \
+    QUEUE_STATE_SERIALIZATION_GUARD \
+    CODEX_FLOW_QUEUE_TEST_MODE; do
+    if [[ -v "$name" ]]; then
+      fail "Consumer config must not set private queue variable ${name}"
+    fi
+  done
+  if [[ "$ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE" != 1 ]]; then
+    for name in \
+      CODEX_FLOW_QUEUE_FAILPOINT \
+      CODEX_FLOW_QUEUE_TEST_BARRIER_DIR \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_DIR \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_AT \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL \
+      QUEUE_STATE_TEST_INTERRUPT_BEFORE_MV \
+      QUEUE_STATE_TEST_PAUSE_DIR \
+      QUEUE_STATE_TEST_PAUSE_AT \
+      QUEUE_STATE_TEST_RUNNER_LABEL; do
+      if [[ -n "${!name:-}" ]]; then
+        fail "Queue test hook ${name} requires CODEX_FLOW_QUEUE_TEST_MODE=1"
+      fi
+    done
+  fi
 }
 
 usage() {
@@ -273,6 +337,12 @@ queue_process_start_identity() {
   [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf 'unavailable\n'
 }
 
+queue_process_group_identity() {
+  local value
+  value="$(ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]')" || true
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$value" || return 1
+}
+
 queue_owner_token() {
   od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
 }
@@ -281,6 +351,66 @@ canonical_repository_identity() {
   local remote
   remote="$(git config --get remote.origin.url)" || fail 'Missing remote.origin.url'
   queue_state_canonical_repository_identity "$remote" || fail 'Cannot derive canonical repository identity from remote.origin.url'
+}
+
+queue_diagnostic_field() {
+  local file="$1" key="$2"
+  awk -F '\t' -v requested="$key" '$1 == requested { print $2; exit }' "$file" 2>/dev/null || true
+}
+
+queue_guard_busy_diagnostic() {
+  local guard="$1" record='' owner_run='' owner_pid='' owner_host='' owner_generation='' owner_start=''
+  local phase='' child_pid='' child_pgid='' child_start=''
+  log_error "Queue serialization guard remained busy for 1 second: ${guard}"
+  if [[ -d "${CODEX_FLOW_QUEUE_DIR}/lease.lock" ]]; then
+    record="$(find "${CODEX_FLOW_QUEUE_DIR}/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort | head -n 1)"
+  fi
+  if [[ -n "$record" ]]; then
+    owner_run="$(queue_diagnostic_field "$record" run_id)"
+    owner_pid="$(queue_diagnostic_field "$record" owner_pid)"
+    owner_host="$(queue_diagnostic_field "$record" owner_host)"
+    owner_generation="$(queue_diagnostic_field "$record" lease_generation)"
+    owner_start="$(queue_diagnostic_field "$record" process_start)"
+    log_error "lease: run=${owner_run:-unknown} pid=${owner_pid:-unknown} host=${owner_host:-unknown} generation=${owner_generation:-unknown} process_start=${owner_start:-unknown}"
+  fi
+  if [[ -f "${ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE:-}" ]]; then
+    phase="$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" phase)"
+    child_pid="$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" child_pid)"
+    child_pgid="$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" child_pgid)"
+    child_start="$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" process_start)"
+    log_error "active phase: ${phase:-unknown}; child PID=${child_pid:-unknown} PGID=${child_pgid:-unknown} process_start=${child_start:-unknown}"
+  fi
+  if [[ -n "$owner_run" ]]; then
+    if [[ -n "$child_pgid" ]]; then
+      log_error "safe recovery: wait for process group ${child_pgid} to exit (or terminate it with: kill -TERM -- -${child_pgid}), then run: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${owner_run}"
+    else
+      log_error "safe recovery: verify the recorded owner process has stopped, then run: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${owner_run}"
+    fi
+  else
+    log_error 'safe recovery: wait for the recorded control-plane operation to finish; do not remove or replace the guard file'
+  fi
+}
+
+initialize_queue_serialization_guard() {
+  local git_common guard_dir guard
+  git_common="$(git rev-parse --path-format=absolute --git-common-dir)" || fail 'Cannot resolve the Git common directory for queue serialization'
+  [[ "$git_common" == /* && -d "$git_common" ]] || fail "Invalid Git common directory: ${git_common}"
+  guard_dir="${git_common}/issue-forge/queue"
+  if [[ -e "$guard_dir" && ( ! -d "$guard_dir" || -L "$guard_dir" ) ]]; then
+    fail "Queue control directory is not the expected directory: ${guard_dir}"
+  fi
+  (umask 077; mkdir -p "$guard_dir") || fail "Cannot create queue control directory: ${guard_dir}"
+  chmod 700 "$guard_dir" || fail "Cannot restrict queue control directory permissions: ${guard_dir}"
+  guard="${guard_dir}/control.guard"
+  if [[ -e "$guard" && ( ! -f "$guard" || -L "$guard" ) ]]; then
+    fail "Queue serialization guard is not the expected regular file: ${guard}"
+  fi
+  if [[ ! -e "$guard" ]]; then
+    (umask 077; : > "$guard") || fail "Cannot create queue serialization guard: ${guard}"
+  fi
+  chmod 600 "$guard" || fail "Cannot restrict queue serialization guard permissions: ${guard}"
+  ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE="${guard_dir}/active-process.state"
+  queue_state_configure_guard "$guard" queue_guard_busy_diagnostic || fail 'Cannot configure queue serialization guard'
 }
 
 print_resume_hint() {
@@ -312,7 +442,7 @@ release_queue_lease() {
     return 1
   fi
   lease_owned=0
-  QUEUE_STATE_ASSERT_OWNED_FUNCTION=''
+  queue_state_set_owner_assertion ''
   queue_state_guard_leave || status=1
   return "$status"
 }
@@ -320,7 +450,7 @@ release_queue_lease() {
 assert_queue_lease_owned() {
   local record="${queue_lock}/owner.${lease_owner_token}.state" current_start entered=0 found
   local -A fields=()
-  if [[ "${QUEUE_STATE_GUARD_DEPTH:-0}" -eq 0 ]]; then queue_state_guard_enter || return 1; entered=1; fi
+  if [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -eq 0 ]]; then queue_state_guard_enter || return 1; entered=1; fi
   found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
   if [[ "${lease_owned:-0}" -ne 1 || ! -f "$record" || "$found" != "$record" ]] || \
      ! queue_state_parse_file "$record" lease fields || ! queue_state_validate_file "$record" lease; then
@@ -343,22 +473,57 @@ assert_queue_lease_owned() {
 record_abnormal_exit() {
   local status="$1" signal_name="${2:-}" current
   trap - EXIT INT TERM
+  terminate_controlled_process_tree || true
   if [[ "${run_initialized:-0}" -eq 1 && "${run_completed:-0}" -ne 1 ]]; then
-    current="$(queue_state_read_field "${run_state_dir}/run.state" run state 2>/dev/null || true)"
-    if [[ "$current" == running ]]; then
-      if [[ -n "$signal_name" ]]; then
-        queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running interrupted || true
-      else
-        queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running failed || true
+    if [[ -f "${run_state_dir}/manifest.state" && -f "${run_state_dir}/run.state" ]] && \
+       queue_state_validate_file "${run_state_dir}/manifest.state" manifest 2>/dev/null && \
+       queue_state_validate_file "${run_state_dir}/run.state" run 2>/dev/null; then
+      current="$(queue_state_read_field "${run_state_dir}/run.state" run state 2>/dev/null || true)"
+      if [[ "$current" == running ]]; then
+        if [[ -n "$signal_name" ]]; then
+          queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running interrupted || true
+        else
+          queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running failed || true
+        fi
       fi
+      queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" "${signal_name:+interrupted}" 2>/dev/null || \
+        queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" failed 2>/dev/null || true
+      print_resume_hint >&2
+    else
+      log_error "Run ${run_id} state disappeared or became invalid; no resume command can be advertised"
     fi
-    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" "${signal_name:+interrupted}" 2>/dev/null || \
-      queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" failed 2>/dev/null || true
-    print_resume_hint >&2
   fi
   release_queue_lease || true
   if [[ -n "$signal_name" ]]; then exit "$status"; fi
   exit "$status"
+}
+
+terminate_controlled_process_tree() {
+  local attempt
+  [[ "${controlled_child_active:-0}" -eq 1 ]] || return 0
+  if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "terminating controlled queue process group ${controlled_child_pgid} before releasing ownership"
+    kill -TERM -- "-${controlled_child_pgid}" 2>/dev/null || true
+  else
+    log_error "terminating controlled queue child ${controlled_child_pid} before releasing ownership"
+    kill -TERM "$controlled_child_pid" 2>/dev/null || true
+  fi
+  for ((attempt = 0; attempt < 200; attempt += 1)); do
+    if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
+      kill -0 -- "-${controlled_child_pgid}" 2>/dev/null || break
+    else
+      kill -0 "$controlled_child_pid" 2>/dev/null || break
+    fi
+    sleep 0.01
+  done
+  if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]] && kill -0 -- "-${controlled_child_pgid}" 2>/dev/null; then
+    kill -KILL -- "-${controlled_child_pgid}" 2>/dev/null || true
+  elif kill -0 "$controlled_child_pid" 2>/dev/null; then
+    kill -KILL "$controlled_child_pid" 2>/dev/null || true
+  fi
+  wait "${controlled_child_pid}" 2>/dev/null || true
+  controlled_child_active=0
+  rm -f -- "${controlled_worker_gate:-}" "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || true
 }
 
 install_queue_traps() {
@@ -367,14 +532,32 @@ install_queue_traps() {
   trap 'record_abnormal_exit 143 TERM' TERM
 }
 
+reconcile_active_process_record_under_guard() {
+  local file="$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" child_pid child_pgid child_start recorded_start recorded_run
+  [[ -f "$file" ]] || return 0
+  queue_state_validate_file "$file" active_process || fail "Invalid active queue process record: ${file}"
+  recorded_run="$(queue_state_read_field "$file" active_process run_id)"
+  child_pid="$(queue_state_read_field "$file" active_process child_pid)"
+  child_pgid="$(queue_state_read_field "$file" active_process child_pgid)"
+  recorded_start="$(queue_state_read_field "$file" active_process process_start)"
+  child_start="$(queue_process_start_identity "$child_pid")"
+  if [[ "$child_start" != unavailable && "$child_start" == "$recorded_start" ]] || kill -0 -- "-${child_pgid}" 2>/dev/null; then
+    fail "Queue run ${recorded_run} still has active process PID ${child_pid} PGID ${child_pgid} start ${recorded_start}; wait for it to exit before recovery"
+  fi
+  log_info "removing stale active-process record for stopped run ${recorded_run}"
+  rm -- "$file" || fail "Cannot remove stale active-process record: ${file}"
+}
+
 acquire_queue_lease() {
   local owner_host owner_pid owner_run owner_token owner_generation owner_start local_host local_start record audit found owner_status
   local -A owner_fields=()
   mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"; local_host="$(queue_host_identity)"
   lease_owner_token="$(queue_owner_token)"; lease_owner_host="$local_host"; local_start="$(queue_process_start_identity "$$")"; lease_generation=1
+  lease_owner_process_start="$local_start"
   [[ "$local_start" != unavailable ]] || fail 'Cannot establish local process-start identity; queue lease acquisition is unverifiable'
   queue_test_barrier lease_acquire
   queue_state_guard_enter || fail 'Cannot acquire queue serialization guard'
+  reconcile_active_process_record_under_guard
   if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
     queue_state_guard_leave || true
     fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
@@ -445,7 +628,7 @@ acquire_queue_lease() {
     queue_state_guard_leave || true
     fail 'Queue lease owner-record publication failed'
   fi
-  lease_owned=1; QUEUE_STATE_ASSERT_OWNED_FUNCTION=assert_queue_lease_owned
+  lease_owned=1; queue_state_set_owner_assertion assert_queue_lease_owned
   queue_failpoint after_complete_owner_publication
   queue_state_guard_leave || fail 'Cannot release queue serialization guard after lease acquisition'
 }
@@ -466,7 +649,7 @@ initialize_queue_run_minimal() {
     "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(canonical_repository_identity)"
   queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
   run_initialized=1
-  print_resume_hint
+  queue_test_pause after_minimal_run_publication
   queue_failpoint after_minimal_run_publication
 }
 
@@ -625,12 +808,26 @@ process_issue_on_batch_branch() {
     return 0
   fi
 
-  if [[ "$issue_state" == planned ]]; then queue_state_transition "$issue_state_file" issue "Issue ${issue_number}" planned leased; issue_state=leased; fi
+  if [[ "$issue_state" == planned ]]; then
+    rm -f -- "$(issue_file_path "$issue_number")"
+    queue_state_transition "$issue_state_file" issue "Issue ${issue_number}" planned leased
+    issue_state=leased
+  fi
 
-  active_phase="issue_context_fetch"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
+  queue_set_active_phase issue_context_fetch; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
   log_info "fetching issue ${issue_number}"
   if [[ "$issue_state" == leased ]]; then
-    write_issue_context_file "$issue_number"
+    if [[ -f "$(issue_file_path "$issue_number")" ]]; then
+      grep -Fqx "# Issue #${issue_number}" "$(issue_file_path "$issue_number")" \
+        || fail "Existing durable Issue ${issue_number} context is incomplete; refusing a duplicate fetch"
+      grep -Fq 'Title: ' "$(issue_file_path "$issue_number")" \
+        || fail "Existing durable Issue ${issue_number} context lacks a title; refusing a duplicate fetch"
+      grep -Fq 'URL: ' "$(issue_file_path "$issue_number")" \
+        || fail "Existing durable Issue ${issue_number} context lacks a URL; refusing a duplicate fetch"
+      log_info "reconciled existing durable Issue ${issue_number} context without refetching"
+    else
+      write_issue_context_file "$issue_number"
+    fi
   elif [[ ! -f "$(issue_file_path "$issue_number")" ]]; then
     fail "Missing durable Issue ${issue_number} context while resuming state ${issue_state}"
   fi
@@ -643,7 +840,7 @@ process_issue_on_batch_branch() {
     issue_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
     queue_state_set_issue_base "$issue_state_file" leased "$issue_base_commit"
   fi
-  active_phase="issue_bootstrap"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_bootstrap before
+  queue_set_active_phase issue_bootstrap; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_bootstrap before
   write_current_issue_branch_state "$issue_number" "$batch_branch" "$issue_base_commit"
   queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_bootstrap after
 
@@ -658,7 +855,7 @@ process_issue_on_batch_branch() {
       log_info "reconciled existing commit ${commit_sha} for issue ${issue_number}"
     else
       rm -rf "$CODEX_FLOW_CODEX_DIR"
-      active_phase="issue_flow"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow before
+      queue_set_active_phase issue_flow; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow before
 
       log_info "running issue flow for issue ${issue_number}"
       if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then issue_light_review=1; fi
@@ -667,7 +864,7 @@ process_issue_on_batch_branch() {
       queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow after
       commit_sha="$(git rev-parse HEAD)"
     fi
-    active_phase="issue_commit_reconciliation"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation before
+    queue_set_active_phase issue_commit_reconciliation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation before
     [[ "$(git show -s --format=%s "$commit_sha")" == "$expected_message" ]] || fail "Issue ${issue_number} commit message is not deterministic"
     ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
     queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" running committed "$commit_sha" none
@@ -677,7 +874,7 @@ process_issue_on_batch_branch() {
 
   recorded_sha="$(queue_state_read_field "$issue_state_file" issue commit_sha)"
   if [[ "$issue_state" == committed ]]; then
-    active_phase="artifact_archive"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive before
+    queue_set_active_phase artifact_archive; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive before
     if [[ -d "$destination" ]]; then
       [[ -f "${destination}/implementation.prompt.md" ]] || fail "Existing archive for Issue ${issue_number} is incomplete"
     else
@@ -743,7 +940,15 @@ auto_merge_batch_pr() {
   git fetch origin "$CODEX_FLOW_BASE_BRANCH"
 }
 
-process_batch() {
+queue_set_active_phase() {
+  local requested="$1"
+  active_phase="$requested"
+  [[ "${controlled_worker:-0}" -eq 1 ]] || return 0
+  queue_state_write_active_process "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" "$run_id" "$requested" \
+    "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" "$$" "$lease_owner_process_start"
+}
+
+process_batch_body() {
   local start_index="$1"
   local end_index="$2"
   local first_issue="${issue_numbers[$start_index]}"
@@ -762,7 +967,6 @@ process_batch() {
   local batch_state_file batch_state
   local publish_state_file publish_line published_state published_merged published_head published_base published_sha
 
-  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard before batch phase'
   assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
@@ -771,7 +975,7 @@ process_batch() {
   batch_state_file="${run_state_dir}/batches/${batch_id}/batch.state"
   publish_state_file="${run_state_dir}/batches/${batch_id}/publish.state"
   batch_state="$(queue_state_read_field "$batch_state_file" batch state)"
-  if [[ "$batch_state" == completed ]]; then queue_state_guard_leave || fail 'Cannot release queue serialization guard'; return 0; fi
+  if [[ "$batch_state" == completed ]]; then return 0; fi
   issues_file="${batch_dir}/issues.txt"
 
   mkdir -p "${batch_dir}/history"
@@ -780,7 +984,7 @@ process_batch() {
   printf '%s\n' "$batch_id" > "${CODEX_FLOW_QUEUE_DIR}/current_batch"
 
   if [[ "$batch_state" == planned ]]; then
-    active_phase="batch_branch_preparation"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
+    queue_set_active_phase batch_branch_preparation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
     if git show-ref --verify --quiet "refs/heads/${batch_branch}"; then
       git switch "$batch_branch"
     else
@@ -812,13 +1016,13 @@ process_batch() {
 
   if [[ "$batch_state" == issues_running ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" issues_running checks_running; batch_state=checks_running; fi
   if [[ "$batch_state" == checks_running ]]; then
-    active_phase="batch_checks"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
+    queue_set_active_phase batch_checks; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
     ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks after
     queue_state_transition "$batch_state_file" batch "$batch_id" checks_running review_running; batch_state=review_running
   fi
   if [[ "$batch_state" == review_running ]]; then
-    active_phase="batch_review"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review before
+    queue_set_active_phase batch_review; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review before
     ensure_batch_review_accepted \
     "$batch_dir" \
     "$issues_file" \
@@ -838,7 +1042,7 @@ process_batch() {
   write_batch_changed_files "$batch_base_commit" "${batch_dir}/changed-files.txt"
 
   if [[ "$batch_state" == accepted ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" accepted publishing; batch_state=publishing; fi
-  active_phase="batch_publish"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
+  queue_set_active_phase batch_publish; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
   if [[ -f "$publish_state_file" ]]; then
     queue_state_validate_file "$publish_state_file" publish
     batch_pr_number="$(queue_state_read_field "$publish_state_file" publish pr_number)"
@@ -864,7 +1068,7 @@ process_batch() {
   queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish after
 
   if [[ "$auto_merge" -eq 1 && -z "${published_merged:-}" ]]; then
-    active_phase="auto_merge"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge before
+    queue_set_active_phase auto_merge; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge before
     auto_merge_batch_pr "$batch_pr_number"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge after
     queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
@@ -872,7 +1076,59 @@ process_batch() {
   fi
   queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
   assert_queue_lease_owned || fail 'Queue lease lost after batch phase'
+}
+
+process_batch() {
+  local start_index="$1" end_index="$2" worker_status=1 attempt
+  local first_issue="${issue_numbers[$start_index]}" last_issue="${issue_numbers[$((end_index - 1))]}"
+  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard before batch phase'
+  assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
+  controlled_worker_gate="$(dirname "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE")/worker.${run_id}.${lease_owner_token}.start"
+  rm -f -- "$controlled_worker_gate"
+  set -m
+  (
+    trap - EXIT INT TERM
+    controlled_worker=1
+    controlled_child_pid="$BASHPID"
+    controlled_child_pgid="$(queue_process_group_identity "$BASHPID")"
+    controlled_child_process_start="$(queue_process_start_identity "$BASHPID")"
+    while [[ ! -f "$controlled_worker_gate" ]]; do sleep 0.01; done
+    process_batch_body "$start_index" "$end_index"
+  ) &
+  controlled_child_pid=$!
+  set +m
+  controlled_child_active=1
+  controlled_child_pgid=''
+  for ((attempt = 0; attempt < 100; attempt += 1)); do
+    controlled_child_pgid="$(queue_process_group_identity "$controlled_child_pid" || true)"
+    [[ -n "$controlled_child_pgid" ]] && break
+    sleep 0.01
+  done
+  controlled_child_process_start="$(queue_process_start_identity "$controlled_child_pid")"
+  if [[ -z "$controlled_child_pgid" || "$controlled_child_process_start" == unavailable ]]; then
+    terminate_controlled_process_tree || true
+    queue_state_guard_leave || true
+    fail 'Cannot establish controlled batch process-group identity'
+  fi
+  queue_state_write_active_process "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" "$run_id" \
+    "batch-${first_issue}-${last_issue}" "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" \
+    "$$" "$lease_owner_process_start"
+  : > "$controlled_worker_gate"
+  if wait "$controlled_child_pid"; then worker_status=0; else worker_status=$?; fi
+  controlled_child_active=0
+  rm -f -- "$controlled_worker_gate"
+  if kill -0 -- "-${controlled_child_pgid}" 2>/dev/null; then
+    queue_state_guard_abandon || true
+    log_error "Controlled process group ${controlled_child_pgid} outlived batch worker ${controlled_child_pid}; ownership remains fenced by the inherited guard"
+    log_error "safe recovery: terminate it with: kill -TERM -- -${controlled_child_pgid}; then resume run ${run_id}"
+    return 1
+  fi
+  rm -f -- "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || {
+    queue_state_guard_leave || true
+    fail 'Cannot remove completed active-process record'
+  }
   queue_state_guard_leave || fail 'Cannot release queue serialization guard after batch phase'
+  return "$worker_status"
 }
 
 main() {
@@ -887,6 +1143,7 @@ main() {
     for arg in "$@"; do case "$arg" in --resume|--take-over-lease|current|[A-Za-z0-9._-]*) allowed_resume_args=$((allowed_resume_args + 1));; *) fail '--resume rejects queue-shaping options and Issue arguments';; esac; done
     [[ "$#" -eq 2 || ( "$#" -eq 3 && " $* " == *' --take-over-lease '* ) ]] || fail '--resume accepts only a run ID/current and optional --take-over-lease'
   fi
+  validate_queue_private_environment
   parse_queue_arguments "$@"
   ensure_unique_issues
 
@@ -904,12 +1161,14 @@ main() {
   require_command git
   require_command mktemp
   require_command od
+  require_command ps
   require_command sed
+  require_command stat
 
   enter_repo_root
+  initialize_queue_serialization_guard
   require_queue_prompt_templates
-  lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; QUEUE_STATE_ASSERT_OWNED_FUNCTION=''
-  QUEUE_STATE_SERIALIZATION_GUARD="${CODEX_FLOW_QUEUE_DIR}/control.guard"
+  lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; queue_state_set_owner_assertion ''
   if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
     fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
   fi

@@ -100,6 +100,15 @@ assert_file_not_contains() {
   fi
 }
 
+queue_tree_snapshot() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  {
+    find "$root" -type d -printf 'directory %P\n'
+    find "$root" -type f -printf 'file %P ' -exec cksum {} \;
+  } | LC_ALL=C sort
+}
+
 assert_file_order() {
   local path="$1"
   local first_pattern="$2"
@@ -746,6 +755,18 @@ EOF
 set -euo pipefail
 printf '%s\n' "\$*" >> "${state_dir}/gh.log"
 
+if [[ "\${SMOKE_QUEUE_EXTERNAL_PAUSE_DIR:-}" != '' && "\$#" -ge 3 && "\$1" == issue && "\$2" == view && \
+      "\$3" == "\${SMOKE_QUEUE_EXTERNAL_PAUSE_ISSUE:-}" ]]; then
+  mkdir -p "\$SMOKE_QUEUE_EXTERNAL_PAUSE_DIR"
+  pause_label="\${SMOKE_QUEUE_EXTERNAL_PAUSE_LABEL:-external}"
+  if [[ "\${SMOKE_QUEUE_REMOVE_WORK_QUEUE:-0}" == 1 ]]; then
+    rm -rf -- "\$PWD/.work/queue"
+  fi
+  printf '%s\t%s\n' "\$\$" "\$(awk '{print \$22}' "/proc/\$\$/stat")" > "\$SMOKE_QUEUE_EXTERNAL_PAUSE_DIR/child.\$pause_label"
+  : > "\$SMOKE_QUEUE_EXTERNAL_PAUSE_DIR/paused.\$pause_label"
+  while [[ ! -f "\$SMOKE_QUEUE_EXTERNAL_PAUSE_DIR/release.\$pause_label" ]]; do sleep 0.01; done
+fi
+
 copy_flag_value_to_file() {
   local flag="\$1"
   local destination="\$2"
@@ -811,6 +832,10 @@ if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
     ${QUEUE_ISSUE_NUMBER})
       issue_title='${QUEUE_ISSUE_TITLE}'
       issue_url='${QUEUE_ISSUE_URL}'
+      ;;
+    42|43|44)
+      issue_title="Control Plane Issue \${issue_number}"
+      issue_url="https://example.test/issues/\${issue_number}"
       ;;
     *)
       printf 'Unsupported issue number: %s\n' "\$issue_number" >&2
@@ -2391,7 +2416,8 @@ run_queue_state_store_smoke() {
   log 'running queue state store smoke'; rm -rf "$store"; mkdir -p "$store"
   if ! QUEUE_STATE_HELPER="$helper" QUEUE_STATE_STORE="$store" bash -c '
 set -euo pipefail
-CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_STATE_STORE}/control.guard"; source "${QUEUE_STATE_HELPER}"
+CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE=1; source "${QUEUE_STATE_HELPER}"
+: > "${QUEUE_STATE_STORE}/control.guard"; queue_state_configure_guard "${QUEUE_STATE_STORE}/control.guard"
 one="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"; two="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"
 [[ "${one}" != "${two}" && "${one}" =~ ^[A-Za-z0-9._-]+$ ]]
 dir_one="${CODEX_FLOW_QUEUE_RUNS_DIR}/${one}"; dir_two="${CODEX_FLOW_QUEUE_RUNS_DIR}/${two}"
@@ -2403,6 +2429,12 @@ queue_state_create_run "${dir_two}/run.state" "$two" planned
 https_identity="$(queue_state_canonical_repository_identity https://user:secret@github.example/owner/repository.git)"
 ssh_identity="$(queue_state_canonical_repository_identity git@github.example:owner/repository.git)"
 [[ "$https_identity" == github.example/owner/repository && "$https_identity" == "$ssh_identity" && "$https_identity" != *secret* ]]
+[[ "$(queue_state_canonical_repository_identity https://github.example:443/owner/repository.git)" == "$https_identity" ]]
+[[ "$(queue_state_canonical_repository_identity http://github.example:80/owner/repository.git)" == "$https_identity" ]]
+[[ "$(queue_state_canonical_repository_identity ssh://git@github.example:22/owner/repository.git)" == "$https_identity" ]]
+[[ "$(queue_state_canonical_repository_identity https://user:secret@github.example:8443/owner/repository.git)" == github.example:8443/owner/repository ]]
+[[ "$(queue_state_canonical_repository_identity ssh://git@github.example:2222/owner/repository.git)" == github.example:2222/owner/repository ]]
+[[ "$(queue_state_canonical_repository_identity https://github.example/other/repository.git)" != "$https_identity" ]]
 if QUEUE_STATE_TEST_INTERRUPT_BEFORE_MV=1 queue_state_transition "${dir_one}/run.state" run "run ${one}" planned running; then exit 10; fi
 grep -Fxq "state$(printf "\\t")planned" "${dir_one}/run.state"; compgen -G "${dir_one}/.queue-state.tmp.*" >/dev/null
 queue_state_transition "${dir_one}/run.state" run "run ${one}" planned running
@@ -2424,7 +2456,7 @@ invoke_denied() {
   esac
 }
 
-QUEUE_STATE_ASSERT_OWNED_FUNCTION=deny_owner
+queue_state_set_owner_assertion deny_owner
 for context in or if not; do
   snapshot="$(find "$QUEUE_STATE_STORE" -type f ! -name control.guard -printf "%p " -exec cksum {} \; | LC_ALL=C sort)"
   invoke_denied "$context" queue_state_publish_file "${dir_one}/run.state" run "${QUEUE_STATE_STORE}/candidate"
@@ -2438,7 +2470,7 @@ for context in or if not; do
   [[ "$(find "$QUEUE_STATE_STORE" -type f ! -name control.guard -printf "%p " -exec cksum {} \; | LC_ALL=C sort)" == "$snapshot" ]]
   ! find "$QUEUE_STATE_STORE" -type f -name ".queue-state.tmp.*" -print -quit | grep -q .
 done
-QUEUE_STATE_ASSERT_OWNED_FUNCTION=
+queue_state_set_owner_assertion ''
 valid="${dir_one}/run.state"
 for kind in malformed duplicate missing unknown; do
   candidate="${QUEUE_STATE_STORE}/${kind}.state"
@@ -2458,23 +2490,101 @@ done
   assert_file_contains "$log_file" 'Unsupported run schema version: 1'
 }
 
+run_queue_private_environment_smoke() {
+  local log_file assignment emitted_run before_snapshot after_snapshot config_backup pause preflight_pid attempt
+  local -a injections=(
+    'QUEUE_STATE_GUARD_DEPTH=1'
+    'QUEUE_STATE_GUARD_FD=9'
+    'QUEUE_STATE_ASSERT_IN_PROGRESS=1'
+    'QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9'
+    'QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9 QUEUE_STATE_ASSERT_IN_PROGRESS=1'
+  )
+  local -a injection_words=()
+  log 'running queue private-environment and preflight-signal smoke'
+  clear_command_logs; reset_flow_counters
+  for assignment in "${injections[@]}"; do
+    read -r -a injection_words <<< "$assignment"
+    log_file="${state_dir}/queue-private-$(printf '%s' "$assignment" | tr ' =_' '---').log"
+    if (
+      cd "$repo_dir"
+      env "${injection_words[@]}" PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 \
+        CODEX_FLOW_QUEUE_FAILPOINT=after_minimal_run_publication \
+        "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99
+    ) > "$log_file" 2>&1; then
+      fail "private queue variable injection should stop only at the requested failpoint: ${assignment}"
+    fi
+    assert_file_contains "$log_file" 'Queue failpoint triggered: after_minimal_run_publication'
+    assert_file_not_contains "$log_file" 'command not found'
+    emitted_run="$(sed -n 's/.*--resume \([A-Za-z0-9._-]*\).*/\1/p' "$log_file" | head -n 1)"
+    [[ -n "$emitted_run" ]] || fail "private queue variable injection emitted no recovery command: ${assignment}"
+    assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/manifest.state"
+    assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/run.state"
+  done
+  assert_equals 0 "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")" 'private-variable injection Issue fetch count'
+  assert_equals 0 "$(awk '$1 == "switch" || $1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")" 'private-variable injection Git mutation count'
+
+  before_snapshot="$(queue_tree_snapshot "${repo_dir}/.work/queue")"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_FAILPOINT=after_minimal_run_publication \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99) > "${state_dir}/queue-test-hook-production.log" 2>&1; then
+    fail 'production queue must reject a failpoint without explicit test mode'
+  fi
+  assert_file_contains "${state_dir}/queue-test-hook-production.log" 'requires CODEX_FLOW_QUEUE_TEST_MODE=1'
+  after_snapshot="$(queue_tree_snapshot "${repo_dir}/.work/queue")"
+  assert_equals "$before_snapshot" "$after_snapshot" 'production test-hook rejection queue snapshot'
+
+  config_backup="$(mktemp)"
+  cp "${repo_dir}/.issue_forge/project.sh" "$config_backup"
+  printf '\nreadonly QUEUE_STATE_GUARD_DEPTH=1\n' >> "${repo_dir}/.issue_forge/project.sh"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99) > "${state_dir}/queue-readonly-private.log" 2>&1; then
+    fail 'readonly private queue injection must fail'
+  fi
+  cp "$config_backup" "${repo_dir}/.issue_forge/project.sh"
+  assert_file_contains "${state_dir}/queue-readonly-private.log" 'Consumer config must not set private queue variable QUEUE_STATE_GUARD_DEPTH'
+  after_snapshot="$(queue_tree_snapshot "${repo_dir}/.work/queue")"
+  assert_equals "$before_snapshot" "$after_snapshot" 'readonly private-variable rejection queue snapshot'
+
+  pause="${state_dir}/queue-preflight-signal-pause"
+  rm -rf "$pause"; mkdir -p "$pause"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_minimal_run_publication CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=preflight-term \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99
+  ) > "${state_dir}/queue-preflight-term.log" 2>&1 & preflight_pid=$!
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    [[ -f "$pause/paused.after_minimal_run_publication.preflight-term" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.after_minimal_run_publication.preflight-term" ]] || fail 'preflight candidate did not reach the signal pause'
+  kill -TERM "$preflight_pid"
+  if wait "$preflight_pid"; then fail 'SIGTERM-interrupted preflight unexpectedly succeeded'; fi
+  assert_file_contains "${state_dir}/queue-preflight-term.log" 'resume with:'
+  emitted_run="$(sed -n 's/.*--resume \([A-Za-z0-9._-]*\).*/\1/p' "${state_dir}/queue-preflight-term.log" | head -n 1)"
+  assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/manifest.state"
+  assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/run.state"
+  assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
+}
+
 run_queue_full_contention_smoke() {
   local barrier="${state_dir}/queue-contention-barrier" pause="${state_dir}/queue-contention-pause"
   local first_log="${state_dir}/queue-contention-first.log" second_log="${state_dir}/queue-contention-second.log"
   local first_pid second_pid winner loser winner_label owner_count issue_fetch_count gh_call_count git_mutation_count attempt
+  local authoritative_run emitted_run winner_log loser_log
   log 'running full queue runner contention smoke'
   rm -rf "$barrier" "$pause"; mkdir -p "$barrier" "$pause"
   clear_command_logs; reset_flow_counters
   (
     cd "$repo_dir"
-    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9 QUEUE_STATE_ASSERT_IN_PROGRESS=1 \
+      CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
       CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" \
       CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=first \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
   ) > "$first_log" 2>&1 & first_pid=$!
   (
     cd "$repo_dir"
-    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9 QUEUE_STATE_ASSERT_IN_PROGRESS=1 \
+      CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
       CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" \
       CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=second \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
@@ -2499,10 +2609,21 @@ run_queue_full_contention_smoke() {
   if wait "$loser"; then fail 'queue contention loser unexpectedly succeeded'; fi
   owner_count="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)"
   assert_equals 1 "$owner_count" 'complete authoritative lease owner count during contention'
+  authoritative_run="$(awk -F '\t' '$1 == "run_id" { print $2 }' "$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')")"
+  if [[ "$winner_label" == first ]]; then winner_log="$first_log"; loser_log="$second_log"; else winner_log="$second_log"; loser_log="$first_log"; fi
+  assert_file_not_contains "$winner_log" 'resume with:'
+  assert_equals 1 "$(grep -Fc -- '--resume ' "$loser_log")" 'contention loser recovery command count'
+  assert_file_contains "$loser_log" "--resume ${authoritative_run}"
   assert_file_not_contains "$first_log" 'command not found'
   assert_file_not_contains "$second_log" 'command not found'
   touch "$pause/release.after_acquire.${winner_label}"
   if wait "$winner"; then fail 'queue contention winner should stop at the deterministic post-acquire failpoint'; fi
+  while IFS= read -r emitted_run; do
+    [[ -n "$emitted_run" ]] || continue
+    assert_equals "$authoritative_run" "$emitted_run" 'contention emitted resume run identity'
+    assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/manifest.state"
+    assert_file_exists "${repo_dir}/.work/queue/runs/${emitted_run}/run.state"
+  done < <(sed -n 's/.*--resume \([A-Za-z0-9._-]*\).*/\1/p' "$first_log" "$second_log")
   issue_fetch_count="$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
   gh_call_count="$(awk 'NF { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
   git_mutation_count="$(awk '$1 == "switch" || $1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
@@ -2516,10 +2637,12 @@ run_queue_full_contention_smoke() {
 }
 
 run_queue_acquisition_crash_smoke() {
-  local first_log="${state_dir}/queue-claim-crash.log" second_log="${state_dir}/queue-owner-crash.log" run_id
+  local first_log="${state_dir}/queue-claim-crash.log" owner_log="${state_dir}/queue-owner-sigkill.log" run_id other_run
+  local pause="${state_dir}/queue-owner-sigkill-pause" owner_job owner_record owner_pid owner_start owner_token owner_generation
+  local replacement_record replacement_token replacement_generation attempt issue_fetch_count branch_create_count push_count pr_count merge_count
   log 'running queue acquisition crash-window smoke'
   clear_command_logs; reset_flow_counters
-  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_SKIP_PUBLISH=1 \
       CODEX_FLOW_QUEUE_FAILPOINT=after_exclusive_claim_before_owner_record \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}") > "$first_log" 2>&1; then
     fail 'exclusive-claim failpoint should stop the queue'
@@ -2528,19 +2651,91 @@ run_queue_acquisition_crash_smoke() {
   [[ -n "$run_id" && -f "${repo_dir}/.work/queue/runs/${run_id}/manifest.state" && -f "${repo_dir}/.work/queue/runs/${run_id}/run.state" ]] || fail 'claim crash must retain a resumable minimal run'
   [[ -d "${repo_dir}/.work/queue/lease.lock" ]] || fail 'claim crash should expose the tested empty lease boundary'
   assert_equals 0 "$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)" 'empty claim owner count'
+
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 \
+      CODEX_FLOW_QUEUE_FAILPOINT=after_minimal_run_publication \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}") > "${state_dir}/queue-other-candidate.log" 2>&1; then
+    fail 'different-run candidate setup should stop after minimal publication'
+  fi
+  other_run="$(sed -n 's/^\[queue\] run ID: //p' "${state_dir}/queue-other-candidate.log" | head -n 1)"
+  [[ -n "$other_run" && "$other_run" != "$run_id" ]] || fail 'different-run candidate setup did not publish a distinct run'
+
+  rm -rf "$pause"; mkdir -p "$pause"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=sigkill-owner \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id"
+  ) > "$owner_log" 2>&1 & owner_job=$!
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    [[ -f "$pause/paused.after_acquire.sigkill-owner" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.after_acquire.sigkill-owner" ]] || fail 'queue owner did not pause after complete owner publication'
+  owner_record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  owner_pid="$(awk -F '\t' '$1 == "owner_pid" { print $2 }' "$owner_record")"
+  owner_start="$(awk -F '\t' '$1 == "process_start" { print $2 }' "$owner_record")"
+  owner_token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$owner_record")"
+  owner_generation="$(awk -F '\t' '$1 == "lease_generation" { print $2 }' "$owner_record")"
+  assert_equals 1 "$owner_generation" 'initial complete owner generation before SIGKILL'
+  assert_equals "$owner_start" "$(awk '{print $22}' "/proc/${owner_pid}/stat")" 'initial complete owner process-start identity'
+  kill -9 "$owner_pid"
+  if wait "$owner_job" 2>/dev/null; then fail 'SIGKILLed complete owner unexpectedly exited successfully'; fi
+  assert_file_exists "$owner_record"
+  assert_file_contains "$owner_record" "owner_token$(printf '\t')${owner_token}"
+  assert_file_contains "$owner_record" "lease_generation$(printf '\t')1"
+
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
-      CODEX_FLOW_QUEUE_FAILPOINT=after_complete_owner_publication \
-      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$second_log" 2>&1; then
-    fail 'complete-owner failpoint should stop the queue'
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 99) > "${state_dir}/queue-stale-owner-fresh.log" 2>&1; then
+    fail 'fresh run must refuse a complete stale owner'
   fi
-  assert_file_contains "$second_log" 'recovering incomplete empty queue lease claim'
-  assert_file_not_contains "$second_log" 'Unknown queue run ID'
-  assert_file_not_contains "$second_log" 'command not found'
+  assert_file_contains "${state_dir}/queue-stale-owner-fresh.log" "--resume ${run_id}"
+  assert_equals 1 "$(grep -Fc -- '--resume ' "${state_dir}/queue-stale-owner-fresh.log")" 'fresh stale-owner recovery command count'
+  assert_file_not_contains "${state_dir}/queue-stale-owner-fresh.log" "--resume ${other_run}"
+  assert_file_not_contains "${state_dir}/queue-stale-owner-fresh.log" 'command not found'
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$other_run") > "${state_dir}/queue-stale-owner-other-run.log" 2>&1; then
+    fail 'different-run resume must refuse a complete stale owner'
+  fi
+  assert_file_contains "${state_dir}/queue-stale-owner-other-run.log" "conflicts with requested run ${other_run}"
+
+  rm -f "$pause/paused.after_acquire.sigkill-owner"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=sigkill-recovery \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id"
+  ) > "${state_dir}/queue-claim-resume.log" 2>&1 & owner_job=$!
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    [[ -f "$pause/paused.after_acquire.sigkill-recovery" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.after_acquire.sigkill-recovery" ]] || fail 'same-run stale-owner recovery did not publish its replacement owner'
+  replacement_record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  replacement_token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$replacement_record")"
+  replacement_generation="$(awk -F '\t' '$1 == "lease_generation" { print $2 }' "$replacement_record")"
+  [[ "$replacement_token" != "$owner_token" ]] || fail 'dead-owner recovery must rotate the owner token'
+  assert_equals 2 "$replacement_generation" 'dead-owner recovery generation'
+  touch "$pause/release.after_acquire.sigkill-recovery"
+  if ! wait "$owner_job"; then
+    cat "${state_dir}/queue-claim-resume.log" >&2
+    fail 'same-run recovery after actual SIGKILL should complete'
+  fi
+  issue_fetch_count="$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  branch_create_count="$(awk '$1 == "switch" && $2 == "--create" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  push_count="$(awk '$1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  pr_count="$(awk '$1 == "pr" && ($2 == "create" || $2 == "edit") { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  merge_count="$(awk '$1 == "pr" && $2 == "merge" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  assert_equals 1 "$issue_fetch_count" 'actual stale-owner recovery Issue fetch count'
+  assert_equals 1 "$branch_create_count" 'actual stale-owner recovery branch creation count'
+  assert_equals 1 "$push_count" 'actual stale-owner recovery push count'
+  assert_equals 1 "$pr_count" 'actual stale-owner recovery PR mutation count'
+  assert_equals 0 "$merge_count" 'actual stale-owner recovery merge count'
+  assert_file_contains "$owner_log" 'recovering incomplete empty queue lease claim'
+  assert_file_not_contains "$owner_log" 'command not found'
   assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
-  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
-      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-claim-resume.log" 2>&1; then
-    cat "${state_dir}/queue-claim-resume.log" >&2; fail 'queue acquisition crash windows should resume without manual deletion'
-  fi
   rm -f "${state_dir}/batch-pr-url.txt"
 }
 
@@ -2574,7 +2769,7 @@ run_issue_queue_strict_issue_review_smoke() {
 
   if (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 \
       CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0 \
       CODEX_FLOW_QUEUE_FAILPOINT=after_minimal_run_publication \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --review-every 2 "${ISSUE_NUMBER}" "${QUEUE_ISSUE_NUMBER}"
@@ -2593,7 +2788,7 @@ run_issue_queue_strict_issue_review_smoke() {
   printf 'schema_version\t2\nrun_id\t%s\nbatch_id\tbatch-%s-%s\nissue_number\t%s\nbase_commit\tnone\ncommit_sha\tnone\nartifact_path\tnone\nstate\tleased\nupdated_at\t2026-08-06T00:00:00Z\n' \
     "$run_id" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
     > "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state"
-  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-partial-reconcile.log" 2>&1; then
     fail 'partial initialization reconciliation failpoint should stop before Issue work'
   fi
@@ -2603,7 +2798,7 @@ run_issue_queue_strict_issue_review_smoke() {
 
   if (
     cd "${repo_dir}"
-    PATH="${stub_dir}:$PATH" \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 \
       SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
       SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
       CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0 \
@@ -2633,6 +2828,123 @@ run_issue_queue_strict_issue_review_smoke() {
   assert_file_contains "${queue_log}" 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+}
+
+run_queue_external_orphan_smoke() {
+  local pause="${state_dir}/queue-external-orphan-pause" log_file="${state_dir}/queue-external-orphan-owner.log"
+  local queue_job attempt owner_record owner_pid run_id active_file child_pid child_pgid child_start busy_status elapsed
+  local issue_fetch_count branch_create_count push_count pr_count merge_count
+  log 'running queue external-child owner-SIGKILL smoke'
+  clear_command_logs; reset_flow_counters
+  rm -rf "$pause"; mkdir -p "$pause"
+  active_file="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)/issue-forge/queue/active-process.state"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      SMOKE_QUEUE_EXTERNAL_PAUSE_DIR="$pause" SMOKE_QUEUE_EXTERNAL_PAUSE_ISSUE=42 SMOKE_QUEUE_EXTERNAL_PAUSE_LABEL=orphan \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 42
+  ) > "$log_file" 2>&1 & queue_job=$!
+  for ((attempt = 0; attempt < 2000; attempt += 1)); do
+    [[ -f "$pause/paused.orphan" && -f "$active_file" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.orphan" && -f "$active_file" ]] || fail 'external queue stub did not reach the controlled child pause'
+  owner_record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  owner_pid="$(awk -F '\t' '$1 == "owner_pid" { print $2 }' "$owner_record")"
+  run_id="$(awk -F '\t' '$1 == "run_id" { print $2 }' "$owner_record")"
+  child_pid="$(awk -F '\t' '$1 == "child_pid" { print $2 }' "$active_file")"
+  child_pgid="$(awk -F '\t' '$1 == "child_pgid" { print $2 }' "$active_file")"
+  child_start="$(awk -F '\t' '$1 == "process_start" { print $2 }' "$active_file")"
+  assert_equals issue_context_fetch "$(awk -F '\t' '$1 == "phase" { print $2 }' "$active_file")" 'external orphan active phase'
+  kill -9 "$owner_pid"
+  if wait "$queue_job" 2>/dev/null; then fail 'queue parent killed during external phase unexpectedly succeeded'; fi
+  assert_file_exists "$owner_record"
+  assert_file_exists "$active_file"
+
+  elapsed="$SECONDS"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" timeout 5 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-external-orphan-busy.log" 2>&1; then
+    fail 'resume must not take over while the orphan external process group is alive'
+  else
+    busy_status=$?
+  fi
+  elapsed=$((SECONDS - elapsed))
+  [[ "$busy_status" -ne 124 && "$elapsed" -lt 5 ]] || fail 'orphan guard diagnostic exceeded the bounded interval'
+  assert_file_contains "${state_dir}/queue-external-orphan-busy.log" 'Queue serialization guard remained busy for 1 second'
+  assert_file_contains "${state_dir}/queue-external-orphan-busy.log" "run=${run_id}"
+  assert_file_contains "${state_dir}/queue-external-orphan-busy.log" 'active phase: issue_context_fetch'
+  assert_file_contains "${state_dir}/queue-external-orphan-busy.log" "child PID=${child_pid} PGID=${child_pgid} process_start=${child_start}"
+  assert_file_contains "${state_dir}/queue-external-orphan-busy.log" "kill -TERM -- -${child_pgid}"
+  assert_equals 1 "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")" 'orphan-busy Issue fetch count'
+
+  touch "$pause/release.orphan"
+  for ((attempt = 0; attempt < 2000; attempt += 1)); do
+    kill -0 "$child_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  kill -0 "$child_pid" 2>/dev/null && fail 'controlled orphan child did not terminate after its external stub completed'
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-external-orphan-resume.log" 2>&1; then
+    cat "${state_dir}/queue-external-orphan-resume.log" >&2
+    fail 'same-run resume should proceed after the controlled orphan process group exits'
+  fi
+  assert_file_contains "${state_dir}/queue-external-orphan-resume.log" 'reconciled existing durable Issue 42 context without refetching'
+  issue_fetch_count="$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  branch_create_count="$(awk '$1 == "switch" && $2 == "--create" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  push_count="$(awk '$1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  pr_count="$(awk '$1 == "pr" && ($2 == "create" || $2 == "edit") { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  merge_count="$(awk '$1 == "pr" && $2 == "merge" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  assert_equals 1 "$issue_fetch_count" 'external orphan recovery Issue fetch count'
+  assert_equals 1 "$branch_create_count" 'external orphan recovery branch creation count'
+  assert_equals 1 "$push_count" 'external orphan recovery push count'
+  assert_equals 1 "$pr_count" 'external orphan recovery PR mutation count'
+  assert_equals 0 "$merge_count" 'external orphan recovery merge count'
+  assert_equals 1 "$(< "${state_dir}/implementation-count.txt")" 'external orphan recovery implementation count'
+  assert_path_not_exists "$active_file"
+}
+
+run_queue_guard_path_stability_smoke() {
+  local pause="${state_dir}/queue-guard-stability-pause" log_file="${state_dir}/queue-guard-stability-owner.log"
+  local queue_job attempt guard guard_identity busy_status issue_fetch_count branch_create_count
+  log 'running queue guard-path stability smoke'
+  clear_command_logs; reset_flow_counters
+  rm -rf "$pause"; mkdir -p "$pause"
+  guard="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)/issue-forge/queue/control.guard"
+  guard_identity="$(stat -Lc '%d:%i' "$guard")"
+  (
+    cd "$repo_dir"
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      SMOKE_QUEUE_EXTERNAL_PAUSE_DIR="$pause" SMOKE_QUEUE_EXTERNAL_PAUSE_ISSUE=43 SMOKE_QUEUE_EXTERNAL_PAUSE_LABEL=guard-rebind \
+      SMOKE_QUEUE_REMOVE_WORK_QUEUE=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 43
+  ) > "$log_file" 2>&1 & queue_job=$!
+  for ((attempt = 0; attempt < 2000; attempt += 1)); do
+    [[ -f "$pause/paused.guard-rebind" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.guard-rebind" ]] || fail 'guard-path cleanup stub did not reach its pause'
+  assert_path_not_exists "${repo_dir}/.work/queue"
+  assert_equals "$guard_identity" "$(stat -Lc '%d:%i' "$guard")" 'Git-common-dir guard inode during .work cleanup'
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" timeout 5 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 44) > "${state_dir}/queue-guard-stability-busy.log" 2>&1; then
+    fail 'second queue owner must not start after .work/queue replacement'
+  else
+    busy_status=$?
+  fi
+  [[ "$busy_status" -ne 124 ]] || fail 'guard-path stability contender hung instead of returning a bounded diagnostic'
+  assert_file_contains "${state_dir}/queue-guard-stability-busy.log" 'Queue serialization guard remained busy for 1 second'
+  assert_file_contains "${state_dir}/queue-guard-stability-busy.log" 'active phase: issue_context_fetch'
+  assert_equals "$guard_identity" "$(stat -Lc '%d:%i' "$guard")" 'Git-common-dir guard inode after contender'
+  assert_path_not_exists "${repo_dir}/.work/queue/control.guard"
+  issue_fetch_count="$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  branch_create_count="$(awk '$1 == "switch" && $2 == "--create" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  assert_equals 1 "$issue_fetch_count" 'guard stability Issue fetch count'
+  assert_equals 1 "$branch_create_count" 'guard stability branch creation count'
+  touch "$pause/release.guard-rebind"
+  if wait "$queue_job"; then fail 'queue whose authoritative .work state was removed must fail safely'; fi
+  assert_equals "$guard_identity" "$(stat -Lc '%d:%i' "$guard")" 'Git-common-dir guard inode after owner failure'
+  assert_equals 1 "$(grep -Fc 'resume with:' "$log_file")" 'guard stability pre-cleanup resume hint count'
+  assert_file_contains "$log_file" 'state disappeared or became invalid; no resume command can be advertised'
 }
 
 run_issue_queue_smoke() {
@@ -2757,11 +3069,11 @@ run_queue_lease_smoke() {
   local pause="${state_dir}/queue-takeover-pause" takeover_barrier="${state_dir}/queue-takeover-barrier"
   local takeover_pid takeover_two_pid takeover_winner takeover_loser takeover_label replacement_record replacement_token replacement_generation attempt
   log 'running queue lease smoke'
-  run_id="$(basename "$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)")"
+  run_id="$(basename "$(dirname "$(grep -l $'^state\tcompleted$' "${repo_dir}"/.work/queue/runs/*/run.state | head -n 1)")")"
   owner_start="$(awk '{print $22}' "/proc/$$/stat")"
   mkdir -p "$lease"
   QUEUE_STATE_HELPER="$helper" QUEUE_LEASE="$lease" QUEUE_OWNER_PID="$$" QUEUE_OWNER_START="$owner_start" QUEUE_RUN_ID="$run_id" QUEUE_TOKEN="$token" bash -c '
-set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 "$QUEUE_OWNER_PID" "$(hostname 2>/dev/null || uname -n)" "$QUEUE_OWNER_START"
+set -euo pipefail; source "$QUEUE_STATE_HELPER"; : > "${QUEUE_LEASE}.guard"; queue_state_configure_guard "${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 "$QUEUE_OWNER_PID" "$(hostname 2>/dev/null || uname -n)" "$QUEUE_OWNER_START"
 '
   log_file="${state_dir}/queue-live-lease.log"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
@@ -2771,7 +3083,7 @@ set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD
 
   rm -rf "$lease"; mkdir -p "$lease"
   QUEUE_STATE_HELPER="$helper" QUEUE_LEASE="$lease" QUEUE_RUN_ID="$run_id" QUEUE_TOKEN="$token" bash -c '
-set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD="${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 999999 different-host unavailable
+set -euo pipefail; source "$QUEUE_STATE_HELPER"; : > "${QUEUE_LEASE}.guard"; queue_state_configure_guard "${QUEUE_LEASE}.guard"; queue_state_write_lease "$QUEUE_LEASE/owner.${QUEUE_TOKEN}.state" "$QUEUE_RUN_ID" "$QUEUE_TOKEN" 1 999999 different-host unavailable
 '
   log_file="${state_dir}/queue-foreign-lease.log"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
@@ -2793,12 +3105,12 @@ set -euo pipefail; source "$QUEUE_STATE_HELPER"; QUEUE_STATE_SERIALIZATION_GUARD
   rm -rf "$pause" "$takeover_barrier"; mkdir -p "$pause" "$takeover_barrier"
   (
     cd "$repo_dir"
-    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
       CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=takeover-one "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id" --take-over-lease
   ) > "${state_dir}/queue-takeover-one.log" 2>&1 & takeover_pid=$!
   (
     cd "$repo_dir"
-    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
+    PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_TEST_BARRIER_DIR="$takeover_barrier" CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_acquire \
       CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=takeover-two "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id" --take-over-lease
   ) > "${state_dir}/queue-takeover-two.log" 2>&1 & takeover_two_pid=$!
   for ((attempt = 0; attempt < 1000; attempt += 1)); do
@@ -2937,6 +3249,9 @@ main() {
   run_issue_queue_smoke
   run_queue_lease_smoke
   run_issue_queue_strict_issue_review_smoke
+  run_queue_private_environment_smoke
+  run_queue_external_orphan_smoke
+  run_queue_guard_path_stability_smoke
   run_vendor_worktree_visibility_smoke
   run_no_workflow_file_smoke
   log 'all smoke scenarios passed'

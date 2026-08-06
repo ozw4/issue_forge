@@ -5,41 +5,113 @@ readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION='2'
 queue_state_error() { printf '[queue-state] %s\n' "$1" >&2; return 1; }
 queue_state_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
+queue_state_initialize_private_state() {
+  local name
+  for name in \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD \
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS \
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION \
+    ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD \
+    ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE \
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION; do
+    if ! unset "$name" 2>/dev/null; then
+      queue_state_error "Private queue state variable is readonly and cannot be initialized: ${name}"
+      return 1
+    fi
+  done
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH=0
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
+  ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS=0
+  ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION=''
+  ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD=''
+  # shellcheck disable=SC2034 # configured and consumed by run_issue_queue.sh
+  ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE=''
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION=''
+}
+
+queue_state_initialize_private_state || return 1
+
+queue_state_configure_guard() {
+  local guard="$1" busy_function="${2:-}"
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -eq 0 ]] || {
+    queue_state_error 'Cannot reconfigure the queue guard during a serialized operation'
+    return 1
+  }
+  [[ -f "$guard" && ! -L "$guard" ]] || {
+    queue_state_error "Queue serialization guard is not the expected regular file: ${guard}"
+    return 1
+  }
+  ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD="$guard"
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION="$busy_function"
+}
+
+queue_state_set_owner_assertion() {
+  ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION="${1:-}"
+}
+
 queue_state_guard_enter() {
-  local guard="${QUEUE_STATE_SERIALIZATION_GUARD:?QUEUE_STATE_SERIALIZATION_GUARD is required}"
-  if [[ "${QUEUE_STATE_GUARD_DEPTH:-0}" -gt 0 ]]; then
-    QUEUE_STATE_GUARD_DEPTH=$((QUEUE_STATE_GUARD_DEPTH + 1))
+  local guard="${ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD:?private queue serialization guard is required}"
+  local path_identity descriptor_identity
+  if [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -gt 0 ]]; then
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH=$((ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH + 1))
     return 0
   fi
-  mkdir -p "$(dirname "$guard")" || return 1
-  exec {QUEUE_STATE_GUARD_FD}>"$guard" || return 1
-  if ! flock -x "$QUEUE_STATE_GUARD_FD"; then
-    exec {QUEUE_STATE_GUARD_FD}>&-
-    unset QUEUE_STATE_GUARD_FD
+  [[ -f "$guard" && ! -L "$guard" ]] || {
+    queue_state_error "Queue serialization guard is not the expected regular file: ${guard}"
+    return 1
+  }
+  exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>>"$guard" || return 1
+  descriptor_identity="$(stat -Lc '%d:%i' "/proc/${BASHPID}/fd/${ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}" 2>/dev/null)" || {
+    exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>&-
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
+    return 1
+  }
+  if ! flock -w 1 "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD"; then
+    exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>&-
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
+    if [[ -n "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION" ]]; then
+      "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION" "$guard" || true
+    else
+      queue_state_error "Queue serialization guard remained busy for 1 second: ${guard}"
+    fi
     return 1
   fi
-  QUEUE_STATE_GUARD_DEPTH=1
+  path_identity="$(stat -Lc '%d:%i' "$guard" 2>/dev/null)" || true
+  if [[ -z "$path_identity" || "$path_identity" != "$descriptor_identity" || ! -f "$guard" || -L "$guard" ]]; then
+    exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>&-
+    ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
+    queue_state_error "Queue serialization guard pathname changed during acquisition: ${guard}"
+    return 1
+  fi
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH=1
 }
 
 queue_state_guard_leave() {
-  [[ "${QUEUE_STATE_GUARD_DEPTH:-0}" -gt 0 ]] || return 1
-  QUEUE_STATE_GUARD_DEPTH=$((QUEUE_STATE_GUARD_DEPTH - 1))
-  [[ "$QUEUE_STATE_GUARD_DEPTH" -gt 0 ]] && return 0
-  flock -u "$QUEUE_STATE_GUARD_FD" || return 1
-  exec {QUEUE_STATE_GUARD_FD}>&-
-  unset QUEUE_STATE_GUARD_FD
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -gt 0 ]] || return 1
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH=$((ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH - 1))
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -gt 0 ]] && return 0
+  exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>&-
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
+}
+
+queue_state_guard_abandon() {
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH" -gt 0 ]] || return 0
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_DEPTH=0
+  exec {ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD}>&-
+  ISSUE_FORGE_INTERNAL_QUEUE_GUARD_FD=''
 }
 
 queue_state_begin_serialized_operation() {
   queue_state_guard_enter || return 1
-  if [[ -n "${QUEUE_STATE_ASSERT_OWNED_FUNCTION:-}" && "${QUEUE_STATE_ASSERT_IN_PROGRESS:-0}" -ne 1 ]]; then
-    QUEUE_STATE_ASSERT_IN_PROGRESS=1
-    if ! "${QUEUE_STATE_ASSERT_OWNED_FUNCTION}"; then
-      QUEUE_STATE_ASSERT_IN_PROGRESS=0
+  if [[ -n "$ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION" && "$ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS" -ne 1 ]]; then
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS=1
+    if ! "$ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION"; then
+      ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS=0
       queue_state_guard_leave || true
       return 1
     fi
-    QUEUE_STATE_ASSERT_IN_PROGRESS=0
+    ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_IN_PROGRESS=0
   fi
 }
 
@@ -51,7 +123,7 @@ queue_state_finish_serialized_operation() {
 
 queue_state_test_pause() {
   local name="$1" directory="${QUEUE_STATE_TEST_PAUSE_DIR:-}" label="${QUEUE_STATE_TEST_RUNNER_LABEL:-$$}"
-  [[ -n "$directory" && "${QUEUE_STATE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
+  [[ "${ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE:-0}" == 1 && -n "$directory" && "${QUEUE_STATE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
   mkdir -p "$directory" || return 1
   : > "${directory}/paused.${name}.${label}" || return 1
   while [[ ! -f "${directory}/release.${name}.${label}" ]]; do sleep 0.01; done
@@ -103,19 +175,41 @@ queue_state_require_issues() {
 }
 
 queue_state_canonical_repository_identity() {
-  local remote="$1" host path
+  local remote="$1" scheme='' authority host port='' path
   case "$remote" in
-    *@*:*) host="${remote#*@}"; host="${host%%:*}"; path="${remote#*:}" ;;
     ssh://*|http://*|https://*)
-      remote="${remote#*://}"; remote="${remote#*@}"; host="${remote%%/*}"; host="${host%%:*}"; path="${remote#*/}" ;;
+      scheme="${remote%%:*}"
+      remote="${remote#*://}"
+      authority="${remote%%/*}"
+      authority="${authority##*@}"
+      path="${remote#*/}"
+      if [[ "$authority" == *:* ]]; then
+        host="${authority%%:*}"
+        port="${authority#*:}"
+        [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le 65535 ]] || {
+          queue_state_error 'Cannot derive credential-free repository identity from malformed port'
+          return 1
+        }
+      else
+        host="$authority"
+      fi
+      ;;
+    *@*:*) scheme=ssh; authority="${remote%%:*}"; host="${authority##*@}"; path="${remote#*:}" ;;
     /*) printf 'local-path:%s\n' "$remote"; return 0 ;;
     *) queue_state_error "Unsupported repository remote URL: ${remote}"; return 1 ;;
+  esac
+  case "${scheme}:${port}" in
+    http:80|https:443|ssh:22) port='' ;;
   esac
   path="${path#/}"; path="${path%.git}"
   [[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$path" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {
     queue_state_error 'Cannot derive credential-free repository identity'; return 1;
   }
-  printf '%s/%s\n' "${host,,}" "$path"
+  if [[ -n "$port" ]]; then
+    printf '%s:%s/%s\n' "${host,,}" "$port" "$path"
+  else
+    printf '%s/%s\n' "${host,,}" "$path"
+  fi
 }
 
 queue_state_parse_file() {
@@ -132,6 +226,7 @@ queue_state_parse_file() {
     pointer) required=(schema_version run_id owner_token lease_generation updated_at) ;;
     checkpoint) required=(schema_version run_id entity phase status updated_at) ;;
     publish) required=(schema_version run_id batch_id pr_number pr_url head_branch base_branch head_sha state updated_at) ;;
+    active_process) required=(schema_version run_id phase child_pid child_pgid process_start owner_pid owner_process_start started_at) ;;
     *) queue_state_error "Unknown state schema: ${schema}"; return 1 ;;
   esac
   for key in "${required[@]}"; do allowed["$key"]=1; done
@@ -163,6 +258,7 @@ queue_state_validate_file() {
   queue_state_require_token 'run ID' "${fields[run_id]}" || return 1
   if [[ "$schema" == manifest ]]; then queue_state_require_timestamp manifest "${fields[created_at]}" || return 1
   elif [[ "$schema" == lease ]]; then queue_state_require_timestamp lease "${fields[acquired_at]}" || return 1
+  elif [[ "$schema" == active_process ]]; then queue_state_require_timestamp active_process "${fields[started_at]}" || return 1
   else queue_state_require_timestamp "$schema" "${fields[updated_at]}" || return 1; fi
   case "$schema" in
     manifest)
@@ -230,6 +326,14 @@ queue_state_validate_file() {
       [[ "${fields[head_sha]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed published head SHA: ${fields[head_sha]}"; return 1; }
       queue_state_enum_contains "${fields[state]}" open merged || { queue_state_error "Malformed publish state: ${fields[state]}"; return 1; }
       ;;
+    active_process)
+      queue_state_require_token 'active process phase' "${fields[phase]}" || return 1
+      [[ "${fields[child_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed active child PID: ${fields[child_pid]}"; return 1; }
+      [[ "${fields[child_pgid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed active child PGID: ${fields[child_pgid]}"; return 1; }
+      [[ "${fields[process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed active process-start identity: ${fields[process_start]}"; return 1; }
+      [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed active owner PID: ${fields[owner_pid]}"; return 1; }
+      [[ "${fields[owner_process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed active owner process-start identity: ${fields[owner_process_start]}"; return 1; }
+      ;;
   esac
 }
 
@@ -246,7 +350,7 @@ queue_state_publish_file() {
     queue_state_finish_serialized_operation 1
     return 1
   fi
-  if [[ "${QUEUE_STATE_TEST_INTERRUPT_BEFORE_MV:-0}" == 1 ]]; then
+  if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE:-0}" == 1 && "${QUEUE_STATE_TEST_INTERRUPT_BEFORE_MV:-0}" == 1 ]]; then
     queue_state_error "State publication interrupted before atomic replacement: ${target}"
     queue_state_finish_serialized_operation 1
     return 1
@@ -434,4 +538,10 @@ queue_state_remove_pointer_if_matches() {
 queue_state_record_publish() {
   queue_state_write_content "$1" publish "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" "batch_id	$3" \
     "pr_number	$4" "pr_url	$5" "head_branch	$6" "base_branch	$7" "head_sha	$8" "state	$9" "updated_at	$(queue_state_now)"
+}
+
+queue_state_write_active_process() {
+  queue_state_write_content "$1" active_process "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "phase	$3" "child_pid	$4" "child_pgid	$5" "process_start	$6" "owner_pid	$7" \
+    "owner_process_start	$8" "started_at	$(queue_state_now)"
 }

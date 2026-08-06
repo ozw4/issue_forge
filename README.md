@@ -206,7 +206,9 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v2 の authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest と最小 `run.state` は lease 取得前の最初の resumable boundary で、resume は manifest から不足 batch/Issue entity だけを再作成します。lease acquire/takeover/release、state replacement、`current` publish/remove はすべて stable `.work/queue/control.guard` 上の kernel `flock` で直列化され、guard 内で random owner token・世代・PID・host・process-start identity を再検証します。crash で残った empty claim は次の guarded acquisition が決定的に回収します。dead same-host lease は同じ run ID の明示 resume だけが回収でき、別 host takeover は old process 停止を operator が保証する `--take-over-lease` が必要です。credential-free canonical repository identity は同じ repository の SSH/HTTPS origin を同一視します。ownership-aware な `current` pointer は explicit resume でも再 publish され、completion kill window の completed pointer は `--resume current` が安全に除去します。
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v2 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest と最小 `run.state` は unadvertised candidate です。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
+
+serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch は durable identity を持つ専用 process group で実行され、親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否します。group 終了後は同じ run ID の resume が token を rotate し generation を 1 増やして回復します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
 
 ## Issue zip import
 
@@ -344,6 +346,8 @@ Runtime-only overrides は次のとおりです。
 | `CODEX_FLOW_SKIP_PUBLISH` | non-zero で single-Issue flow の push/PR publish を skip |
 
 consumer-specific prompt templates を使う場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。queue を使う custom prompt set には batch templates と、light review を有効にする場合は `review-light.prompt.md.tmpl` も必要です。
+
+`QUEUE_STATE_GUARD_DEPTH`、`QUEUE_STATE_GUARD_FD`、`QUEUE_STATE_ASSERT_IN_PROGRESS` と `ISSUE_FORGE_INTERNAL_QUEUE_*` は supported configuration ではなく private process state です。environment からの legacy values は queue startup が neutralize し、consumer config による readonly/non-resettable injection は `.work/queue` を変更する前に失敗します。
 
 ## Git hygiene
 

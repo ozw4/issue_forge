@@ -22,6 +22,7 @@ Covered behavior includes:
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
 - `CODEX_FLOW_SKIP_PUBLISH=1` keeps issue-flow commits while skipping branch push and issue PR creation
 - the direct vendor issue queue processes issues sequentially in input order on one batch branch, archives per-issue Codex artifacts, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, and fails before modification when multiple batches are requested without `--auto-merge`
+- queue control-plane coverage uses real `kill -9` owner death after complete lease publication and during a paused external child, verifies one-generation same-run recovery and exact Issue/Git/push/PR/merge counters, injects private guard variables through full startup/contention, and removes `.work/queue` while checking that the Git-common-dir guard inode still fences a second owner
 - PR publishing generates the deterministic body format, stores body-file contents from the `gh` stub, covers the create path, and covers existing PR title/body sync through `gh pr edit`
 - PR body assertions cover `Closes #<issue>`, summary, changed files, checks, review, checks/review artifacts when present, and `not available yet` when those artifacts are missing
 - the harness asserts that no GitHub workflow file is created
