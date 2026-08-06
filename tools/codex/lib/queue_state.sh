@@ -55,10 +55,13 @@ queue_state_parse_file() {
   local -A allowed=()
   local -a required=()
   case "$schema" in
-    manifest) required=(schema_version run_id created_at issues review_every draft_pr auto_merge batch_review_reasoning batch_fix_reasoning batch_check_fix_reasoning base_branch base_ref) ;;
+    manifest) required=(schema_version run_id created_at issues review_every draft_pr auto_merge light_issue_review batch_review_reasoning batch_fix_reasoning batch_check_fix_reasoning base_branch base_ref repository_identity) ;;
     run) required=(schema_version run_id state updated_at) ;;
     batch) required=(schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at) ;;
-    issue) required=(schema_version run_id batch_id issue_number commit_sha artifact_path state updated_at) ;;
+    issue) required=(schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at) ;;
+    lease) required=(schema_version run_id owner_pid owner_host acquired_at) ;;
+    checkpoint) required=(schema_version run_id entity phase status updated_at) ;;
+    publish) required=(schema_version run_id batch_id pr_number pr_url head_branch base_branch head_sha state updated_at) ;;
     *) queue_state_error "Unknown state schema: ${schema}"; return 1 ;;
   esac
   for key in "${required[@]}"; do allowed["$key"]=1; done
@@ -89,6 +92,7 @@ queue_state_validate_file() {
     || { queue_state_error "Unsupported ${schema} schema version: ${fields[schema_version]}"; return 1; }
   queue_state_require_token 'run ID' "${fields[run_id]}" || return 1
   if [[ "$schema" == manifest ]]; then queue_state_require_timestamp manifest "${fields[created_at]}" || return 1
+  elif [[ "$schema" == lease ]]; then queue_state_require_timestamp lease "${fields[acquired_at]}" || return 1
   else queue_state_require_timestamp "$schema" "${fields[updated_at]}" || return 1; fi
   case "$schema" in
     manifest)
@@ -96,12 +100,14 @@ queue_state_validate_file() {
       [[ "${fields[review_every]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed review_every: ${fields[review_every]}"; return 1; }
       queue_state_enum_contains "${fields[draft_pr]}" 0 1 || { queue_state_error "Malformed draft policy: ${fields[draft_pr]}"; return 1; }
       queue_state_enum_contains "${fields[auto_merge]}" 0 1 || { queue_state_error "Malformed auto-merge policy: ${fields[auto_merge]}"; return 1; }
+      queue_state_enum_contains "${fields[light_issue_review]}" 0 1 || { queue_state_error "Malformed light Issue review policy: ${fields[light_issue_review]}"; return 1; }
       [[ "${fields[draft_pr]}:${fields[auto_merge]}" != 1:1 ]] || { queue_state_error 'Draft and auto-merge policies are incompatible'; return 1; }
       queue_state_require_token 'batch review reasoning' "${fields[batch_review_reasoning]}" || return 1
       queue_state_require_token 'batch fix reasoning' "${fields[batch_fix_reasoning]}" || return 1
       queue_state_require_token 'batch check fix reasoning' "${fields[batch_check_fix_reasoning]}" || return 1
       queue_state_require_path 'base branch' "${fields[base_branch]}" || return 1
       queue_state_require_path 'base ref' "${fields[base_ref]}" || return 1
+      [[ -n "${fields[repository_identity]}" && "${fields[repository_identity]}" != *$'\t'* ]] || { queue_state_error 'Malformed repository identity'; return 1; }
       ;;
     run)
       queue_state_enum_contains "${fields[state]}" planned running interrupted failed manual_review_required completed \
@@ -119,10 +125,30 @@ queue_state_validate_file() {
     issue)
       queue_state_require_token 'batch ID' "${fields[batch_id]}" || return 1
       [[ "${fields[issue_number]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed Issue number: ${fields[issue_number]}"; return 1; }
+      [[ "${fields[base_commit]}" == none || "${fields[base_commit]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed Issue base SHA: ${fields[base_commit]}"; return 1; }
       [[ "${fields[commit_sha]}" == none || "${fields[commit_sha]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed Issue commit SHA: ${fields[commit_sha]}"; return 1; }
       [[ "${fields[artifact_path]}" == none ]] || queue_state_require_path 'Issue artifact' "${fields[artifact_path]}" || return 1
       queue_state_enum_contains "${fields[state]}" planned leased running committed artifacts_archived acknowledged failed \
         || { queue_state_error "Malformed Issue state: ${fields[state]}"; return 1; }
+      ;;
+    lease)
+      [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed lease owner PID: ${fields[owner_pid]}"; return 1; }
+      queue_state_require_token 'lease owner host' "${fields[owner_host]}" || return 1
+      ;;
+    checkpoint)
+      queue_state_require_token 'checkpoint entity' "${fields[entity]}" || return 1
+      queue_state_require_token 'checkpoint phase' "${fields[phase]}" || return 1
+      queue_state_enum_contains "${fields[status]}" before after interrupted failed \
+        || { queue_state_error "Malformed checkpoint status: ${fields[status]}"; return 1; }
+      ;;
+    publish)
+      queue_state_require_token 'publish batch ID' "${fields[batch_id]}" || return 1
+      [[ "${fields[pr_number]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed published PR number: ${fields[pr_number]}"; return 1; }
+      [[ "${fields[pr_url]}" =~ ^https?://[^[:space:]]+$ ]] || { queue_state_error "Malformed published PR URL: ${fields[pr_url]}"; return 1; }
+      queue_state_require_path 'published head branch' "${fields[head_branch]}" || return 1
+      queue_state_require_path 'published base branch' "${fields[base_branch]}" || return 1
+      [[ "${fields[head_sha]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed published head SHA: ${fields[head_sha]}"; return 1; }
+      queue_state_enum_contains "${fields[state]}" open merged || { queue_state_error "Malformed publish state: ${fields[state]}"; return 1; }
       ;;
   esac
 }
@@ -154,13 +180,13 @@ queue_state_generate_run_id() {
 }
 
 queue_state_create_manifest() {
-  local dir="$1" id="$2" issue_csv="$3" every="$4" draft="$5" merge="$6" review="$7" fix="$8" check_fix="$9" base_branch="${10}" base_ref="${11}"
+  local dir="$1" id="$2" issue_csv="$3" every="$4" draft="$5" merge="$6" light_review="$7" review="$8" fix="$9" check_fix="${10}" base_branch="${11}" base_ref="${12}" repository_identity="${13}"
   [[ ! -e "${dir}/manifest.state" ]] || { queue_state_error "Immutable run manifest already exists: ${dir}/manifest.state"; return 1; }
   queue_state_write_content "${dir}/manifest.state" manifest \
     "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	${id}" "created_at	$(queue_state_now)" \
-    "issues	${issue_csv}" "review_every	${every}" "draft_pr	${draft}" "auto_merge	${merge}" \
+    "issues	${issue_csv}" "review_every	${every}" "draft_pr	${draft}" "auto_merge	${merge}" "light_issue_review	${light_review}" \
     "batch_review_reasoning	${review}" "batch_fix_reasoning	${fix}" "batch_check_fix_reasoning	${check_fix}" \
-    "base_branch	${base_branch}" "base_ref	${base_ref}"
+    "base_branch	${base_branch}" "base_ref	${base_ref}" "repository_identity	${repository_identity}"
 }
 
 queue_state_create_run() {
@@ -174,7 +200,7 @@ queue_state_create_batch() {
 
 queue_state_create_issue() {
   queue_state_write_content "$1" issue "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" "batch_id	$3" \
-    "issue_number	$4" "commit_sha	none" "artifact_path	none" "state	planned" "updated_at	$(queue_state_now)"
+    "issue_number	$4" "base_commit	none" "commit_sha	none" "artifact_path	none" "state	planned" "updated_at	$(queue_state_now)"
 }
 
 queue_state_read_field() {
@@ -207,8 +233,63 @@ queue_state_transition() {
   case "$schema" in
     run) for key in schema_version run_id state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
     batch) for key in schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
-    issue) for key in schema_version run_id batch_id issue_number commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
+    issue) for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
     *) rm -f "$staging"; queue_state_error "Unsupported transition schema: ${schema}"; return 1 ;;
   esac
   queue_state_publish_file "$target" "$schema" "$staging"; status=$?; rm -f "$staging"; return "$status"
+}
+
+queue_state_update_issue() {
+  local target="$1" entity="$2" expected="$3" requested="$4" commit_sha="$5" artifact_path="$6" staging status key
+  local -A fields=()
+  local -A fields=()
+  queue_state_parse_file "$target" issue fields || return 1; queue_state_validate_file "$target" issue || return 1
+  [[ "${fields[state]}" == "$expected" ]] || { queue_state_error "Cannot update ${entity}: expected state '${expected}', actual state '${fields[state]}'"; return 1; }
+  fields[state]="$requested"; fields[commit_sha]="$commit_sha"; fields[artifact_path]="$artifact_path"; fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)"
+  for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  queue_state_publish_file "$target" issue "$staging"; status=$?; rm -f "$staging"; return "$status"
+}
+
+queue_state_set_issue_base() {
+  local target="$1" expected="$2" base="$3" staging status key
+  local -A fields=()
+  queue_state_parse_file "$target" issue fields || return 1; queue_state_validate_file "$target" issue || return 1
+  [[ "${fields[state]}" == "$expected" && "${fields[base_commit]}" == none ]] || { queue_state_error 'Issue base can only be recorded once in the expected state'; return 1; }
+  fields[base_commit]="$base"; fields[updated_at]="$(queue_state_now)"; staging="$(mktemp)"
+  for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  queue_state_publish_file "$target" issue "$staging"; status=$?; rm -f "$staging"; return "$status"
+}
+
+queue_state_update_batch() {
+  local target="$1" entity="$2" expected="$3" requested="$4" base_commit="$5" staging status key
+  local -A fields=()
+  queue_state_parse_file "$target" batch fields || return 1; queue_state_validate_file "$target" batch || return 1
+  [[ "${fields[state]}" == "$expected" ]] || { queue_state_error "Cannot update ${entity}: expected state '${expected}', actual state '${fields[state]}'"; return 1; }
+  fields[state]="$requested"; fields[base_commit]="$base_commit"; fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)"
+  for key in schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  queue_state_publish_file "$target" batch "$staging"; status=$?; rm -f "$staging"; return "$status"
+}
+
+queue_state_checkpoint() {
+  queue_state_write_content "$1" checkpoint "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "entity	$3" "phase	$4" "status	$5" "updated_at	$(queue_state_now)"
+}
+
+queue_state_write_lease() {
+  queue_state_write_content "$1" lease "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "owner_pid	$3" "owner_host	$4" "acquired_at	$(queue_state_now)"
+}
+
+queue_state_publish_pointer() {
+  local target="$1" value="$2" directory temporary
+  queue_state_require_token 'current run ID' "$value" || return 1
+  directory="$(dirname "$target")"; mkdir -p "$directory"; temporary="$(mktemp "${directory}/.queue-state.tmp.XXXXXX")"
+  printf '%s\n' "$value" > "$temporary"; mv -f "$temporary" "$target"
+}
+
+queue_state_record_publish() {
+  queue_state_write_content "$1" publish "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" "batch_id	$3" \
+    "pr_number	$4" "pr_url	$5" "head_branch	$6" "base_branch	$7" "head_sha	$8" "state	$9" "updated_at	$(queue_state_now)"
 }

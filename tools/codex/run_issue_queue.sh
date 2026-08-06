@@ -31,9 +31,14 @@ fail() {
   exit 1
 }
 
+queue_failpoint() {
+  [[ "${CODEX_FLOW_QUEUE_FAILPOINT:-}" != "$1" ]] || fail "Queue failpoint triggered: $1"
+}
+
 usage() {
   cat <<'EOF'
 Usage: tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
+       tools/codex/run_issue_queue.sh --resume <run_id|current> [--take-over-lease]
 
 Options:
   --review-every <positive_integer>
@@ -41,6 +46,8 @@ Options:
   --batch-fix-effort <non_empty_value_without_whitespace>
   --auto-merge
   --draft
+  --resume <run_id|current>
+  --take-over-lease
   --help
 EOF
 }
@@ -75,6 +82,9 @@ parse_queue_arguments() {
   draft_pr=0
   auto_merge=0
   issue_numbers=()
+  resume_requested=0
+  resume_target=''
+  take_over_lease=0
 
   if [[ "$CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT" -ne 0 ]]; then
     draft_pr=1
@@ -115,6 +125,14 @@ parse_queue_arguments() {
         draft_pr=1
         shift
         ;;
+      --resume)
+        [[ "$#" -ge 2 ]] || fail '--resume requires a run ID or current'
+        [[ "$resume_requested" -eq 0 ]] || fail '--resume may be specified only once'
+        resume_requested=1; resume_target="$2"; shift 2
+        ;;
+      --take-over-lease)
+        take_over_lease=1; shift
+        ;;
       --help)
         usage
         exit 0
@@ -124,6 +142,7 @@ parse_queue_arguments() {
         exit 1
         ;;
       *)
+        if [[ "$resume_requested" -eq 1 ]]; then fail '--resume does not accept Issue arguments'; fi
         require_numeric_issue_number "$1"
         issue_numbers+=("$1")
         shift
@@ -136,6 +155,11 @@ parse_queue_arguments() {
   require_nonempty_no_whitespace_value 'CODEX_FLOW_BATCH_FIX_REASONING' "$batch_review_fix_effort"
   require_nonempty_no_whitespace_value 'CODEX_FLOW_BATCH_CHECK_FIX_REASONING' "$batch_check_fix_effort"
 
+  if [[ "$resume_requested" -eq 1 ]]; then
+    [[ "${#issue_numbers[@]}" -eq 0 ]] || fail '--resume does not accept Issue arguments'
+    return 0
+  fi
+  [[ "$take_over_lease" -eq 0 ]] || fail '--take-over-lease is valid only with --resume'
   if [[ "${#issue_numbers[@]}" -eq 0 ]]; then
     usage >&2
     exit 1
@@ -221,26 +245,74 @@ ensure_planned_batch_branches_available() {
   done
 }
 
-create_queue_lock() {
-  mkdir -p "$CODEX_FLOW_QUEUE_DIR"
-  queue_lock="${CODEX_FLOW_QUEUE_DIR}/lock"
+queue_host_identity() { hostname 2>/dev/null || uname -n; }
 
-  if [[ -e "$queue_lock" ]]; then
-    fail "Queue lock already exists: ${queue_lock}"
+print_resume_hint() {
+  log_info "run ID: ${run_id}"
+  log_info "resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${run_id}"
+}
+
+release_queue_lease() {
+  [[ "${lease_owned:-0}" -eq 1 ]] || return 0
+  rm -f -- "$queue_lock"
+  lease_owned=0
+}
+
+record_abnormal_exit() {
+  local status="$1" signal_name="${2:-}" current
+  trap - EXIT INT TERM
+  if [[ "${run_initialized:-0}" -eq 1 && "${run_completed:-0}" -ne 1 ]]; then
+    current="$(queue_state_read_field "${run_state_dir}/run.state" run state 2>/dev/null || true)"
+    if [[ "$current" == running ]]; then
+      if [[ -n "$signal_name" ]]; then
+        queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running interrupted || true
+      else
+        queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running failed || true
+      fi
+    fi
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" "${signal_name:+interrupted}" 2>/dev/null || \
+      queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" failed 2>/dev/null || true
+    print_resume_hint >&2
   fi
+  release_queue_lease
+  if [[ -n "$signal_name" ]]; then exit "$status"; fi
+  exit "$status"
+}
 
-  printf '%s\n' "$$" > "$queue_lock"
-  trap 'rm -f "$queue_lock"' EXIT
+install_queue_traps() {
+  trap 'record_abnormal_exit $? ' EXIT
+  trap 'record_abnormal_exit 130 INT' INT
+  trap 'record_abnormal_exit 143 TERM' TERM
+}
+
+acquire_queue_lease() {
+  local owner_host owner_pid local_host
+  mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.state"; local_host="$(queue_host_identity)"
+  if [[ -e "$queue_lock" ]]; then
+    queue_state_validate_file "$queue_lock" lease || fail "Invalid queue lease requires manual repair: ${queue_lock}"
+    owner_host="$(queue_state_read_field "$queue_lock" lease owner_host)"; owner_pid="$(queue_state_read_field "$queue_lock" lease owner_pid)"
+    if [[ "$owner_host" == "$local_host" ]]; then
+      if kill -0 "$owner_pid" 2>/dev/null; then fail "Queue run is leased by live same-host PID ${owner_pid} on ${owner_host}"; fi
+      log_info "recovering stale same-host lease from PID ${owner_pid}"
+    elif [[ "$take_over_lease" -ne 1 ]]; then
+      fail "Queue lease belongs to different or unverifiable host ${owner_host}; resume with --take-over-lease"
+    else
+      log_info "explicitly taking over lease from host ${owner_host}"
+    fi
+    rm -f -- "$queue_lock"
+  fi
+  queue_state_write_lease "$queue_lock" "$run_id" "$$" "$local_host"
+  lease_owned=1
 }
 
 initialize_queue_run_state() {
   local ordered start=0 end first last batch_id branch state_dir artifact index
-  run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
   run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
   ordered="$(join_issue_numbers "${issue_numbers[@]}")"
   mkdir -p "$run_state_dir"
   queue_state_create_manifest "$run_state_dir" "$run_id" "$ordered" "$review_every" "$draft_pr" "$auto_merge" \
-    "$batch_review_effort" "$batch_review_fix_effort" "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF"
+    "$([[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -eq 0 ]] && printf 0 || printf 1)" "$batch_review_effort" "$batch_review_fix_effort" \
+    "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(git config --get remote.origin.url)"
   queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
   while [[ "$start" -lt "${#issue_numbers[@]}" ]]; do
     end=$((start + review_every)); [[ "$end" -le "${#issue_numbers[@]}" ]] || end="${#issue_numbers[@]}"
@@ -255,6 +327,32 @@ initialize_queue_run_state() {
     start="$end"
   done
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
+  queue_state_publish_pointer "${CODEX_FLOW_QUEUE_DIR}/current" "$run_id"
+  run_initialized=1
+}
+
+load_queue_run_state() {
+  local manifest="${run_state_dir}/manifest.state" issue_csv manifest_base_branch manifest_base_ref
+  local -A manifest_fields=()
+  queue_state_parse_file "$manifest" manifest manifest_fields; queue_state_validate_file "$manifest" manifest
+  [[ "${manifest_fields[run_id]}" == "$run_id" ]] || fail "Manifest run ID mismatch for ${run_id}"
+  manifest_base_branch="${manifest_fields[base_branch]}"; manifest_base_ref="${manifest_fields[base_ref]}"
+  [[ "$manifest_base_branch" == "$CODEX_FLOW_BASE_BRANCH" && "$manifest_base_ref" == "$CODEX_FLOW_BASE_REF" ]] || \
+    fail "Resume repository configuration mismatch: manifest uses ${manifest_base_branch}/${manifest_base_ref}, current config uses ${CODEX_FLOW_BASE_BRANCH}/${CODEX_FLOW_BASE_REF}"
+  [[ "${manifest_fields[repository_identity]}" == "$(git config --get remote.origin.url)" ]] || fail 'Resume repository identity does not match the immutable manifest'
+  issue_csv="${manifest_fields[issues]}"; IFS=',' read -r -a issue_numbers <<< "$issue_csv"
+  review_every="${manifest_fields[review_every]}"; draft_pr="${manifest_fields[draft_pr]}"; auto_merge="${manifest_fields[auto_merge]}"
+  batch_review_effort="${manifest_fields[batch_review_reasoning]}"; batch_review_fix_effort="${manifest_fields[batch_fix_reasoning]}"
+  batch_check_fix_effort="${manifest_fields[batch_check_fix_reasoning]}"
+  CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW="${manifest_fields[light_issue_review]}"
+  case "$(queue_state_read_field "${run_state_dir}/run.state" run state)" in
+    completed) fail "Queue run ${run_id} is already completed" ;;
+    running) ;;
+    interrupted|failed|manual_review_required)
+      queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" "$(queue_state_read_field "${run_state_dir}/run.state" run state)" running ;;
+    *) fail "Queue run ${run_id} is not resumable" ;;
+  esac
+  run_initialized=1
 }
 
 append_issue_context_to_batch_file() {
@@ -304,26 +402,95 @@ process_issue_on_batch_branch() {
   local issue_file
   local issue_base_commit
   local issue_light_review=0
+  local issue_state_file="${run_state_dir}/batches/${current_batch_id}/issues/${issue_number}.state"
+  local issue_state commit_sha recorded_sha artifact_rel destination expected_message
+
+  issue_state="$(queue_state_read_field "$issue_state_file" issue state)"
+  [[ "$issue_state" != acknowledged ]] || return 0
 
   ensure_clean_worktree "Working tree must be clean before processing issue ${issue_number}."
-  rm -rf "$CODEX_FLOW_CODEX_DIR"
+  artifact_rel=".work/queue/batches/${current_batch_id}/issues/${issue_number}/codex"
+  destination="${CODEX_FLOW_REPO_ROOT}/${artifact_rel}"
+  expected_message="chore: address issue #${issue_number}"
 
-  log_info "fetching issue ${issue_number}"
-  write_issue_context_file "$issue_number"
-  issue_file="$(require_issue_file "$issue_number")"
-  append_issue_context_to_batch_file "$issue_number" "$issue_file" "$issues_file"
-
-  issue_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
-  write_current_issue_branch_state "$issue_number" "$batch_branch" "$issue_base_commit"
-
-  log_info "running issue flow for issue ${issue_number}"
-  if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then
-    issue_light_review=1
+  if [[ "$issue_state" == artifacts_archived ]]; then
+    recorded_sha="$(queue_state_read_field "$issue_state_file" issue commit_sha)"
+    [[ -d "$destination" ]] || fail "Recorded archive is missing for Issue ${issue_number}: ${artifact_rel}"
+    git merge-base --is-ancestor "$recorded_sha" HEAD || fail "Recorded Issue ${issue_number} commit is not an ancestor of HEAD"
+    [[ "$(git show -s --format=%s "$recorded_sha")" == "$expected_message" ]] || fail "Recorded Issue ${issue_number} commit message does not match"
+    [[ "$(git branch --show-current)" == "$batch_branch" ]] || fail "Issue ${issue_number} is not on expected branch ${batch_branch}"
+    [[ "$(queue_state_read_field "$issue_state_file" issue artifact_path)" == "$artifact_rel" ]] || fail "Issue ${issue_number} archive ownership does not match its manifest entity"
+    ensure_clean_worktree "Issue ${issue_number} cannot be acknowledged with a dirty worktree."
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" artifacts_archived acknowledged "$recorded_sha" "$artifact_rel"
+    return 0
   fi
-  CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+
+  if [[ "$issue_state" == planned ]]; then queue_state_transition "$issue_state_file" issue "Issue ${issue_number}" planned leased; issue_state=leased; fi
+
+  active_phase="issue_context_fetch"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
+  log_info "fetching issue ${issue_number}"
+  if [[ "$issue_state" == leased ]]; then
+    write_issue_context_file "$issue_number"
+  elif [[ ! -f "$(issue_file_path "$issue_number")" ]]; then
+    fail "Missing durable Issue ${issue_number} context while resuming state ${issue_state}"
+  fi
+  queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch after
+  issue_file="$(require_issue_file "$issue_number")"
+  if ! grep -Fqx "## Issue #${issue_number}" "$issues_file" 2>/dev/null; then append_issue_context_to_batch_file "$issue_number" "$issue_file" "$issues_file"; fi
+
+  issue_base_commit="$(queue_state_read_field "$issue_state_file" issue base_commit)"
+  if [[ "$issue_base_commit" == none ]]; then
+    issue_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+    queue_state_set_issue_base "$issue_state_file" leased "$issue_base_commit"
+  fi
+  active_phase="issue_bootstrap"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_bootstrap before
+  write_current_issue_branch_state "$issue_number" "$batch_branch" "$issue_base_commit"
+  queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_bootstrap after
+
+  if [[ "$issue_state" == leased ]]; then queue_state_transition "$issue_state_file" issue "Issue ${issue_number}" leased running; issue_state=running; fi
+
+  if [[ "$issue_state" == running ]]; then
+    commit_sha=''
+    if [[ "$(git show -s --format=%s HEAD)" == "$expected_message" ]]; then
+      commit_sha="$(git rev-parse HEAD)"
+      queue_failpoint after_issue_flow_commit
+      git merge-base --is-ancestor "$issue_base_commit" "$commit_sha" || fail "Existing Issue ${issue_number} commit is not based on its saved base"
+      log_info "reconciled existing commit ${commit_sha} for issue ${issue_number}"
+    else
+      rm -rf "$CODEX_FLOW_CODEX_DIR"
+      active_phase="issue_flow"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow before
+
+      log_info "running issue flow for issue ${issue_number}"
+      if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then issue_light_review=1; fi
+      CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
+        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+      queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow after
+      commit_sha="$(git rev-parse HEAD)"
+    fi
+    active_phase="issue_commit_reconciliation"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation before
+    [[ "$(git show -s --format=%s "$commit_sha")" == "$expected_message" ]] || fail "Issue ${issue_number} commit message is not deterministic"
+    ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" running committed "$commit_sha" none
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation after
+    issue_state=committed
+  fi
+
+  recorded_sha="$(queue_state_read_field "$issue_state_file" issue commit_sha)"
+  if [[ "$issue_state" == committed ]]; then
+    active_phase="artifact_archive"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive before
+    if [[ -d "$destination" ]]; then
+      [[ -f "${destination}/implementation.prompt.md" ]] || fail "Existing archive for Issue ${issue_number} is incomplete"
+    else
+      archive_issue_codex_artifacts "$batch_dir" "$issue_number"
+    fi
+    queue_failpoint after_artifact_archive
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" committed artifacts_archived "$recorded_sha" "$artifact_rel"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive after
+  fi
   ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
-  archive_issue_codex_artifacts "$batch_dir" "$issue_number"
+  [[ -d "$destination" ]] || fail "Issue ${issue_number} archive validation failed"
+  [[ "$(git branch --show-current)" == "$batch_branch" ]] || fail "Issue ${issue_number} is not on expected branch ${batch_branch}"
+  queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" artifacts_archived acknowledged "$recorded_sha" "$artifact_rel"
   rm -rf "$CODEX_FLOW_CODEX_DIR"
 }
 
@@ -392,34 +559,65 @@ process_batch() {
   local batch_issues_label
   local index
   local -a batch_issues=()
+  local batch_state_file batch_state
+  local publish_state_file publish_line published_state published_merged published_head published_base published_sha
 
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
   batch_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
+  current_batch_id="$batch_id"
+  batch_state_file="${run_state_dir}/batches/${batch_id}/batch.state"
+  publish_state_file="${run_state_dir}/batches/${batch_id}/publish.state"
+  batch_state="$(queue_state_read_field "$batch_state_file" batch state)"
+  [[ "$batch_state" != completed ]] || return 0
   issues_file="${batch_dir}/issues.txt"
 
-  if [[ -e "$batch_dir" ]]; then
-    fail "Batch artifact directory already exists: ${batch_dir}"
-  fi
-
   mkdir -p "${batch_dir}/history"
-  initialize_batch_token_usage_tsv "$batch_dir"
-  : > "$issues_file"
+  [[ -f "${batch_dir}/token-usage.tsv" ]] || initialize_batch_token_usage_tsv "$batch_dir"
+  [[ -f "$issues_file" ]] || : > "$issues_file"
   printf '%s\n' "$batch_id" > "${CODEX_FLOW_QUEUE_DIR}/current_batch"
 
-  create_batch_branch "$batch_branch"
-  batch_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
-  printf '%s\n' "$batch_base_commit" > "${batch_dir}/base_commit"
+  if [[ "$batch_state" == planned ]]; then
+    active_phase="batch_branch_preparation"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
+    if git show-ref --verify --quiet "refs/heads/${batch_branch}"; then
+      git switch "$batch_branch"
+    else
+      create_batch_branch "$batch_branch"
+    fi
+    batch_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+    printf '%s\n' "$batch_base_commit" > "${batch_dir}/base_commit"
+    queue_state_update_batch "$batch_state_file" "$batch_id" planned branch_ready "$batch_base_commit"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation after
+    batch_state=branch_ready
+  else
+    [[ "$(git branch --show-current)" == "$batch_branch" ]] || git switch "$batch_branch"
+    batch_base_commit="$(queue_state_read_field "$batch_state_file" batch base_commit)"
+    [[ "$batch_base_commit" != none ]] || fail "Batch ${batch_id} lacks its durable base commit"
+  fi
+  if [[ "$batch_state" == branch_ready ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" branch_ready issues_running; batch_state=issues_running; fi
 
   for ((index = start_index; index < end_index; index += 1)); do
     batch_issues+=("${issue_numbers[$index]}")
     process_issue_on_batch_branch "${issue_numbers[$index]}" "$batch_branch" "$batch_dir" "$issues_file"
   done
 
+  for ((index = start_index; index < end_index; index += 1)); do
+    [[ "$(queue_state_read_field "${run_state_dir}/batches/${batch_id}/issues/${issue_numbers[$index]}.state" issue state)" == acknowledged ]] || \
+      fail "Batch ${batch_id} cannot continue before Issue ${issue_numbers[$index]} is acknowledged"
+  done
+
   batch_issues_label="$(join_issue_numbers "${batch_issues[@]}")"
 
-  ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
-  ensure_batch_review_accepted \
+  if [[ "$batch_state" == issues_running ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" issues_running checks_running; batch_state=checks_running; fi
+  if [[ "$batch_state" == checks_running ]]; then
+    active_phase="batch_checks"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
+    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks after
+    queue_state_transition "$batch_state_file" batch "$batch_id" checks_running review_running; batch_state=review_running
+  fi
+  if [[ "$batch_state" == review_running ]]; then
+    active_phase="batch_review"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review before
+    ensure_batch_review_accepted \
     "$batch_dir" \
     "$issues_file" \
     "$batch_base_commit" \
@@ -429,12 +627,27 @@ process_batch() {
     "$batch_review_effort" \
     "$batch_review_fix_effort" \
     "$batch_check_fix_effort"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review after
+    queue_state_transition "$batch_state_file" batch "$batch_id" review_running accepted; batch_state=accepted
+  fi
 
   batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
   printf '%s\n' "$batch_head_commit" > "${batch_dir}/head_commit"
   write_batch_changed_files "$batch_base_commit" "${batch_dir}/changed-files.txt"
 
-  publish_batch_results \
+  if [[ "$batch_state" == accepted ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" accepted publishing; batch_state=publishing; fi
+  active_phase="batch_publish"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
+  if [[ -f "$publish_state_file" ]]; then
+    queue_state_validate_file "$publish_state_file" publish
+    batch_pr_number="$(queue_state_read_field "$publish_state_file" publish pr_number)"
+    _batch_pr_url="$(queue_state_read_field "$publish_state_file" publish pr_url)"
+    publish_line="$(gh pr view "$batch_pr_number" --json state,mergedAt,headRefName,baseRefName,headRefOid --jq '[.state, (.mergedAt // ""), .headRefName, .baseRefName, .headRefOid] | @tsv')"
+    IFS=$'\t' read -r published_state published_merged published_head published_base published_sha <<< "$publish_line"
+    [[ "$published_state" == OPEN || "$published_state" == MERGED ]] || fail "Published PR #${batch_pr_number} has unexpected state ${published_state}"
+    [[ "$published_head" == "$batch_branch" && "$published_base" == "$CODEX_FLOW_BASE_BRANCH" && "$published_sha" == "$(queue_state_read_field "$publish_state_file" publish head_sha)" ]] || \
+      fail "Published PR #${batch_pr_number} does not match expected head/base/SHA for ${batch_id}"
+  else
+    publish_batch_results \
     "$first_issue" \
     "$last_issue" \
     "$batch_branch" \
@@ -442,10 +655,20 @@ process_batch() {
     batch_pr_number \
     _batch_pr_url \
     "${batch_issues[@]}"
-
-  if [[ "$auto_merge" -eq 1 ]]; then
-    auto_merge_batch_pr "$batch_pr_number"
+    queue_failpoint after_batch_publish
+    queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
+      "$CODEX_FLOW_BASE_BRANCH" "$(git rev-parse HEAD)" open
   fi
+  queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish after
+
+  if [[ "$auto_merge" -eq 1 && -z "${published_merged:-}" ]]; then
+    active_phase="auto_merge"; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge before
+    auto_merge_batch_pr "$batch_pr_number"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge after
+    queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
+      "$CODEX_FLOW_BASE_BRANCH" "$(git rev-parse HEAD)" merged
+  fi
+  queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
 }
 
 main() {
@@ -454,13 +677,21 @@ main() {
   local start_index=0
   local end_index
 
+  local arg resume_option_count=0 allowed_resume_args=0 current_pointer
+  for arg in "$@"; do [[ "$arg" == --resume ]] && resume_option_count=$((resume_option_count + 1)); done
+  if [[ "$resume_option_count" -gt 0 ]]; then
+    for arg in "$@"; do case "$arg" in --resume|--take-over-lease|current|[A-Za-z0-9._-]*) allowed_resume_args=$((allowed_resume_args + 1));; *) fail '--resume rejects queue-shaping options and Issue arguments';; esac; done
+    [[ "$#" -eq 2 || ( "$#" -eq 3 && " $* " == *' --take-over-lease '* ) ]] || fail '--resume accepts only a run ID/current and optional --take-over-lease'
+  fi
   parse_queue_arguments "$@"
   ensure_unique_issues
 
   issue_count="${#issue_numbers[@]}"
+  if [[ "$resume_requested" -eq 0 ]]; then
   planned_batch_count="$(batch_count_for_queue "$issue_count")"
   if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
     fail 'Multiple batches require --auto-merge so each next batch starts from the merged base branch.'
+  fi
   fi
 
   require_command awk
@@ -471,10 +702,32 @@ main() {
 
   enter_repo_root
   require_queue_prompt_templates
-  ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
-  ensure_planned_batch_branches_available
-  create_queue_lock
-  initialize_queue_run_state
+  lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup
+  if [[ "$resume_requested" -eq 1 ]]; then
+    if [[ "$resume_target" == current ]]; then
+      current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
+      [[ -f "$current_pointer" ]] || fail 'No current resumable queue run is published'
+      run_id="$(< "$current_pointer")"; queue_state_require_token 'current run ID' "$run_id"
+    else
+      run_id="$resume_target"; queue_state_require_token 'resume run ID' "$run_id"
+    fi
+    run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
+    [[ -d "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
+    acquire_queue_lease
+    install_queue_traps
+    load_queue_run_state
+    issue_count="${#issue_numbers[@]}"
+  else
+    ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
+    run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
+    acquire_queue_lease
+    install_queue_traps
+    ensure_planned_batch_branches_available
+    initialize_queue_run_state
+    queue_failpoint after_manifest
+  fi
+  print_resume_hint
+  queue_failpoint after_lease_before_issue_fetch
 
   while [[ "$start_index" -lt "$issue_count" ]]; do
     end_index=$((start_index + review_every))
@@ -486,6 +739,10 @@ main() {
     start_index="$end_index"
   done
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running completed
+  rm -f -- "${CODEX_FLOW_QUEUE_DIR}/current" "${CODEX_FLOW_QUEUE_DIR}/current_batch"
+  run_completed=1
+  release_queue_lease
+  trap - EXIT INT TERM
 }
 
 main "$@"

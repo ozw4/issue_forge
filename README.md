@@ -183,6 +183,9 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
 ./vendor/issue_forge/tools/codex/run_issue_queue.sh \
   --review-every 3 \
   123 124 125
+
+# Resume the immutable run manifest (or use --resume current)
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --resume <run_id>
 ```
 
 各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
@@ -198,10 +201,12 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--batch-fix-effort VALUE`: batch review/checks fix の reasoning override
 - `--draft`: batch PR を draft で作成
 - `--auto-merge`: batch PR に squash auto-merge と branch delete を設定
+- `--resume RUN_ID|current`: 保存済み manifest の順序・effective options だけで再開
+- `--take-over-lease`: 別 host / 検証不能な lease を明示的に引き継ぐ resume 専用 option
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest は入力順の Issue list と effective options を保持し、run、batch、Issue state は atomic replacement と compare-and-set で更新されます。既存の `.work/queue/batches/...` は artifact layout として維持されますが authoritative progress ではありません。この task では `--resume` は提供しません。
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、authoritative state を `.work/queue/runs/<run_id>/` に保存します。immutable manifest は入力順の Issue list、effective options、base、repository identity を保持し、run、batch、Issue state は atomic replacement と compare-and-set で更新されます。lease は PID/host で並行実行を防ぎ、`current` pointer は active run の間だけ atomic publish されます。Issue は commit SHA と archive を検証してから acknowledge され、resume は manifest 順の最初の未 acknowledge Issue から commit/archive/PR/merge の kill window を厳密に reconcile します。既存の `.work/queue/batches/...` は artifact layout として維持されますが authoritative progress ではありません。
 
 ## Issue zip import
 

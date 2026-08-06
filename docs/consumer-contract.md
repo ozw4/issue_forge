@@ -229,6 +229,7 @@ Usage:
 
 ```bash
 vendor/issue_forge/tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
+vendor/issue_forge/tools/codex/run_issue_queue.sh --resume <run_id|current> [--take-over-lease]
 ```
 
 Options:
@@ -238,6 +239,8 @@ Options:
 - `--batch-fix-effort <value>` overrides both `CODEX_FLOW_BATCH_FIX_REASONING` and `CODEX_FLOW_BATCH_CHECK_FIX_REASONING` for that queue run
 - `--auto-merge` requests auto-merge for each batch PR and waits for it to merge before starting the next batch
 - `--draft` creates draft batch PRs; it cannot be combined with `--auto-merge`
+- `--resume <run_id|current>` resumes only the immutable manifest identified by the run ID. It rejects Issue arguments and all queue-shaping options.
+- `--take-over-lease` is valid only with `--resume`; it is required for a lease owned by another or unverifiable host. A dead same-host owner is recovered without this option, while a live same-host owner always blocks takeover.
 
 The queue processes issues strictly in the input order. It creates one deterministic batch branch per batch, named `${CODEX_FLOW_BATCH_BRANCH_PREFIX}<first_issue>-<last_issue>`; with defaults this is `batch/<first_issue>-<last_issue>`. The branch is created from `CODEX_FLOW_BASE_REF` after fetching `origin/${CODEX_FLOW_BASE_BRANCH}`. If the planned branch already exists locally or remotely, the queue fails before creating it.
 
@@ -257,14 +260,18 @@ Queue state schema version `1` uses strict `key<TAB>value` data files that are n
 
 | File | Required keys |
 | --- | --- |
-| `manifest.state` | `schema_version`, `run_id`, `created_at`, ordered comma-separated `issues`, `review_every`, `draft_pr`, `auto_merge`, `batch_review_reasoning`, `batch_fix_reasoning`, `batch_check_fix_reasoning`, `base_branch`, `base_ref` |
+| `manifest.state` | `schema_version`, `run_id`, `created_at`, ordered comma-separated `issues`, `review_every`, `draft_pr`, `auto_merge`, `light_issue_review`, `batch_review_reasoning`, `batch_fix_reasoning`, `batch_check_fix_reasoning`, `base_branch`, `base_ref`, `repository_identity` |
 | `run.state` | `schema_version`, `run_id`, `state`, `updated_at` |
 | `batches/batch-<first>-<last>/batch.state` | `schema_version`, `run_id`, `batch_id`, `first_issue`, `last_issue`, `branch`, `base_commit`, `artifact_path`, `state`, `updated_at` |
-| `batches/batch-<first>-<last>/issues/<issue>.state` | `schema_version`, `run_id`, `batch_id`, `issue_number`, `commit_sha`, `artifact_path`, `state`, `updated_at` |
+| `batches/batch-<first>-<last>/issues/<issue>.state` | `schema_version`, `run_id`, `batch_id`, `issue_number`, `base_commit`, `commit_sha`, `artifact_path`, `state`, `updated_at` |
 
 The manifest is immutable. Initial unavailable SHA/artifact values are `none`. Run states are `planned`, `running`, `interrupted`, `failed`, `manual_review_required`, and `completed`; batch states are `planned`, `branch_ready`, `issues_running`, `checks_running`, `review_running`, `accepted`, `publishing`, `completed`, and `failed`; Issue states are `planned`, `leased`, `running`, `committed`, `artifacts_archived`, `acknowledged`, and `failed`.
 
-State publication writes and validates a complete sibling temporary file and then performs one atomic `mv`; an interrupted pre-`mv` publication leaves the prior authoritative file intact. The next state-store operation removes abandoned `.queue-state.tmp.*` siblings deterministically. Parsing rejects unknown, duplicate, missing, or malformed fields. Mutable transitions require the expected current state and stale transitions fail without modification. Timestamps are diagnostic only; durable IDs and transitions determine correctness. Resume behavior is not implemented by this task.
+State publication writes and validates a complete sibling temporary file and then performs one atomic `mv`; an interrupted pre-`mv` publication leaves the prior authoritative file intact. The next state-store operation removes abandoned `.queue-state.tmp.*` siblings deterministically. Parsing rejects unknown, duplicate, missing, or malformed fields. Mutable transitions require the expected current state and stale transitions fail without modification. Timestamps are diagnostic only; durable IDs and transitions determine correctness.
+
+The queue atomically publishes `.work/queue/current` for the active resumable run and removes it after completion. A durable `.work/queue/lease.state` records run ID, PID, host, and acquisition time. SIGINT, SIGTERM, and ordinary failures record an interrupted/failed run checkpoint and print the exact resume command before releasing the lease when possible. SIGKILL may leave a stale lease; an explicit resume recovers a demonstrably dead same-host PID.
+
+Every externally visible queue phase records `before` and `after` checkpoints. Issues advance `planned -> leased -> running -> committed -> artifacts_archived -> acknowledged`. Ack validates the saved Issue base, deterministic Issue commit and ancestry, archive, expected batch branch, and clean consumer worktree. Resume always scans the immutable Issue order and starts with the first non-acknowledged Issue. Existing deterministic commits and archives are validated and adopted; ambiguous ancestry, message, ownership, branch, worktree, or PR head/base/SHA fails explicitly. Published PR identity is stored in `publish.state`, so resume validates and reuses the exact PR and never creates a second PR after the publish boundary. A merge already visible on that PR is recorded without issuing another merge request.
 
 Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
 
