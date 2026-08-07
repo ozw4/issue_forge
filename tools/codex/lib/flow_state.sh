@@ -335,3 +335,199 @@ require_issue_file() {
 
   printf '%s\n' "$issue_file"
 }
+
+queue_completed_batch_integrity_error() {
+  printf 'Completed batch integrity validation failed: %s\n' "$1" >&2
+  return 1
+}
+
+queue_completed_batch_validation_ready() {
+  [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 ]] || return 1
+  [[ -n "${CODEX_FLOW_REPO_ROOT:-}" && -n "${run_state_dir:-}" && -n "${run_id:-}" ]] || return 1
+  [[ -d "$run_state_dir" && ! -L "$run_state_dir" ]] || return 1
+  [[ -f "${run_state_dir}/manifest.state" && -f "${run_state_dir}/run.state" ]] || return 1
+  declare -F queue_state_parse_file >/dev/null 2>&1 || return 1
+  declare -F queue_state_validate_file >/dev/null 2>&1 || return 1
+  declare -F validate_durable_issue_context >/dev/null 2>&1 || return 1
+  declare -F validate_issue_archive >/dev/null 2>&1 || return 1
+}
+
+queue_validate_completed_batches_integrity() {
+  local manifest="${run_state_dir}/manifest.state"
+  local run_file="${run_state_dir}/run.state"
+  local run_state every start=0 end first last batch_id batch_file issue_file issue
+  local expected_frontier accepted_head context_path context_hash archive_path archive_hash commit
+  local -a ordered_issues=()
+  local -A manifest_fields=() run_fields=() batch_fields=() issue_fields=()
+
+  queue_completed_batch_validation_ready || return 0
+  queue_state_parse_file "$manifest" manifest manifest_fields \
+    || queue_completed_batch_integrity_error "invalid manifest ${manifest}" \
+    || return 1
+  queue_state_validate_file "$manifest" manifest \
+    || queue_completed_batch_integrity_error "invalid manifest ${manifest}" \
+    || return 1
+  queue_state_parse_file "$run_file" run run_fields \
+    || queue_completed_batch_integrity_error "invalid run state ${run_file}" \
+    || return 1
+  queue_state_validate_file "$run_file" run \
+    || queue_completed_batch_integrity_error "invalid run state ${run_file}" \
+    || return 1
+  [[ "${manifest_fields[run_id]}" == "$run_id" && "${run_fields[run_id]}" == "$run_id" ]] \
+    || queue_completed_batch_integrity_error "run identity does not match ${run_id}" \
+    || return 1
+
+  IFS=',' read -r -a ordered_issues <<< "${manifest_fields[issues]}"
+  every="${manifest_fields[review_every]}"
+  run_state="${run_fields[state]}"
+
+  while [[ "$start" -lt "${#ordered_issues[@]}" ]]; do
+    end=$((start + every))
+    [[ "$end" -le "${#ordered_issues[@]}" ]] || end="${#ordered_issues[@]}"
+    first="${ordered_issues[$start]}"
+    last="${ordered_issues[$((end - 1))]}"
+    batch_id="batch-${first}-${last}"
+    batch_file="${run_state_dir}/batches/${batch_id}/batch.state"
+
+    if [[ ! -f "$batch_file" || -L "$batch_file" ]]; then
+      [[ "$run_state" != completed ]] || {
+        queue_completed_batch_integrity_error "completed run ${run_id} is missing batch ${batch_id}"
+        return 1
+      }
+      start="$end"
+      continue
+    fi
+
+    batch_fields=()
+    queue_state_parse_file "$batch_file" batch batch_fields \
+      || queue_completed_batch_integrity_error "invalid batch state ${batch_file}" \
+      || return 1
+    queue_state_validate_file "$batch_file" batch \
+      || queue_completed_batch_integrity_error "invalid batch state ${batch_file}" \
+      || return 1
+    [[ "${batch_fields[run_id]}" == "$run_id" && "${batch_fields[batch_id]}" == "$batch_id" ]] \
+      || queue_completed_batch_integrity_error "batch ${batch_id} does not belong to run ${run_id}" \
+      || return 1
+
+    if [[ "${batch_fields[state]}" != completed ]]; then
+      [[ "$run_state" != completed ]] || {
+        queue_completed_batch_integrity_error "completed run ${run_id} contains non-completed batch ${batch_id}"
+        return 1
+      }
+      start="$end"
+      continue
+    fi
+
+    expected_frontier="${batch_fields[base_commit]}"
+    accepted_head="${batch_fields[accepted_head]}"
+    [[ "$expected_frontier" != none && "$accepted_head" != none ]] \
+      || queue_completed_batch_integrity_error "completed batch ${batch_id} lacks base or accepted head" \
+      || return 1
+
+    while [[ "$start" -lt "$end" ]]; do
+      issue="${ordered_issues[$start]}"
+      issue_file="${run_state_dir}/batches/${batch_id}/issues/${issue}.state"
+      issue_fields=()
+      queue_state_parse_file "$issue_file" issue issue_fields \
+        || queue_completed_batch_integrity_error "invalid Issue ${issue} state ${issue_file}" \
+        || return 1
+      queue_state_validate_file "$issue_file" issue \
+        || queue_completed_batch_integrity_error "invalid Issue ${issue} state ${issue_file}" \
+        || return 1
+      [[ "${issue_fields[run_id]}" == "$run_id" && "${issue_fields[batch_id]}" == "$batch_id" && \
+         "${issue_fields[issue_number]}" == "$issue" && "${issue_fields[state]}" == acknowledged ]] \
+        || queue_completed_batch_integrity_error "completed batch ${batch_id} contains invalid Issue ${issue} ownership/state" \
+        || return 1
+      [[ "${issue_fields[base_commit]}" == "$expected_frontier" ]] \
+        || queue_completed_batch_integrity_error "Issue ${issue} base ${issue_fields[base_commit]} does not equal completed frontier ${expected_frontier}" \
+        || return 1
+      commit="${issue_fields[commit_sha]}"
+      queue_validate_direct_issue_commit "$issue" "$expected_frontier" "$commit" || return 1
+
+      context_path="${issue_fields[context_path]}"
+      context_hash="${issue_fields[context_sha256]}"
+      [[ "$context_path" != none && "$context_hash" != none ]] \
+        || queue_completed_batch_integrity_error "Issue ${issue} lacks durable context identity" \
+        || return 1
+      validate_durable_issue_context "${CODEX_FLOW_REPO_ROOT}/${context_path}" "$issue" "$context_hash" >/dev/null \
+        || queue_completed_batch_integrity_error "Issue ${issue} durable context is missing or changed" \
+        || return 1
+
+      archive_path="${issue_fields[artifact_path]}"
+      archive_hash="${issue_fields[archive_manifest_sha256]}"
+      [[ "$archive_path" != none && "$archive_hash" != none ]] \
+        || queue_completed_batch_integrity_error "Issue ${issue} lacks authoritative archive identity" \
+        || return 1
+      validate_issue_archive "${CODEX_FLOW_REPO_ROOT}/${archive_path}" "$issue" "$batch_id" "$commit" "$archive_hash" >/dev/null \
+        || queue_completed_batch_integrity_error "Issue ${issue} authoritative archive is missing or changed" \
+        || return 1
+      expected_frontier="$commit"
+      start=$((start + 1))
+    done
+
+    command git cat-file -e "${accepted_head}^{commit}" 2>/dev/null \
+      || queue_completed_batch_integrity_error "accepted head ${accepted_head} for ${batch_id} is not a commit" \
+      || return 1
+    command git merge-base --is-ancestor "${batch_fields[base_commit]}" "$accepted_head" \
+      || queue_completed_batch_integrity_error "accepted head ${accepted_head} does not descend from batch base ${batch_fields[base_commit]}" \
+      || return 1
+    command git merge-base --is-ancestor "$expected_frontier" "$accepted_head" \
+      || queue_completed_batch_integrity_error "accepted head ${accepted_head} does not contain final Issue frontier ${expected_frontier}" \
+      || return 1
+  done
+}
+
+# Queue mode validates completed batches once at each batch/finalization Git boundary.
+# The dynamic local flag prevents recursion while the validator itself inspects Git.
+if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 ]]; then
+  if ! unset ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_CACHE 2>/dev/null; then
+    printf 'Private queue state variable is readonly and cannot be initialized: %s\n' \
+      ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_CACHE >&2
+    return 1
+  fi
+  ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_CACHE=''
+
+  git() {
+    local status state key=''
+    case "${1:-}" in
+      status|switch|checkout|fetch|pull|push|config) ;;
+      *)
+        command git "$@"
+        return $?
+        ;;
+    esac
+
+    if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_ACTIVE:-0}" != 1 && \
+          -n "${run_state_dir:-}" && -n "${run_id:-}" && -f "${run_state_dir}/run.state" ]]; then
+      state="$(awk -F '\t' '$1 == "state" { print $2; exit }' "${run_state_dir}/run.state" 2>/dev/null || true)"
+      if [[ "$state" == completed ]]; then
+        key="completed:${run_id}"
+      elif [[ -n "${current_batch_id:-}" ]]; then
+        key="batch:${run_id}:${current_batch_id}"
+      fi
+      if [[ -n "$key" && "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_CACHE" != "$key" ]]; then
+        local ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_ACTIVE=1
+        queue_validate_completed_batches_integrity || return 1
+        ISSUE_FORGE_INTERNAL_QUEUE_COMPLETED_INTEGRITY_CACHE="$key"
+      fi
+    fi
+
+    command git "$@"
+    status=$?
+    return "$status"
+  }
+
+  require_command() {
+    if [[ "$1" == git ]]; then
+      if ! type -P git >/dev/null 2>&1; then
+        printf 'Missing required command: %s\n' "$1" >&2
+        exit 1
+      fi
+      return 0
+    fi
+    if ! command -v "$1" >/dev/null 2>&1; then
+      printf 'Missing required command: %s\n' "$1" >&2
+      exit 1
+    fi
+  }
+fi
