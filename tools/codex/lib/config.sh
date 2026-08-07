@@ -117,4 +117,10 @@ else
   issue_forge_load_consumer_config "${CODEX_FLOW_RESOLVED_REPO_ROOT}"
 fi
 unset CODEX_FLOW_RESOLVED_REPO_ROOT
+
+if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 ]]; then
+  # shellcheck source=tools/codex/lib/queue_publish_binding.sh
+  source "${ISSUE_FORGE_CONFIG_DIR}/queue_publish_binding.sh"
+fi
+
 readonly ISSUE_FORGE_RUNTIME_CONFIG_LOADED=1
