@@ -201,7 +201,7 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--batch-fix-effort VALUE`: batch review/checks fix の reasoning override
 - `--draft`: batch PR を draft で作成
 - `--auto-merge`: batch PR に squash auto-merge と branch delete を設定
-- `--resume RUN_ID|current`: 保存済み manifest の順序・effective options だけで再開
+- `--resume RUN_ID|current`: unfinished run は保存済み manifest の順序・effective options で再開し、completed run は cleanup-only finalization
 - `--take-over-lease`: 別 host / 検証不能な lease を明示的に引き継ぐ resume 専用 option
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
@@ -210,7 +210,7 @@ branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batch
 
 serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch worker は親/worker の PID・PGID・process-start identity と lease token/generation を registration に記録し、親が distinct PGID と durable `active-process.state` を検証して matching authorization を publish するまで mutation を開始しません。authorization 前に親 identity が消えた worker は mutation なしで終了します。authorization 後に親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否し、group 終了後は同じ run ID の resume が回復します。worker の terminal result は実際の failure/signal phase を親 checkpoint に伝えます。
 
-`run.state=completed` の publish 後、`current` / lease cleanup 前に owner が停止した場合は、`--resume current` または `--resume <completed_run_id>` が work を再実行せず control plane だけを finalize します。dead same-run lease は audit path に retire され、matching `current` と stale `current_batch` が削除されます。この command は idempotent で、completed run に work-resume command は表示されません。singleton state path は regular file だけを受け付け、directory、symlink、FIFO/device/socket、unexpected hard link を read/replace/remove 前に拒否します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
+`run.state=completed` の publish 後に owner が停止した場合は、`--resume current` または `--resume <completed_run_id>` が work を再実行せず control plane だけを finalize します。Git common directory の strict cleanup marker が `planned → lease_retired → batch_pointer_removed → current_removed → completed` を記録し、same-run lease の audit retirement、`current_batch`、matching `current` の順で cleanup します。per-run terminal state を publish してから global marker を最後に削除するため、各 mutation 境界の `SIGKILL` 後も discoverable です。cleanup は immutable manifest の run/repository identity だけを使い、現在の base branch/ref、reasoning、prompt、review/draft/merge 設定には依存しません。finalized A の明示 command は active B を変更せず成功し、completed run に work-resume command は表示されません。singleton state path は regular file だけを受け付け、directory、symlink、FIFO/device/socket、unexpected hard link を read/replace/remove 前に拒否します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
 
 ## Issue zip import
 

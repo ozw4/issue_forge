@@ -677,6 +677,17 @@ reset_flow_counters() {
     "${state_dir}/run-changed-args.txt"
 }
 
+queue_side_effect_snapshot() {
+  local implementation=0
+  [[ ! -f "${state_dir}/implementation-count.txt" ]] || implementation="$(< "${state_dir}/implementation-count.txt")"
+  printf 'issue_fetch\t%s\n' "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  printf 'implementation\t%s\n' "$implementation"
+  printf 'branch_switch\t%s\n' "$(awk '$1 == "switch" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  printf 'push\t%s\n' "$(awk '$1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")"
+  printf 'pr_mutation\t%s\n' "$(awk '$1 == "pr" && ($2 == "create" || $2 == "edit") { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+  printf 'merge\t%s\n' "$(awk '$1 == "pr" && $2 == "merge" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
+}
+
 write_fixture_files() {
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
@@ -833,7 +844,7 @@ if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
       issue_title='${QUEUE_ISSUE_TITLE}'
       issue_url='${QUEUE_ISSUE_URL}'
       ;;
-    42|43|44|45|46|47|48|49|50|51|52|53|54|55)
+    42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63)
       issue_title="Control Plane Issue \${issue_number}"
       issue_url="https://example.test/issues/\${issue_number}"
       ;;
@@ -2777,10 +2788,11 @@ run_queue_legacy_control_plane_smoke() {
 }
 
 run_queue_singleton_path_type_smoke() {
-  local current="${repo_dir}/.work/queue/current" git_common guard_dir active guard backup log_file before after kind
+  local current="${repo_dir}/.work/queue/current" git_common guard_dir active cleanup_marker guard backup log_file before after kind
   log 'running queue singleton path-type rejection smoke'
   git_common="$("${REAL_GIT}" -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)"
-  guard_dir="${git_common}/issue-forge/queue"; active="${guard_dir}/active-process.state"; guard="${guard_dir}/control.guard"
+  guard_dir="${git_common}/issue-forge/queue"; active="${guard_dir}/active-process.state"
+  cleanup_marker="${guard_dir}/completion-cleanup.state"; guard="${guard_dir}/control.guard"
   mkdir -p "${repo_dir}/.work/queue" "$guard_dir"
   for kind in directory symlink fifo; do
     rm -rf -- "$current"
@@ -2822,6 +2834,19 @@ run_queue_singleton_path_type_smoke() {
   fi
   assert_file_contains "${state_dir}/queue-active-symlink.log" 'Queue singleton path must not be a symlink'
   rm "$active"
+
+  mkdir "$cleanup_marker"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 63) > "${state_dir}/queue-cleanup-marker-directory.log" 2>&1; then
+    fail 'directory completion-cleanup singleton unexpectedly allowed startup'
+  fi
+  assert_file_contains "${state_dir}/queue-cleanup-marker-directory.log" 'Invalid completion cleanup path'
+  rmdir "$cleanup_marker"
+  ln -s "$current" "$cleanup_marker"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 63) > "${state_dir}/queue-cleanup-marker-symlink.log" 2>&1; then
+    fail 'symlink completion-cleanup singleton unexpectedly allowed startup'
+  fi
+  assert_file_contains "${state_dir}/queue-cleanup-marker-symlink.log" 'Queue singleton path must not be a symlink'
+  rm "$cleanup_marker"
 
   backup="${guard}.singleton-smoke-backup"
   mv "$guard" "$backup"; mkdir "$guard"
@@ -2918,7 +2943,7 @@ run_issue_queue_strict_issue_review_smoke() {
   if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-stale-completed-explicit.log" 2>&1; then
     fail 'explicit completed-run finalization should be idempotent'
   fi
-  assert_file_contains "${state_dir}/queue-stale-completed-explicit.log" 'control plane finalized without rerunning work'
+  assert_file_contains "${state_dir}/queue-stale-completed-explicit.log" 'control plane is already finalized'
   assert_file_not_contains "${state_dir}/queue-stale-completed-current.log" 'resume with:'
   assert_file_not_contains "${state_dir}/queue-stale-completed-explicit.log" 'resume with:'
   assert_equals "$issue_fetch_before" "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")" 'completed finalization Issue fetch count'
@@ -2948,6 +2973,227 @@ run_issue_queue_strict_issue_review_smoke() {
   assert_file_contains "${queue_log}" 'publish skipped because CODEX_FLOW_SKIP_PUBLISH is set'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+}
+
+run_queue_completion_cleanup_transaction_smoke() {
+  local boundary issue label pause owner_job finalizer_job owner_record owner_pid run_id owner_token owner_generation
+  local marker active_file audit retry_target index attempt project_backup b_run b_record b_token
+  local record
+  local -a boundaries=(
+    after_completion_cleanup_marker
+    after_completed_lease_retirement
+    after_completed_current_batch_removal
+    before_completed_current_removal
+    after_completed_current_removal
+    before_completion_cleanup_terminal
+  )
+  local -a issues=(56 57 58 59 60 61)
+
+  log 'running completed cleanup transaction SIGKILL smoke'
+  marker="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)/issue-forge/queue/completion-cleanup.state"
+  active_file="$(dirname "$marker")/active-process.state"
+  project_backup="${state_dir}/completion-project.sh"
+  cp "${repo_dir}/.issue_forge/project.sh" "$project_backup"
+
+  for index in 0 1 2 3 4 5; do
+    boundary="${boundaries[$index]}"; issue="${issues[$index]}"; label="completion-${index}"
+    pause="${state_dir}/queue-${boundary}"
+    rm -rf "$pause"; mkdir -p "$pause"
+    rm -f "${state_dir}/batch-pr-url.txt"
+    clear_command_logs; reset_flow_counters
+    (
+      cd "$repo_dir"
+      exec env PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_SKIP_PUBLISH=1 \
+        CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_run_completed_before_current_cleanup \
+        CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL="${label}-owner" \
+        "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue"
+    ) > "${state_dir}/${label}.owner.log" 2>&1 & owner_job=$!
+    for ((attempt = 0; attempt < 3000; attempt += 1)); do
+      [[ -f "$pause/paused.after_run_completed_before_current_cleanup.${label}-owner" ]] && break
+      sleep 0.01
+    done
+    [[ -f "$pause/paused.after_run_completed_before_current_cleanup.${label}-owner" ]] || \
+      fail "completed owner did not reach pre-cleanup boundary for ${boundary}"
+    owner_record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+    owner_pid="$(awk -F '\t' '$1 == "owner_pid" { print $2 }' "$owner_record")"
+    run_id="$(awk -F '\t' '$1 == "run_id" { print $2 }' "$owner_record")"
+    owner_token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$owner_record")"
+    owner_generation="$(awk -F '\t' '$1 == "lease_generation" { print $2 }' "$owner_record")"
+    assert_equals 1 "$owner_generation" "${boundary} completed owner generation"
+    kill -9 "$owner_pid"
+    wait "$owner_job" 2>/dev/null || true
+    kill -0 "$owner_pid" 2>/dev/null && fail "completed owner survived kill -9 before ${boundary}"
+    assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/run.state" $'state\tcompleted'
+
+    if [[ "$index" -eq 0 ]]; then
+      {
+        cat "$project_backup"
+        printf '%s\n' "CODEX_FLOW_BASE_BRANCH='changed-after-completion'"
+        printf '%s\n' "CODEX_FLOW_BASE_REF='origin/changed-after-completion'"
+        printf '%s\n' "CODEX_FLOW_PROMPTS_DIR='/missing/completion-only-prompts'"
+      } > "${repo_dir}/.issue_forge/project.sh"
+    fi
+
+    queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.before"
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'issue_fetch\t1'
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'implementation\t1'
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'branch_switch\t1'
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'push\t1'
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'pr_mutation\t1'
+    assert_file_contains "${state_dir}/${label}.side-effects.before" $'merge\t0'
+
+    (
+      cd "$repo_dir"
+      exec env PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 \
+        CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT="$boundary" \
+        CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL="${label}-finalizer" \
+        "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id"
+    ) > "${state_dir}/${label}.finalizer.log" 2>&1 & finalizer_job=$!
+    for ((attempt = 0; attempt < 2000; attempt += 1)); do
+      [[ -f "$pause/paused.${boundary}.${label}-finalizer" ]] && break
+      sleep 0.01
+    done
+    [[ -f "$pause/paused.${boundary}.${label}-finalizer" ]] || {
+      cat "${state_dir}/${label}.finalizer.log" >&2
+      fail "completed finalizer did not reach ${boundary}"
+    }
+    kill -9 "$finalizer_job"
+    wait "$finalizer_job" 2>/dev/null || true
+    kill -0 "$finalizer_job" 2>/dev/null && fail "completed finalizer survived kill -9 at ${boundary}"
+    assert_file_exists "$marker"
+    assert_file_contains "$marker" "run_id$(printf '\t')${run_id}"
+
+    if [[ "$index" -eq 1 || "$index" -eq 3 ]]; then retry_target="$run_id"; else retry_target=current; fi
+    if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$retry_target") \
+        > "${state_dir}/${label}.retry.log" 2>&1; then
+      cat "${state_dir}/${label}.retry.log" >&2
+      fail "completed cleanup retry failed after ${boundary}"
+    fi
+    assert_file_contains "${state_dir}/${label}.retry.log" 'control plane finalized without rerunning work'
+    queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.after"
+    cmp -s "${state_dir}/${label}.side-effects.before" "${state_dir}/${label}.side-effects.after" || \
+      fail "completed cleanup changed exact side-effect counts after ${boundary}"
+    audit="${repo_dir}/.work/queue/lease.finalized.${owner_generation}.${owner_token}"
+    assert_file_exists "${audit}/owner.${owner_token}.state"
+    assert_equals 1 "$(find "${repo_dir}/.work/queue" -maxdepth 1 -type d -name "lease.finalized.${owner_generation}.${owner_token}" | wc -l)" \
+      "${boundary} finalized lease audit count"
+    assert_path_not_exists "$marker"
+    assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state" $'phase\tcompleted'
+    assert_path_not_exists "${repo_dir}/.work/queue/current"
+    assert_path_not_exists "${repo_dir}/.work/queue/current_batch"
+    assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
+    if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+        > "${state_dir}/${label}.idempotent.log" 2>&1; then
+      fail "explicit finalization was not idempotent after ${boundary}"
+    fi
+    assert_file_contains "${state_dir}/${label}.idempotent.log" 'control plane is already finalized'
+    queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.idempotent"
+    cmp -s "${state_dir}/${label}.side-effects.before" "${state_dir}/${label}.side-effects.idempotent" || \
+      fail "idempotent completed cleanup changed side effects after ${boundary}"
+    [[ "$index" -ne 0 ]] || cp "$project_backup" "${repo_dir}/.issue_forge/project.sh"
+  done
+
+  pause="${state_dir}/queue-completed-a-active-b"
+  rm -rf "$pause"; mkdir -p "$pause"
+  clear_command_logs; reset_flow_counters
+  (
+    cd "$repo_dir"
+    exec env PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_QUEUE_TEST_PAUSE_DIR="$pause" CODEX_FLOW_QUEUE_TEST_PAUSE_AT=after_worker_registration_before_authorization \
+      CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=active-b \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 62
+  ) > "${state_dir}/queue-active-b.log" 2>&1 & owner_job=$!
+  for ((attempt = 0; attempt < 2000; attempt += 1)); do
+    [[ -f "$pause/paused.after_worker_registration_before_authorization.active-b" ]] && break
+    sleep 0.01
+  done
+  [[ -f "$pause/paused.after_worker_registration_before_authorization.active-b" ]] || fail 'run B did not publish its active control plane'
+  b_run="$(awk -F '\t' '$1 == "run_id" { print $2 }' "${repo_dir}/.work/queue/current")"
+  b_record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  b_token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$b_record")"
+  cp "${repo_dir}/.work/queue/current" "${state_dir}/active-b.current"
+  cp -a "${repo_dir}/.work/queue/lease.lock" "${state_dir}/active-b.lease"
+  cp "$active_file" "${state_dir}/active-b.active"
+  queue_side_effect_snapshot > "${state_dir}/active-b.side-effects"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+      > "${state_dir}/completed-a-active-b.log" 2>&1; then
+    fail 'already-finalized A should succeed while B owns the active control plane'
+  fi
+  assert_file_contains "${state_dir}/completed-a-active-b.log" 'control plane is already finalized'
+  cmp -s "${state_dir}/active-b.current" "${repo_dir}/.work/queue/current" || fail 'A finalization changed B current pointer'
+  assert_equals 1 "$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state' | wc -l)" 'B lease owner count after A finalization'
+  cmp -s "${state_dir}/active-b.lease/owner.${b_token}.state" \
+    "${repo_dir}/.work/queue/lease.lock/owner.${b_token}.state" || fail 'A finalization changed B lease'
+  cmp -s "${state_dir}/active-b.active" "$active_file" || fail 'A finalization changed B active-process record'
+  queue_side_effect_snapshot > "${state_dir}/active-b.side-effects.after"
+  cmp -s "${state_dir}/active-b.side-effects" "${state_dir}/active-b.side-effects.after" || fail 'A finalization changed B counters'
+  touch "$pause/release.after_worker_registration_before_authorization.active-b"
+  if ! wait "$owner_job"; then cat "${state_dir}/queue-active-b.log" >&2; fail 'run B did not finish after isolation check'; fi
+  assert_file_contains "${repo_dir}/.work/queue/runs/${b_run}/run.state" $'state\tcompleted'
+
+  cp "${state_dir}/active-b.active" "$active_file"
+  cp "$active_file" "${state_dir}/dead-b.active.before"
+  queue_side_effect_snapshot > "${state_dir}/dead-b.side-effects.before"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+      > "${state_dir}/completed-a-dead-active-b.log" 2>&1; then
+    fail 'already-finalized A should no-op with a dead active-process record for B'
+  fi
+  cmp -s "${state_dir}/dead-b.active.before" "$active_file" || fail 'A finalization removed dead active-process record for B'
+  queue_side_effect_snapshot > "${state_dir}/dead-b.side-effects.after"
+  cmp -s "${state_dir}/dead-b.side-effects.before" "${state_dir}/dead-b.side-effects.after" || fail 'A finalization with dead B active state changed side effects'
+
+  cp "${state_dir}/dead-b.active.before" "$active_file"
+  mv "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state" "${state_dir}/completed-a-terminal.state"
+  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+    "$run_id" "$owner_token" "$owner_generation" > "${repo_dir}/.work/queue/current"
+  queue_tree_snapshot "$(dirname "$active_file")" > "${state_dir}/cross-run-active.before"
+  queue_side_effect_snapshot > "${state_dir}/cross-run-active.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+      > "${state_dir}/completed-a-cross-run-active.log" 2>&1; then
+    fail 'pending A cleanup must reject B active-process ownership'
+  fi
+  assert_file_contains "${state_dir}/completed-a-cross-run-active.log" "Active-process record belongs to run ${b_run}"
+  queue_tree_snapshot "$(dirname "$active_file")" > "${state_dir}/cross-run-active.after"
+  cmp -s "${state_dir}/cross-run-active.before" "${state_dir}/cross-run-active.after" || fail 'A finalizer mutated B active-process control state'
+  queue_side_effect_snapshot > "${state_dir}/cross-run-active.side-effects.after"
+  cmp -s "${state_dir}/cross-run-active.side-effects.before" "${state_dir}/cross-run-active.side-effects.after" || fail 'cross-run active rejection changed side effects'
+  rm -f "$active_file" "${repo_dir}/.work/queue/current"
+  mv "${state_dir}/completed-a-terminal.state" "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state"
+
+  mv "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state" "${state_dir}/completed-a-terminal.state"
+  cp -a "$audit" "${repo_dir}/.work/queue/lease.lock"
+  record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  printf 'schema_version\t2\nrun_id\t%s\nowner_token\tmismatched-token\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+    "$run_id" "$owner_generation" > "${repo_dir}/.work/queue/current"
+  queue_tree_snapshot "${repo_dir}/.work/queue" > "${state_dir}/fencing-mismatch.before"
+  queue_side_effect_snapshot > "${state_dir}/fencing-mismatch.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+      > "${state_dir}/completion-fencing-mismatch.log" 2>&1; then
+    fail 'same-run pointer/lease fencing mismatch must fail'
+  fi
+  assert_file_contains "${state_dir}/completion-fencing-mismatch.log" 'contradictory current/lease fencing identities'
+  queue_tree_snapshot "${repo_dir}/.work/queue" > "${state_dir}/fencing-mismatch.after"
+  cmp -s "${state_dir}/fencing-mismatch.before" "${state_dir}/fencing-mismatch.after" || fail 'fencing mismatch failure mutated control state'
+  queue_side_effect_snapshot > "${state_dir}/fencing-mismatch.side-effects.after"
+  cmp -s "${state_dir}/fencing-mismatch.side-effects.before" "${state_dir}/fencing-mismatch.side-effects.after" || fail 'fencing mismatch changed side effects'
+  rm -rf "${repo_dir}/.work/queue/lease.lock"; rm -f "${repo_dir}/.work/queue/current"
+
+  cp -a "$audit" "${repo_dir}/.work/queue/lease.lock"
+  record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
+  mv "$record" "${repo_dir}/.work/queue/lease.lock/owner.renamed-token.state"
+  queue_tree_snapshot "${repo_dir}/.work/queue" > "${state_dir}/renamed-owner.before"
+  queue_side_effect_snapshot > "${state_dir}/renamed-owner.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
+      > "${state_dir}/completion-renamed-owner.log" 2>&1; then
+    fail 'renamed lease owner record must fail completed finalization'
+  fi
+  assert_file_contains "${state_dir}/completion-renamed-owner.log" 'filename does not match embedded owner token'
+  queue_tree_snapshot "${repo_dir}/.work/queue" > "${state_dir}/renamed-owner.after"
+  cmp -s "${state_dir}/renamed-owner.before" "${state_dir}/renamed-owner.after" || fail 'renamed owner failure mutated control state'
+  queue_side_effect_snapshot > "${state_dir}/renamed-owner.side-effects.after"
+  cmp -s "${state_dir}/renamed-owner.side-effects.before" "${state_dir}/renamed-owner.side-effects.after" || fail 'renamed owner failure changed side effects'
+  rm -rf "${repo_dir}/.work/queue/lease.lock"
+  mv "${state_dir}/completed-a-terminal.state" "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state"
 }
 
 run_queue_worker_registration_smoke() {
@@ -3320,7 +3566,7 @@ run_issue_queue_smoke() {
 }
 
 run_queue_lease_smoke() {
-  local helper="${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/lib/queue_state.sh" lease="${repo_dir}/.work/queue/lease.lock" log_file run_id other_run token='smoke-owner-token' owner_start
+  local helper="${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/lib/queue_state.sh" lease="${repo_dir}/.work/queue/lease.lock" log_file run_id other_run other_state token='smoke-owner-token' owner_start
   local pause="${state_dir}/queue-takeover-pause" takeover_barrier="${state_dir}/queue-takeover-barrier"
   local takeover_pid takeover_two_pid takeover_winner takeover_loser takeover_label replacement_record replacement_token replacement_generation attempt
   log 'running queue lease smoke'
@@ -3352,13 +3598,22 @@ set -euo pipefail; source "$QUEUE_STATE_HELPER"; : > "${QUEUE_LEASE}.guard"; que
   assert_file_contains "$log_file" "resume with: ${repo_dir}/${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh --resume ${run_id}"
   assert_file_not_contains "$log_file" 'command not found'
   other_run="$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d ! -name "$run_id" -printf '%f\n' | head -n 1)"
+  other_state="$(awk -F '\t' '$1 == "state" { print $2 }' "${repo_dir}/.work/queue/runs/${other_run}/run.state")"
   log_file="${state_dir}/queue-lease-run-mismatch.log"
-  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$other_run" --take-over-lease) > "$log_file" 2>&1; then
-    fail 'resume run-ID mismatch must not consume another run lease'
-  fi
-  if ! grep -Fq "Queue lease run ${run_id} conflicts with requested run ${other_run}" "$log_file" && \
-     ! grep -Fq "Queue lease belongs to different run ${run_id}" "$log_file"; then
-    fail 'different-run resume did not preserve the conflicting lease'
+  if [[ "$other_state" == completed ]]; then
+    if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$other_run" --take-over-lease) > "$log_file" 2>&1; then
+      fail 'already-finalized completed run should ignore another run lease'
+    fi
+    assert_file_contains "$log_file" 'control plane is already finalized'
+    assert_file_exists "$lease/owner.${token}.state"
+  else
+    if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$other_run" --take-over-lease) > "$log_file" 2>&1; then
+      fail 'resume run-ID mismatch must not consume another run lease'
+    fi
+    if ! grep -Fq "Queue lease run ${run_id} conflicts with requested run ${other_run}" "$log_file" && \
+       ! grep -Fq "Queue lease belongs to different run ${run_id}" "$log_file"; then
+      fail 'different-run resume did not preserve the conflicting lease'
+    fi
   fi
   rm -rf "$pause" "$takeover_barrier"; mkdir -p "$pause" "$takeover_barrier"
   (
@@ -3509,6 +3764,7 @@ main() {
   run_issue_queue_smoke
   run_queue_lease_smoke
   run_issue_queue_strict_issue_review_smoke
+  run_queue_completion_cleanup_transaction_smoke
   run_queue_worker_registration_smoke
   run_queue_worker_phase_checkpoint_smoke
   run_queue_private_environment_smoke

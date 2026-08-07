@@ -14,6 +14,7 @@ queue_state_initialize_private_state() {
     ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION \
     ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD \
     ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE \
+    ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE \
     ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION; do
     if ! unset "$name" 2>/dev/null; then
       queue_state_error "Private queue state variable is readonly and cannot be initialized: ${name}"
@@ -27,6 +28,8 @@ queue_state_initialize_private_state() {
   ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD=''
   # shellcheck disable=SC2034 # configured and consumed by run_issue_queue.sh
   ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE=''
+  # shellcheck disable=SC2034 # configured and consumed by run_issue_queue.sh
+  ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE=''
   ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION=''
 }
 
@@ -255,6 +258,7 @@ queue_state_parse_file() {
     worker_registration) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation registered_at) ;;
     worker_authorization) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation authorized_at) ;;
     worker_result) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation phase exit_status signal completed_at) ;;
+    completion_cleanup) required=(schema_version run_id owner_token lease_generation lease_required batch_pointer phase updated_at) ;;
     *) queue_state_error "Unknown state schema: ${schema}"; return 1 ;;
   esac
   for key in "${required[@]}"; do allowed["$key"]=1; done
@@ -387,6 +391,14 @@ queue_state_validate_file() {
       queue_state_require_token 'worker-result phase' "${fields[phase]}" || return 1
       [[ "${fields[exit_status]}" =~ ^[0-9]+$ && "${fields[exit_status]}" -le 255 ]] || { queue_state_error "Malformed worker exit status: ${fields[exit_status]}"; return 1; }
       [[ "${fields[signal]}" == none ]] || queue_state_require_token 'worker signal' "${fields[signal]}" || return 1
+      ;;
+    completion_cleanup)
+      queue_state_require_token 'completion cleanup owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed completion cleanup lease generation: ${fields[lease_generation]}"; return 1; }
+      queue_state_enum_contains "${fields[lease_required]}" 0 1 || { queue_state_error "Malformed completion cleanup lease requirement: ${fields[lease_required]}"; return 1; }
+      [[ "${fields[batch_pointer]}" == none ]] || queue_state_require_token 'completion cleanup batch pointer' "${fields[batch_pointer]}" || return 1
+      queue_state_enum_contains "${fields[phase]}" planned lease_retired batch_pointer_removed current_removed completed \
+        || { queue_state_error "Malformed completion cleanup phase: ${fields[phase]}"; return 1; }
       ;;
   esac
 }
@@ -646,4 +658,42 @@ queue_state_write_worker_result() {
     "child_pid	$3" "child_pgid	$4" "process_start	$5" "owner_pid	$6" "owner_process_start	$7" \
     "owner_token	$8" "lease_generation	$9" "phase	${10}" "exit_status	${11}" "signal	${12}" \
     "completed_at	$(queue_state_now)"
+}
+
+queue_state_write_completion_cleanup() {
+  queue_state_write_content "$1" completion_cleanup $'schema_version\t'"${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" \
+    $'run_id\t'"$2" $'owner_token\t'"$3" $'lease_generation\t'"$4" $'lease_required\t'"$5" \
+    $'batch_pointer\t'"$6" $'phase\t'"$7" $'updated_at\t'"$(queue_state_now)"
+}
+
+queue_state_transition_completion_cleanup() {
+  local target="$1" expected="$2" requested="$3" staging status key
+  local -A fields=()
+  queue_state_begin_serialized_operation || return 1
+  if ! queue_state_parse_file "$target" completion_cleanup fields || ! queue_state_validate_file "$target" completion_cleanup; then
+    queue_state_finish_serialized_operation 1
+    return 1
+  fi
+  [[ "${fields[phase]}" == "$expected" ]] || {
+    queue_state_error "Cannot transition completion cleanup for ${fields[run_id]}: expected phase '${expected}', actual phase '${fields[phase]}', requested phase '${requested}'"
+    queue_state_finish_serialized_operation 1
+    return 1
+  }
+  case "${expected}:${requested}" in
+    planned:lease_retired|lease_retired:batch_pointer_removed|batch_pointer_removed:current_removed|current_removed:completed) ;;
+    *)
+      queue_state_error "Invalid completion cleanup transition: ${expected} -> ${requested}"
+      queue_state_finish_serialized_operation 1
+      return 1
+      ;;
+  esac
+  fields[phase]="$requested"
+  fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
+  for key in schema_version run_id owner_token lease_generation lease_required batch_pointer phase updated_at; do
+    printf '%s\t%s\n' "$key" "${fields[$key]}"
+  done > "$staging"
+  if queue_state_publish_file "$target" completion_cleanup "$staging"; then status=0; else status=$?; fi
+  rm -f -- "$staging" || status=1
+  queue_state_finish_serialized_operation "$status"
 }

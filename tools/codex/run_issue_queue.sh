@@ -19,6 +19,7 @@ queue_bootstrap_private_environment() {
     ISSUE_FORGE_INTERNAL_QUEUE_ASSERT_OWNED_FUNCTION \
     ISSUE_FORGE_INTERNAL_QUEUE_SERIALIZATION_GUARD \
     ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE \
+    ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE \
     ISSUE_FORGE_INTERNAL_QUEUE_GUARD_BUSY_FUNCTION \
     ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE; do
     if ! unset "$name" 2>/dev/null; then
@@ -412,8 +413,11 @@ initialize_queue_serialization_guard() {
   guard_links="$(stat -c '%h' -- "$guard" 2>/dev/null)" || fail "Cannot inspect queue serialization guard identity: ${guard}"
   [[ "$guard_links" == 1 ]] || fail "Queue serialization guard has unexpected hard-link count ${guard_links}: ${guard}"
   ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE="${guard_dir}/active-process.state"
+  ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE="${guard_dir}/completion-cleanup.state"
   queue_state_require_singleton_path "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" optional || \
     fail "Invalid active queue process path: ${ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE}"
+  queue_state_require_singleton_path "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" optional || \
+    fail "Invalid completion cleanup path: ${ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE}"
   queue_state_configure_guard "$guard" queue_guard_busy_diagnostic || fail 'Cannot configure queue serialization guard'
 }
 
@@ -475,7 +479,7 @@ assert_queue_lease_owned() {
 }
 
 record_abnormal_exit() {
-  local status="$1" signal_name="${2:-}" current
+  local status="$1" signal_name="${2:-}" current preserve_completed_lease=0
   trap - EXIT INT TERM
   terminate_controlled_process_tree || true
   if [[ "${run_initialized:-0}" -eq 1 && "${run_completed:-0}" -ne 1 ]]; then
@@ -484,6 +488,7 @@ record_abnormal_exit() {
        queue_state_validate_file "${run_state_dir}/run.state" run 2>/dev/null; then
       current="$(queue_state_read_field "${run_state_dir}/run.state" run state 2>/dev/null || true)"
       if [[ "$current" == completed ]]; then
+        preserve_completed_lease=1
         log_error "Queue run ${run_id} completed its work; finalize control-plane cleanup with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${run_id}"
       elif [[ "$current" == running ]]; then
         if [[ -n "$signal_name" ]]; then
@@ -505,7 +510,7 @@ record_abnormal_exit() {
       log_error "Run ${run_id} state disappeared or became invalid; no resume command can be advertised"
     fi
   fi
-  release_queue_lease || true
+  if [[ "$preserve_completed_lease" -ne 1 ]]; then release_queue_lease || true; fi
   if [[ -n "$signal_name" ]]; then exit "$status"; fi
   exit "$status"
 }
@@ -571,12 +576,28 @@ reconcile_active_process_record_under_guard() {
 
 acquire_queue_lease() {
   local owner_host owner_pid owner_run owner_token owner_generation owner_start local_host local_start record audit found owner_status
-  local -A owner_fields=()
+  local cleanup_run
+  local -A owner_fields=() cleanup_fields=()
   mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"; local_host="$(queue_host_identity)"
   lease_owner_token="$(queue_owner_token)"; lease_owner_host="$local_host"; local_start="$(queue_process_start_identity "$$")"; lease_generation=1
   [[ "$local_start" != unavailable ]] || fail 'Cannot establish local process-start identity; queue lease acquisition is unverifiable'
   queue_test_barrier lease_acquire
   queue_state_guard_enter || fail 'Cannot acquire queue serialization guard'
+  queue_state_require_singleton_path "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid completion cleanup marker: ${ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE}"
+  }
+  if [[ -e "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" ]]; then
+    if ! queue_state_parse_file "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" completion_cleanup cleanup_fields || \
+       ! queue_state_validate_file "$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" completion_cleanup; then
+      queue_state_guard_leave || true
+      fail "Invalid completion cleanup marker: ${ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE}"
+    fi
+    cleanup_run="${cleanup_fields[run_id]}"
+    if [[ "$resume_requested" -eq 0 ]]; then discard_preflight_run; fi
+    queue_state_guard_leave || true
+    fail "Completed-run cleanup for ${cleanup_run} is pending; finish it with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${cleanup_run}"
+  fi
   reconcile_active_process_record_under_guard
   if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
     queue_state_guard_leave || true
@@ -1279,131 +1300,47 @@ process_batch() {
 
 validate_completed_queue_run() {
   local manifest="${run_state_dir}/manifest.state" state_file="${run_state_dir}/run.state" state
-  local -A fields=()
+  local -A fields=() state_fields=()
   [[ -d "$run_state_dir" && ! -L "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
   queue_state_parse_file "$manifest" manifest fields || fail "Invalid completed-run manifest: ${manifest}"
   queue_state_validate_file "$manifest" manifest || fail "Invalid completed-run manifest: ${manifest}"
   [[ "${fields[run_id]}" == "$run_id" ]] || fail "Manifest run ID mismatch for ${run_id}"
-  [[ "${fields[base_branch]}" == "$CODEX_FLOW_BASE_BRANCH" && "${fields[base_ref]}" == "$CODEX_FLOW_BASE_REF" ]] || \
-    fail "Completed-run repository configuration mismatch for ${run_id}"
   [[ "${fields[repository_identity]}" == "$(canonical_repository_identity)" ]] || \
     fail 'Completed-run repository identity does not match the immutable manifest'
+  queue_state_parse_file "$state_file" run state_fields || fail "Invalid completed run state: ${state_file}"
   queue_state_validate_file "$state_file" run || fail "Invalid completed run state: ${state_file}"
-  [[ "$(queue_state_read_field "$state_file" run run_id)" == "$run_id" ]] || fail "Run state identity mismatch for ${run_id}"
-  state="$(queue_state_read_field "$state_file" run state)"
+  [[ "${state_fields[run_id]}" == "$run_id" ]] || fail "Run state identity mismatch for ${run_id}"
+  state="${state_fields[state]}"
   [[ "$state" == completed ]] || return 2
 }
 
-finalize_completed_queue_run() {
-  local pointer="${CODEX_FLOW_QUEUE_DIR}/current" batch_pointer="${CODEX_FLOW_QUEUE_DIR}/current_batch"
-  local found='' record='' owner_run='' owner_host='' owner_pid='' owner_start='' owner_token='' owner_generation=''
-  local owner_status local_host audit pointed
-  local -A owner_fields=()
-  validate_completed_queue_run || fail "Queue run ${run_id} is not completed and cannot use completion finalization"
-  queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"
-  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard for completed-run finalization'
-  reconcile_active_process_record_under_guard
-  queue_state_require_singleton_path "$pointer" optional || {
-    queue_state_guard_leave || true
-    fail "Invalid current queue pointer path: ${pointer}"
-  }
-  if [[ -e "$pointer" ]]; then
-    pointed="$(queue_state_read_field "$pointer" pointer run_id)" || {
-      queue_state_guard_leave || true
-      fail "Invalid current queue pointer: ${pointer}"
-    }
-    [[ "$pointed" == "$run_id" ]] || {
-      queue_state_guard_leave || true
-      fail "Current pointer belongs to different run ${pointed}; completed run ${run_id} was not modified"
-    }
-  fi
-  queue_state_require_singleton_path "$batch_pointer" optional || {
-    queue_state_guard_leave || true
-    fail "Invalid current_batch singleton path: ${batch_pointer}"
-  }
-  if [[ -d "$queue_lock" && ! -L "$queue_lock" ]]; then
-    found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
-    [[ -n "$found" && "$found" != *$'\n'* ]] || {
-      queue_state_guard_leave || true
-      fail "Invalid queue lease during completed-run finalization: ${queue_lock}"
-    }
-    record="$found"
-    if ! queue_state_parse_file "$record" lease owner_fields || ! queue_state_validate_file "$record" lease; then
-      queue_state_guard_leave || true
-      fail "Invalid queue lease owner during completed-run finalization: ${record}"
-    fi
-    owner_run="${owner_fields[run_id]}"; owner_host="${owner_fields[owner_host]}"; owner_pid="${owner_fields[owner_pid]}"
-    owner_start="${owner_fields[process_start]}"; owner_token="${owner_fields[owner_token]}"; owner_generation="${owner_fields[lease_generation]}"
-    [[ "$owner_run" == "$run_id" ]] || {
-      queue_state_guard_leave || true
-      fail "Queue lease belongs to different run ${owner_run}; completed run ${run_id} was not modified"
-    }
-    local_host="$(queue_host_identity)"; owner_status=unverifiable
-    if [[ "$owner_host" == "$local_host" ]]; then
-      if queue_exact_process_is_live "$owner_pid" "$owner_start"; then owner_status=live
-      elif [[ -d /proc && ! -e "/proc/${owner_pid}" ]]; then owner_status=dead
-      fi
-      if [[ "$owner_status" == live ]]; then
-        queue_state_guard_leave || true
-        fail "Completed-run finalization is still active in same-host PID ${owner_pid} for run ${run_id}"
-      fi
-      if [[ "$owner_status" != dead && "$take_over_lease" -ne 1 ]]; then
-        queue_state_guard_leave || true
-        fail "Completed-run lease owner is unverifiable; rerun --resume ${run_id} --take-over-lease only after asserting it stopped"
-      fi
-    elif [[ "$take_over_lease" -ne 1 ]]; then
-      queue_state_guard_leave || true
-      fail "Completed-run lease belongs to host ${owner_host}; rerun --resume ${run_id} --take-over-lease"
-    fi
-    audit="${CODEX_FLOW_QUEUE_DIR}/lease.finalized.${owner_generation}.${owner_token}"
-    [[ ! -e "$audit" ]] || {
-      queue_state_guard_leave || true
-      fail "Completed-run lease audit destination already exists: ${audit}"
-    }
-    mv -T -- "$queue_lock" "$audit" || {
-      queue_state_guard_leave || true
-      fail 'Completed-run stale lease retirement failed'
-    }
-  elif [[ -e "$queue_lock" || -L "$queue_lock" ]]; then
-    queue_state_guard_leave || true
-    fail "Invalid queue lease path during completed-run finalization: ${queue_lock}"
-  fi
-  if [[ -e "$pointer" ]]; then
-    pointed="$(queue_state_read_field "$pointer" pointer run_id)" || {
-      queue_state_guard_leave || true
-      fail "Invalid current queue pointer: ${pointer}"
-    }
-    [[ "$pointed" == "$run_id" ]] || {
-      queue_state_guard_leave || true
-      fail "Current pointer belongs to different run ${pointed}; completed run ${run_id} was not modified"
-    }
-    queue_state_remove_pointer_if_matches "$pointer" "$run_id" || {
-      queue_state_guard_leave || true
-      fail 'Current pointer changed during completed-run finalization'
-    }
-  fi
-  [[ ! -e "$batch_pointer" ]] || rm -- "$batch_pointer" || {
-    queue_state_guard_leave || true
-    fail 'Cannot remove stale current_batch during completed-run finalization'
-  }
-  queue_state_guard_leave || fail 'Cannot release serialization guard after completed-run finalization'
-  run_completed=1
-  trap - EXIT INT TERM
-  log_info "Queue run ${run_id} is already completed; control plane finalized without rerunning work"
-}
-
 resolve_completed_lease_without_current() {
+  local marker="$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE"
   local lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock" found state
   local -A fields=()
   resolved_completion_run_id=''
   queue_state_guard_enter || fail 'Cannot inspect queue lease while resolving --resume current'
+  queue_state_require_singleton_path "$marker" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid completion cleanup marker while resolving --resume current: ${marker}"
+  }
+  if [[ -e "$marker" ]]; then
+    if ! queue_state_parse_file "$marker" completion_cleanup fields || ! queue_state_validate_file "$marker" completion_cleanup; then
+      queue_state_guard_leave || true
+      fail "Invalid completion cleanup marker while resolving --resume current: ${marker}"
+    fi
+    resolved_completion_run_id="${fields[run_id]}"
+    queue_state_guard_leave || fail 'Cannot release queue guard after resolving completion cleanup marker'
+    return 0
+  fi
   if [[ -d "$lock" && ! -L "$lock" ]]; then
     found="$(find "$lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
     [[ -n "$found" && "$found" != *$'\n'* ]] || {
       queue_state_guard_leave || true
       fail "Invalid queue lease while resolving --resume current: ${lock}"
     }
-    if ! queue_state_parse_file "$found" lease fields || ! queue_state_validate_file "$found" lease; then
+    if ! queue_state_parse_file "$found" lease fields || ! queue_state_validate_file "$found" lease || \
+       [[ "${found##*/}" != "owner.${fields[owner_token]}.state" ]]; then
       queue_state_guard_leave || true
       fail "Invalid queue lease owner while resolving --resume current: ${found}"
     fi
@@ -1424,6 +1361,358 @@ resolve_completed_lease_without_current() {
   queue_state_guard_leave || fail 'Cannot release queue guard after resolving --resume current'
 }
 
+validate_completed_lease_audit_under_guard() {
+  local audit="$1" expected_run="$2" expected_token="$3" expected_generation="$4" found
+  local -A fields=()
+  [[ -d "$audit" && ! -L "$audit" ]] || fail "Completed-run lease audit is not the expected directory: ${audit}"
+  found="$(find "$audit" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+  [[ -n "$found" && "$found" != *$'\n'* ]] || fail "Completed-run lease audit is incomplete or ambiguous: ${audit}"
+  if ! queue_state_parse_file "$found" lease fields || ! queue_state_validate_file "$found" lease; then
+    fail "Invalid completed-run lease audit owner: ${found}"
+  fi
+  [[ "${found##*/}" == "owner.${fields[owner_token]}.state" && "${fields[run_id]}" == "$expected_run" && \
+     "${fields[owner_token]}" == "$expected_token" && "${fields[lease_generation]}" == "$expected_generation" ]] || \
+    fail "Completed-run lease audit fencing identity mismatch: ${audit}"
+}
+
+finalize_completed_queue_run() {
+  local pointer="${CODEX_FLOW_QUEUE_DIR}/current" batch_pointer="${CODEX_FLOW_QUEUE_DIR}/current_batch"
+  local marker="$ISSUE_FORGE_INTERNAL_QUEUE_COMPLETION_CLEANUP_FILE" active="$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE"
+  local terminal="${run_state_dir}/completion-cleanup.state"
+  local found='' record='' pointer_run='' pointer_token='' pointer_generation=''
+  local owner_run='' owner_host='' owner_pid='' owner_start='' owner_token='' owner_generation=''
+  local cleanup_token='' cleanup_generation='' cleanup_phase='' cleanup_lease_required='' cleanup_batch=''
+  local active_run='' active_token='' active_generation='' active_pid='' active_pgid='' active_start=''
+  local owner_status local_host audit batch_value='' batch_state same_run_residue=0 marker_present=0 owner_is_self=0
+  local -A owner_fields=() pointer_fields=() cleanup_fields=() active_fields=() terminal_fields=() discovery_fields=()
+
+  validate_completed_queue_run || fail "Queue run ${run_id} is not completed and cannot use completion finalization"
+  queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"
+  queue_state_require_singleton_path "$terminal" optional || fail "Invalid completed-run terminal cleanup state: ${terminal}"
+  if [[ -e "$terminal" ]]; then
+    if ! queue_state_parse_file "$terminal" completion_cleanup terminal_fields || \
+       ! queue_state_validate_file "$terminal" completion_cleanup || \
+       [[ "${terminal_fields[run_id]}" != "$run_id" || "${terminal_fields[phase]}" != completed ]]; then
+      fail "Invalid completed-run terminal cleanup state: ${terminal}"
+    fi
+    queue_state_require_singleton_path "$marker" optional || fail "Invalid completion cleanup marker: ${marker}"
+    if [[ ! -e "$marker" ]]; then
+      run_completed=1
+      trap - EXIT INT TERM
+      log_info "Queue run ${run_id} is already completed and its control plane is already finalized; no cleanup or work resume is required"
+      return 0
+    fi
+    if ! queue_state_parse_file "$marker" completion_cleanup discovery_fields || ! queue_state_validate_file "$marker" completion_cleanup; then
+      fail "Invalid completion cleanup marker: ${marker}"
+    fi
+    if [[ "${discovery_fields[run_id]}" != "$run_id" ]]; then
+      run_completed=1
+      trap - EXIT INT TERM
+      log_info "Queue run ${run_id} is already completed and its control plane is already finalized; no cleanup or work resume is required"
+      return 0
+    fi
+  fi
+  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard for completed-run finalization'
+
+  queue_state_require_singleton_path "$marker" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid completion cleanup marker: ${marker}"
+  }
+  if [[ -e "$marker" ]]; then
+    if ! queue_state_parse_file "$marker" completion_cleanup cleanup_fields || ! queue_state_validate_file "$marker" completion_cleanup; then
+      queue_state_guard_leave || true
+      fail "Invalid completion cleanup marker: ${marker}"
+    fi
+    [[ "${cleanup_fields[run_id]}" == "$run_id" ]] || {
+      queue_state_guard_leave || true
+      fail "Completion cleanup for run ${cleanup_fields[run_id]} is pending; completed run ${run_id} was not modified; finish it with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${cleanup_fields[run_id]}"
+    }
+    marker_present=1; same_run_residue=1
+    cleanup_token="${cleanup_fields[owner_token]}"; cleanup_generation="${cleanup_fields[lease_generation]}"
+    cleanup_lease_required="${cleanup_fields[lease_required]}"; cleanup_batch="${cleanup_fields[batch_pointer]}"
+    cleanup_phase="${cleanup_fields[phase]}"
+  fi
+
+  queue_state_require_singleton_path "$pointer" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid current queue pointer path: ${pointer}"
+  }
+  if [[ -e "$pointer" ]]; then
+    if ! queue_state_parse_file "$pointer" pointer pointer_fields || ! queue_state_validate_file "$pointer" pointer; then
+      queue_state_guard_leave || true
+      fail "Invalid current queue pointer: ${pointer}"
+    fi
+    pointer_run="${pointer_fields[run_id]}"; pointer_token="${pointer_fields[owner_token]}"
+    pointer_generation="${pointer_fields[lease_generation]}"
+    [[ "$pointer_run" != "$run_id" ]] || same_run_residue=1
+  fi
+
+  if [[ -e "$queue_lock" && ( ! -d "$queue_lock" || -L "$queue_lock" ) ]]; then
+    queue_state_guard_leave || true
+    fail "Invalid queue lease path during completed-run finalization: ${queue_lock}"
+  fi
+  if [[ -d "$queue_lock" && ! -L "$queue_lock" ]]; then
+    found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+    [[ -n "$found" && "$found" != *$'\n'* ]] || {
+      queue_state_guard_leave || true
+      fail "Invalid queue lease during completed-run finalization: ${queue_lock}"
+    }
+    record="$found"
+    if ! queue_state_parse_file "$record" lease owner_fields || ! queue_state_validate_file "$record" lease; then
+      queue_state_guard_leave || true
+      fail "Invalid queue lease owner during completed-run finalization: ${record}"
+    fi
+    [[ "${record##*/}" == "owner.${owner_fields[owner_token]}.state" ]] || {
+      queue_state_guard_leave || true
+      fail "Queue lease owner filename does not match embedded owner token: ${record}"
+    }
+    owner_run="${owner_fields[run_id]}"; owner_host="${owner_fields[owner_host]}"; owner_pid="${owner_fields[owner_pid]}"
+    owner_start="${owner_fields[process_start]}"; owner_token="${owner_fields[owner_token]}"; owner_generation="${owner_fields[lease_generation]}"
+    [[ "$owner_run" != "$run_id" ]] || same_run_residue=1
+  fi
+
+  if [[ "$same_run_residue" -ne 1 ]]; then
+    queue_state_guard_leave || fail 'Cannot release serialization guard after completed-run inspection'
+    run_completed=1
+    trap - EXIT INT TERM
+    log_info "Queue run ${run_id} is already completed and its control plane is already finalized; no cleanup or work resume is required"
+    return 0
+  fi
+  if [[ -n "$pointer_run" && "$pointer_run" != "$run_id" ]]; then
+    queue_state_guard_leave || true
+    fail "Completed run ${run_id} still has pending cleanup, but current belongs to run ${pointer_run}; no control-plane state was modified"
+  fi
+  if [[ -n "$owner_run" && "$owner_run" != "$run_id" ]]; then
+    queue_state_guard_leave || true
+    fail "Completed run ${run_id} still has pending cleanup, but the lease belongs to run ${owner_run}; no control-plane state was modified"
+  fi
+  if [[ -n "$pointer_run" && -n "$owner_run" && \
+        ( "$pointer_token" != "$owner_token" || "$pointer_generation" != "$owner_generation" ) ]]; then
+    queue_state_guard_leave || true
+    fail "Completed run ${run_id} has contradictory current/lease fencing identities"
+  fi
+
+  if [[ "$marker_present" -eq 1 ]]; then
+    if [[ -n "$pointer_run" && ( "$pointer_token" != "$cleanup_token" || "$pointer_generation" != "$cleanup_generation" ) ]]; then
+      queue_state_guard_leave || true
+      fail "Completed run ${run_id} current pointer contradicts its cleanup transaction identity"
+    fi
+    if [[ -n "$owner_run" && ( "$owner_token" != "$cleanup_token" || "$owner_generation" != "$cleanup_generation" ) ]]; then
+      queue_state_guard_leave || true
+      fail "Completed run ${run_id} lease contradicts its cleanup transaction identity"
+    fi
+  else
+    if [[ -n "$pointer_run" ]]; then
+      cleanup_token="$pointer_token"; cleanup_generation="$pointer_generation"
+    else
+      cleanup_token="$owner_token"; cleanup_generation="$owner_generation"
+    fi
+    cleanup_lease_required=0
+    [[ -z "$owner_run" ]] || cleanup_lease_required=1
+    cleanup_phase=planned
+  fi
+
+  queue_state_require_singleton_path "$batch_pointer" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid current_batch singleton path: ${batch_pointer}"
+  }
+  if [[ -e "$batch_pointer" ]]; then
+    batch_value="$(<"$batch_pointer")"
+    queue_state_require_token 'current batch pointer' "$batch_value" || {
+      queue_state_guard_leave || true
+      fail "Invalid current_batch value during completed-run finalization: ${batch_pointer}"
+    }
+    if [[ "$marker_present" -eq 1 ]]; then
+      [[ "$cleanup_batch" != none && "$batch_value" == "$cleanup_batch" ]] || {
+        queue_state_guard_leave || true
+        fail "current_batch does not match completed run ${run_id}'s cleanup transaction; no state was modified"
+      }
+    else
+      batch_state="${run_state_dir}/batches/${batch_value}/batch.state"
+      if ! queue_state_validate_file "$batch_state" batch || [[ "$(queue_state_read_field "$batch_state" batch run_id)" != "$run_id" ]]; then
+        queue_state_guard_leave || true
+        fail "current_batch cannot be proven to belong to completed run ${run_id}; no state was modified"
+      fi
+      cleanup_batch="$batch_value"
+    fi
+  elif [[ "$marker_present" -ne 1 ]]; then
+    cleanup_batch=none
+  fi
+
+  queue_state_require_singleton_path "$active" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid active queue process path: ${active}"
+  }
+  if [[ -e "$active" ]]; then
+    if ! queue_state_parse_file "$active" active_process active_fields || ! queue_state_validate_file "$active" active_process; then
+      queue_state_guard_leave || true
+      fail "Invalid active queue process record: ${active}"
+    fi
+    active_run="${active_fields[run_id]}"; active_token="${active_fields[owner_token]}"
+    active_generation="${active_fields[lease_generation]}"; active_pid="${active_fields[child_pid]}"
+    active_pgid="${active_fields[child_pgid]}"; active_start="${active_fields[process_start]}"
+    [[ "$active_run" == "$run_id" ]] || {
+      queue_state_guard_leave || true
+      fail "Active-process record belongs to run ${active_run}; completed run ${run_id} was not modified"
+    }
+    [[ "$active_token" == "$cleanup_token" && "$active_generation" == "$cleanup_generation" ]] || {
+      queue_state_guard_leave || true
+      fail "Completed run ${run_id} active-process fencing identity contradicts its cleanup identity"
+    }
+    if queue_exact_process_is_live "$active_pid" "$active_start" || kill -0 -- "-${active_pgid}" 2>/dev/null; then
+      queue_state_guard_leave || true
+      fail "Completed run ${run_id} still has active process PID ${active_pid} PGID ${active_pgid}; wait for it to exit before finalization"
+    fi
+  fi
+
+  local_host="$(queue_host_identity)"
+  if [[ -n "$owner_run" && "$cleanup_phase" == planned ]]; then
+    owner_status=unverifiable
+    if [[ "$owner_host" == "$local_host" ]]; then
+      if queue_exact_process_is_live "$owner_pid" "$owner_start"; then owner_status=live
+      elif [[ -d /proc && ! -e "/proc/${owner_pid}" ]]; then owner_status=dead
+      fi
+      if [[ "${lease_owned:-0}" -eq 1 && "$owner_pid" == "$$" && "$owner_token" == "${lease_owner_token:-}" && \
+            "$owner_generation" == "${lease_generation:-}" ]]; then owner_is_self=1; fi
+      if [[ "$owner_status" == live && "$owner_is_self" -ne 1 ]]; then
+        queue_state_guard_leave || true
+        fail "Completed-run finalization is still active in same-host PID ${owner_pid} for run ${run_id}"
+      fi
+      if [[ "$owner_status" != dead && "$owner_status" != live && "$take_over_lease" -ne 1 ]]; then
+        queue_state_guard_leave || true
+        fail "Completed-run lease owner is unverifiable; rerun --resume ${run_id} --take-over-lease only after asserting it stopped"
+      fi
+    elif [[ "$take_over_lease" -ne 1 ]]; then
+      queue_state_guard_leave || true
+      fail "Completed-run lease belongs to host ${owner_host}; rerun --resume ${run_id} --take-over-lease"
+    fi
+  fi
+
+  audit="${CODEX_FLOW_QUEUE_DIR}/lease.finalized.${cleanup_generation}.${cleanup_token}"
+  if [[ "$cleanup_lease_required" == 1 && -e "$audit" ]]; then
+    validate_completed_lease_audit_under_guard "$audit" "$run_id" "$cleanup_token" "$cleanup_generation"
+    [[ -z "$owner_run" ]] || {
+      queue_state_guard_leave || true
+      fail "Completed run ${run_id} has both a live lease path and finalized lease audit"
+    }
+  elif [[ -e "$audit" || -L "$audit" ]]; then
+    queue_state_guard_leave || true
+    fail "Unexpected completed-run lease audit path: ${audit}"
+  fi
+
+  if [[ "$marker_present" -ne 1 ]]; then
+    queue_state_write_completion_cleanup "$marker" "$run_id" "$cleanup_token" "$cleanup_generation" \
+      "$cleanup_lease_required" "$cleanup_batch" planned || {
+      queue_state_guard_leave || true
+      fail 'Cannot publish completed-run cleanup transaction'
+    }
+    queue_test_pause after_completion_cleanup_marker
+  fi
+  if [[ -e "$active" ]]; then
+    rm -- "$active" || {
+      queue_state_guard_leave || true
+      fail "Cannot remove stopped active-process record for completed run ${run_id}"
+    }
+  fi
+
+  if [[ "$cleanup_phase" == planned ]]; then
+    if [[ "$cleanup_lease_required" == 1 ]]; then
+      if [[ -n "$owner_run" ]]; then
+        [[ ! -e "$audit" ]] || {
+          queue_state_guard_leave || true
+          fail "Completed-run lease audit destination already exists: ${audit}"
+        }
+        mv -T -- "$queue_lock" "$audit" || {
+          queue_state_guard_leave || true
+          fail 'Completed-run stale lease retirement failed'
+        }
+        lease_owned=0
+        queue_state_set_owner_assertion ''
+      else
+        validate_completed_lease_audit_under_guard "$audit" "$run_id" "$cleanup_token" "$cleanup_generation"
+      fi
+    fi
+    queue_state_transition_completion_cleanup "$marker" planned lease_retired || {
+      queue_state_guard_leave || true
+      fail 'Cannot record completed lease retirement'
+    }
+    cleanup_phase=lease_retired
+    queue_test_pause after_completed_lease_retirement
+  fi
+  if [[ "$cleanup_phase" == lease_retired ]]; then
+    if [[ -e "$batch_pointer" ]]; then
+      batch_value="$(<"$batch_pointer")"
+      [[ "$cleanup_batch" != none && "$batch_value" == "$cleanup_batch" ]] || {
+        queue_state_guard_leave || true
+        fail 'current_batch changed during completed-run finalization'
+      }
+      rm -- "$batch_pointer" || {
+        queue_state_guard_leave || true
+        fail 'Cannot remove stale current_batch during completed-run finalization'
+      }
+    fi
+    queue_state_transition_completion_cleanup "$marker" lease_retired batch_pointer_removed || {
+      queue_state_guard_leave || true
+      fail 'Cannot record completed current_batch removal'
+    }
+    cleanup_phase=batch_pointer_removed
+    queue_test_pause after_completed_current_batch_removal
+  fi
+  if [[ "$cleanup_phase" == batch_pointer_removed ]]; then
+    queue_test_pause before_completed_current_removal
+    if [[ -e "$pointer" ]]; then
+      queue_state_remove_pointer_if_matches "$pointer" "$run_id" "$cleanup_token" "$cleanup_generation" || {
+        queue_state_guard_leave || true
+        fail 'Current pointer changed during completed-run finalization'
+      }
+    fi
+    queue_state_transition_completion_cleanup "$marker" batch_pointer_removed current_removed || {
+      queue_state_guard_leave || true
+      fail 'Cannot record completed current removal'
+    }
+    cleanup_phase=current_removed
+    queue_test_pause after_completed_current_removal
+  fi
+  if [[ "$cleanup_phase" == current_removed ]]; then
+    queue_test_pause before_completion_cleanup_terminal
+    queue_state_transition_completion_cleanup "$marker" current_removed completed || {
+      queue_state_guard_leave || true
+      fail 'Cannot mark completed-run cleanup terminal'
+    }
+    cleanup_phase=completed
+  fi
+  if [[ "$cleanup_phase" == completed ]]; then
+    if [[ -e "$terminal" ]]; then
+      if ! queue_state_parse_file "$terminal" completion_cleanup terminal_fields || \
+         ! queue_state_validate_file "$terminal" completion_cleanup || \
+         [[ "${terminal_fields[run_id]}" != "$run_id" || "${terminal_fields[owner_token]}" != "$cleanup_token" || \
+            "${terminal_fields[lease_generation]}" != "$cleanup_generation" || "${terminal_fields[lease_required]}" != "$cleanup_lease_required" || \
+            "${terminal_fields[batch_pointer]}" != "$cleanup_batch" || "${terminal_fields[phase]}" != completed ]]; then
+        queue_state_guard_leave || true
+        fail "Completed-run terminal cleanup identity mismatch: ${terminal}"
+      fi
+    else
+      queue_state_write_completion_cleanup "$terminal" "$run_id" "$cleanup_token" "$cleanup_generation" \
+        "$cleanup_lease_required" "$cleanup_batch" completed || {
+        queue_state_guard_leave || true
+        fail 'Cannot publish completed-run terminal cleanup state'
+      }
+    fi
+    queue_state_require_singleton_path "$marker" required || {
+      queue_state_guard_leave || true
+      fail "Completion cleanup marker disappeared before terminal removal: ${marker}"
+    }
+    rm -- "$marker" || {
+      queue_state_guard_leave || true
+      fail 'Cannot remove terminal completion cleanup marker'
+    }
+  fi
+  queue_state_guard_leave || fail 'Cannot release serialization guard after completed-run finalization'
+  run_completed=1
+  trap - EXIT INT TERM
+  log_info "Queue run ${run_id} is already completed; control plane finalized without rerunning work"
+}
+
 main() {
   local issue_count
   local planned_batch_count
@@ -1431,6 +1720,7 @@ main() {
   local end_index
 
   local arg resume_option_count=0 allowed_resume_args=0 current_pointer current_state pointed_run
+  local -A resume_state_fields=()
   for arg in "$@"; do [[ "$arg" == --resume ]] && resume_option_count=$((resume_option_count + 1)); done
   if [[ "$resume_option_count" -gt 0 ]]; then
     for arg in "$@"; do case "$arg" in --resume|--take-over-lease|current|[A-Za-z0-9._-]*) allowed_resume_args=$((allowed_resume_args + 1));; *) fail '--resume rejects queue-shaping options and Issue arguments';; esac; done
@@ -1442,25 +1732,21 @@ main() {
 
   issue_count="${#issue_numbers[@]}"
   if [[ "$resume_requested" -eq 0 ]]; then
-  planned_batch_count="$(batch_count_for_queue "$issue_count")"
-  if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
-    fail 'Multiple batches require --auto-merge so each next batch starts from the merged base branch.'
-  fi
+    planned_batch_count="$(batch_count_for_queue "$issue_count")"
+    if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
+      fail 'Multiple batches require --auto-merge so each next batch starts from the merged base branch.'
+    fi
   fi
 
   require_command awk
   require_command flock
-  require_command gh
   require_command git
   require_command mktemp
-  require_command od
-  require_command ps
   require_command sed
   require_command stat
 
   enter_repo_root
   initialize_queue_serialization_guard
-  require_queue_prompt_templates
   lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; queue_state_set_owner_assertion ''
   if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
     fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
@@ -1494,16 +1780,29 @@ main() {
     fi
     run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
     [[ -d "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
-    current_state="$(queue_state_read_field "${run_state_dir}/run.state" run state)"
+    if ! queue_state_parse_file "${run_state_dir}/run.state" run resume_state_fields || \
+       ! queue_state_validate_file "${run_state_dir}/run.state" run; then
+      fail "Invalid queue run state: ${run_state_dir}/run.state"
+    fi
+    [[ "${resume_state_fields[run_id]}" == "$run_id" ]] || fail "Run state identity mismatch for ${run_id}"
+    current_state="${resume_state_fields[state]}"
     if [[ "$current_state" == completed ]]; then
       finalize_completed_queue_run
       return 0
     fi
+    require_command gh
+    require_command od
+    require_command ps
+    require_queue_prompt_templates
     acquire_queue_lease
     queue_test_pause after_acquire
     load_queue_run_state
     issue_count="${#issue_numbers[@]}"
   else
+    require_command gh
+    require_command od
+    require_command ps
+    require_queue_prompt_templates
     ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
     current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
     queue_state_require_singleton_path "$current_pointer" optional || fail "Invalid current queue pointer path: ${current_pointer}"
@@ -1539,13 +1838,7 @@ main() {
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running completed
   queue_test_pause after_run_completed_before_current_cleanup
   queue_failpoint after_run_completed_before_current_cleanup
-  assert_queue_lease_owned || fail 'Queue lease lost before completion pointer cleanup'
-  queue_state_remove_pointer_if_matches "${CODEX_FLOW_QUEUE_DIR}/current" "$run_id" "$lease_owner_token" "$lease_generation"
-  queue_state_require_singleton_path "${CODEX_FLOW_QUEUE_DIR}/current_batch" optional || fail 'Invalid current_batch singleton path during completion'
-  rm -f -- "${CODEX_FLOW_QUEUE_DIR}/current_batch"
-  run_completed=1
-  release_queue_lease
-  trap - EXIT INT TERM
+  finalize_completed_queue_run
 }
 
 main "$@"
