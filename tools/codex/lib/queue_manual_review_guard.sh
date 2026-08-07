@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-if [[ -n "${ISSUE_FORGE_QUEUE_MANUAL_REVIEW_GUARD_LOADED:-}" ]]; then
+if declare -F issue_forge_queue_manual_review_guard_loaded >/dev/null 2>&1; then
   return 0
 fi
 
@@ -166,4 +166,4 @@ queue_install_manual_review_guard() {
 }
 
 queue_install_manual_review_guard || return 1
-readonly ISSUE_FORGE_QUEUE_MANUAL_REVIEW_GUARD_LOADED=1
+issue_forge_queue_manual_review_guard_loaded() { :; }
