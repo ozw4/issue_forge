@@ -5,6 +5,14 @@ queue_publish_binding_error() {
   return 1
 }
 
+queue_publish_validate_state_file() {
+  if declare -F issue_forge_queue_state_validate_file_original >/dev/null 2>&1; then
+    issue_forge_queue_state_validate_file_original "$@"
+  else
+    queue_state_validate_file "$@"
+  fi
+}
+
 queue_validate_publish_state_binding() {
   local publish_file="$1"
   local manifest_file="$2"
@@ -43,19 +51,19 @@ queue_validate_publish_state_binding() {
   queue_state_parse_file "$manifest_file" manifest manifest_fields \
     || queue_publish_binding_error "invalid run manifest ${manifest_file}" \
     || return 1
-  queue_state_validate_file "$manifest_file" manifest \
+  queue_publish_validate_state_file "$manifest_file" manifest \
     || queue_publish_binding_error "invalid run manifest ${manifest_file}" \
     || return 1
   queue_state_parse_file "$batch_file" batch batch_fields \
     || queue_publish_binding_error "invalid batch state ${batch_file}" \
     || return 1
-  queue_state_validate_file "$batch_file" batch \
+  queue_publish_validate_state_file "$batch_file" batch \
     || queue_publish_binding_error "invalid batch state ${batch_file}" \
     || return 1
   queue_state_parse_file "$publish_file" publish publish_fields \
     || queue_publish_binding_error "invalid publish state ${publish_file}" \
     || return 1
-  queue_state_validate_file "$publish_file" publish \
+  queue_publish_validate_state_file "$publish_file" publish \
     || queue_publish_binding_error "invalid publish state ${publish_file}" \
     || return 1
 
@@ -120,6 +128,64 @@ queue_validate_publish_state_binding_from_scope() {
     "$expected_batch" \
     "$expected_branch"
 }
+
+queue_validate_publish_state_for_batch_file() {
+  local batch_file="$1" publish_file
+  local -A batch_fields=()
+
+  [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 && -n "${run_state_dir:-}" ]] || return 0
+  publish_file="$(dirname "$batch_file")/publish.state"
+  [[ -e "$publish_file" ]] || return 0
+  queue_state_parse_file "$batch_file" batch batch_fields \
+    || queue_publish_binding_error "invalid batch state ${batch_file}" \
+    || return 1
+  queue_validate_publish_state_binding \
+    "$publish_file" \
+    "${run_state_dir}/manifest.state" \
+    "$batch_file" \
+    "${batch_fields[run_id]}" \
+    "${batch_fields[batch_id]}" \
+    "${batch_fields[branch]}"
+}
+
+queue_validate_publish_state_file_path() {
+  local publish_file="$1" batch_file
+  local -A batch_fields=()
+
+  [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 && -n "${run_state_dir:-}" ]] || return 0
+  batch_file="$(dirname "$publish_file")/batch.state"
+  queue_state_parse_file "$batch_file" batch batch_fields \
+    || queue_publish_binding_error "invalid batch state ${batch_file}" \
+    || return 1
+  queue_validate_publish_state_binding \
+    "$publish_file" \
+    "${run_state_dir}/manifest.state" \
+    "$batch_file" \
+    "${batch_fields[run_id]}" \
+    "${batch_fields[batch_id]}" \
+    "${batch_fields[branch]}"
+}
+
+queue_install_publish_state_validation() {
+  local definition
+
+  declare -F queue_state_validate_file >/dev/null 2>&1 || return 0
+  declare -F issue_forge_queue_state_validate_file_original >/dev/null 2>&1 && return 0
+  definition="$(declare -f queue_state_validate_file)" || return 1
+  definition="${definition/#queue_state_validate_file /issue_forge_queue_state_validate_file_original }"
+  eval "$definition"
+
+  queue_state_validate_file() {
+    local file="$1" schema="$2"
+    issue_forge_queue_state_validate_file_original "$@" || return 1
+    case "$schema" in
+      batch) queue_validate_publish_state_for_batch_file "$file" ;;
+      publish) queue_validate_publish_state_file_path "$file" ;;
+    esac
+  }
+}
+
+queue_install_publish_state_validation || return 1
 
 # Intercept only reads of an already-recorded queue PR. PR creation performs its
 # own `gh pr view` before publish.state exists and therefore bypasses this hook.
