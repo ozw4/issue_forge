@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# shellcheck source=tools/codex/lib/remote_branch_query.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/remote_branch_query.sh"
+
 require_issue_bootstrap_commands() {
   require_command gh
   require_command git
@@ -41,14 +44,16 @@ issue_branch_name_for_number() {
 
 ensure_issue_branch_available() {
   local branch_name="$1"
+  local remote_head=''
 
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
     printf 'Local branch already exists: %s\n' "$branch_name" >&2
     exit 1
   fi
 
-  if git ls-remote --exit-code --heads origin "$branch_name" >/dev/null 2>&1; then
-    printf 'Remote branch already exists: %s\n' "$branch_name" >&2
+  query_remote_branch_head origin "$branch_name" remote_head 'branch availability check' || exit 1
+  if [[ -n "$remote_head" ]]; then
+    printf 'Remote branch already exists: %s (%s)\n' "$branch_name" "$remote_head" >&2
     exit 1
   fi
 }
