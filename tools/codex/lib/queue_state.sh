@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION='2'
+readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION='3'
 
 queue_state_error() { printf '[queue-state] %s\n' "$1" >&2; return 1; }
 queue_state_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
@@ -193,10 +193,13 @@ queue_state_require_timestamp() {
 queue_state_require_issues() {
   local value="$1" issue reconstructed
   local -a values
+  local -A seen=()
   [[ -n "$value" ]] || { queue_state_error 'Malformed ordered Issue list: empty'; return 1; }
   IFS=',' read -r -a values <<< "$value"
   for issue in "${values[@]}"; do
     [[ "$issue" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed Issue number in ordered list: ${issue}"; return 1; }
+    [[ ! -v "seen[$issue]" ]] || { queue_state_error "Duplicate Issue number in ordered list: ${issue}"; return 1; }
+    seen["$issue"]=1
   done
   reconstructed="$(IFS=,; printf '%s' "${values[*]}")"
   [[ "$reconstructed" == "$value" ]] || queue_state_error "Malformed ordered Issue list: ${value}"
@@ -246,10 +249,10 @@ queue_state_parse_file() {
   local -A allowed=()
   local -a required=()
   case "$schema" in
-    manifest) required=(schema_version run_id created_at issues review_every draft_pr auto_merge light_issue_review batch_review_reasoning batch_fix_reasoning batch_check_fix_reasoning base_branch base_ref repository_identity) ;;
+    manifest) required=(schema_version run_id created_at issues review_every draft_pr auto_merge light_issue_review batch_review_reasoning batch_fix_reasoning batch_check_fix_reasoning batch_branch_prefix base_branch base_ref repository_identity) ;;
     run) required=(schema_version run_id state updated_at) ;;
-    batch) required=(schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at) ;;
-    issue) required=(schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at) ;;
+    batch) required=(schema_version run_id batch_id first_issue last_issue branch base_commit accepted_head artifact_path state updated_at) ;;
+    issue) required=(schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at) ;;
     lease) required=(schema_version run_id owner_token lease_generation owner_pid owner_host process_start acquired_at displaced_run_id displaced_owner_token displaced_generation) ;;
     pointer) required=(schema_version run_id owner_token lease_generation updated_at) ;;
     checkpoint) required=(schema_version run_id entity phase status updated_at) ;;
@@ -306,6 +309,7 @@ queue_state_validate_file() {
       queue_state_require_token 'batch review reasoning' "${fields[batch_review_reasoning]}" || return 1
       queue_state_require_token 'batch fix reasoning' "${fields[batch_fix_reasoning]}" || return 1
       queue_state_require_token 'batch check fix reasoning' "${fields[batch_check_fix_reasoning]}" || return 1
+      queue_state_require_path 'batch branch prefix' "${fields[batch_branch_prefix]}" || return 1
       queue_state_require_path 'base branch' "${fields[base_branch]}" || return 1
       queue_state_require_path 'base ref' "${fields[base_ref]}" || return 1
       [[ -n "${fields[repository_identity]}" && "${fields[repository_identity]}" != *$'\t'* ]] || { queue_state_error 'Malformed repository identity'; return 1; }
@@ -319,18 +323,47 @@ queue_state_validate_file() {
       [[ "${fields[first_issue]}" =~ ^[0-9]+$ && "${fields[last_issue]}" =~ ^[0-9]+$ ]] || { queue_state_error 'Malformed batch Issue range'; return 1; }
       queue_state_require_path 'batch branch' "${fields[branch]}" || return 1
       [[ "${fields[base_commit]}" == none || "${fields[base_commit]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed batch commit SHA: ${fields[base_commit]}"; return 1; }
+      [[ "${fields[accepted_head]}" == none || "${fields[accepted_head]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed accepted batch head SHA: ${fields[accepted_head]}"; return 1; }
       queue_state_require_path 'batch artifact' "${fields[artifact_path]}" || return 1
-      queue_state_enum_contains "${fields[state]}" planned branch_ready issues_running checks_running review_running accepted publishing completed failed \
+      queue_state_enum_contains "${fields[state]}" planned base_resolved branch_ready issues_running checks_running review_running accepted publishing completed \
         || { queue_state_error "Malformed batch state: ${fields[state]}"; return 1; }
+      case "${fields[state]}" in
+        planned) [[ "${fields[base_commit]}" == none && "${fields[accepted_head]}" == none ]] ;;
+        base_resolved|branch_ready|issues_running|checks_running|review_running)
+          [[ "${fields[base_commit]}" != none && "${fields[accepted_head]}" == none ]]
+          ;;
+        accepted|publishing|completed) [[ "${fields[base_commit]}" != none && "${fields[accepted_head]}" != none ]] ;;
+      esac || { queue_state_error "Incoherent batch fields for state ${fields[state]}"; return 1; }
       ;;
     issue)
       queue_state_require_token 'batch ID' "${fields[batch_id]}" || return 1
       [[ "${fields[issue_number]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed Issue number: ${fields[issue_number]}"; return 1; }
+      [[ "${fields[context_path]}" == none ]] || queue_state_require_path 'Issue context' "${fields[context_path]}" || return 1
+      [[ "${fields[context_sha256]}" == none || "${fields[context_sha256]}" =~ ^[0-9a-f]{64}$ ]] || { queue_state_error "Malformed Issue context hash: ${fields[context_sha256]}"; return 1; }
       [[ "${fields[base_commit]}" == none || "${fields[base_commit]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed Issue base SHA: ${fields[base_commit]}"; return 1; }
       [[ "${fields[commit_sha]}" == none || "${fields[commit_sha]}" =~ ^[0-9a-fA-F]{40,64}$ ]] || { queue_state_error "Malformed Issue commit SHA: ${fields[commit_sha]}"; return 1; }
       [[ "${fields[artifact_path]}" == none ]] || queue_state_require_path 'Issue artifact' "${fields[artifact_path]}" || return 1
-      queue_state_enum_contains "${fields[state]}" planned leased running committed artifacts_archived acknowledged failed \
+      [[ "${fields[archive_manifest_sha256]}" == none || "${fields[archive_manifest_sha256]}" =~ ^[0-9a-f]{64}$ ]] || { queue_state_error "Malformed archive manifest hash: ${fields[archive_manifest_sha256]}"; return 1; }
+      queue_state_enum_contains "${fields[state]}" planned leased running committed artifacts_archived acknowledged \
         || { queue_state_error "Malformed Issue state: ${fields[state]}"; return 1; }
+      case "${fields[state]}" in
+        planned)
+          [[ "${fields[context_path]}" == none && "${fields[context_sha256]}" == none && "${fields[base_commit]}" == none && "${fields[commit_sha]}" == none && "${fields[artifact_path]}" == none && "${fields[archive_manifest_sha256]}" == none ]]
+          ;;
+        leased)
+          [[ "${fields[commit_sha]}" == none && "${fields[artifact_path]}" == none && "${fields[archive_manifest_sha256]}" == none ]] &&
+            [[ "${fields[context_path]}" != none ]]
+          ;;
+        running)
+          [[ "${fields[context_path]}" != none && "${fields[context_sha256]}" != none && "${fields[base_commit]}" != none && "${fields[commit_sha]}" == none && "${fields[artifact_path]}" == none && "${fields[archive_manifest_sha256]}" == none ]]
+          ;;
+        committed)
+          [[ "${fields[context_path]}" != none && "${fields[context_sha256]}" != none && "${fields[base_commit]}" != none && "${fields[commit_sha]}" != none && "${fields[artifact_path]}" == none && "${fields[archive_manifest_sha256]}" == none ]]
+          ;;
+        artifacts_archived|acknowledged)
+          [[ "${fields[context_path]}" != none && "${fields[context_sha256]}" != none && "${fields[base_commit]}" != none && "${fields[commit_sha]}" != none && "${fields[artifact_path]}" != none && "${fields[archive_manifest_sha256]}" != none ]]
+          ;;
+      esac || { queue_state_error "Incoherent Issue fields for state ${fields[state]}"; return 1; }
       ;;
     lease)
       queue_state_require_token 'lease owner token' "${fields[owner_token]}" || return 1
@@ -476,7 +509,7 @@ queue_state_generate_run_id() {
 }
 
 queue_state_create_manifest() {
-  local dir="$1" id="$2" issue_csv="$3" every="$4" draft="$5" merge="$6" light_review="$7" review="$8" fix="$9" check_fix="${10}" base_branch="${11}" base_ref="${12}" repository_identity="${13}" status
+  local dir="$1" id="$2" issue_csv="$3" every="$4" draft="$5" merge="$6" light_review="$7" review="$8" fix="$9" check_fix="${10}" branch_prefix="${11}" base_branch="${12}" base_ref="${13}" repository_identity="${14}" status
   queue_state_begin_serialized_operation || return 1
   if [[ -e "${dir}/manifest.state" ]]; then
     queue_state_error "Immutable run manifest already exists: ${dir}/manifest.state"
@@ -486,7 +519,7 @@ queue_state_create_manifest() {
   if queue_state_write_content "${dir}/manifest.state" manifest \
     "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	${id}" "created_at	$(queue_state_now)" \
     "issues	${issue_csv}" "review_every	${every}" "draft_pr	${draft}" "auto_merge	${merge}" "light_issue_review	${light_review}" \
-    "batch_review_reasoning	${review}" "batch_fix_reasoning	${fix}" "batch_check_fix_reasoning	${check_fix}" \
+    "batch_review_reasoning	${review}" "batch_fix_reasoning	${fix}" "batch_check_fix_reasoning	${check_fix}" "batch_branch_prefix	${branch_prefix}" \
     "base_branch	${base_branch}" "base_ref	${base_ref}" "repository_identity	${repository_identity}"; then status=0; else status=$?; fi
   queue_state_finish_serialized_operation "$status"
 }
@@ -497,12 +530,13 @@ queue_state_create_run() {
 
 queue_state_create_batch() {
   queue_state_write_content "$1" batch "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" "batch_id	$3" \
-    "first_issue	$4" "last_issue	$5" "branch	$6" "base_commit	none" "artifact_path	$7" "state	planned" "updated_at	$(queue_state_now)"
+    "first_issue	$4" "last_issue	$5" "branch	$6" "base_commit	none" "accepted_head	none" "artifact_path	$7" "state	planned" "updated_at	$(queue_state_now)"
 }
 
 queue_state_create_issue() {
   queue_state_write_content "$1" issue "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" "batch_id	$3" \
-    "issue_number	$4" "base_commit	none" "commit_sha	none" "artifact_path	none" "state	planned" "updated_at	$(queue_state_now)"
+    "issue_number	$4" "context_path	none" "context_sha256	none" "base_commit	none" "commit_sha	none" \
+    "artifact_path	none" "archive_manifest_sha256	none" "state	planned" "updated_at	$(queue_state_now)"
 }
 
 queue_state_read_field() {
@@ -533,9 +567,24 @@ queue_state_transition() {
     queue_state_finish_serialized_operation 1; return 1
   fi
   case "$schema" in
-    run) queue_state_enum_contains "$requested" planned running interrupted failed manual_review_required completed ;;
-    batch) queue_state_enum_contains "$requested" planned branch_ready issues_running checks_running review_running accepted publishing completed failed ;;
-    issue) queue_state_enum_contains "$requested" planned leased running committed artifacts_archived acknowledged failed ;;
+    run)
+      case "${expected}:${requested}" in
+        planned:running|running:interrupted|running:failed|running:manual_review_required|running:completed|interrupted:running|failed:running|manual_review_required:running|interrupted:manual_review_required|failed:manual_review_required) true ;;
+        *) false ;;
+      esac
+      ;;
+    batch)
+      case "${expected}:${requested}" in
+        base_resolved:branch_ready|branch_ready:issues_running|issues_running:checks_running|checks_running:review_running|accepted:publishing|publishing:completed) true ;;
+        *) false ;;
+      esac
+      ;;
+    issue)
+      case "${expected}:${requested}" in
+        leased:running) true ;;
+        *) false ;;
+      esac
+      ;;
     *) queue_state_error "Unsupported transition schema: ${schema}"; queue_state_finish_serialized_operation 1; return 1 ;;
   esac || {
     queue_state_error "Cannot transition ${entity}: expected state '${expected}', actual state '${fields[state]}', requested target state '${requested}' is invalid"
@@ -545,8 +594,8 @@ queue_state_transition() {
   fields[state]="$requested"; fields[updated_at]="$(queue_state_now)"; staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
   case "$schema" in
     run) for key in schema_version run_id state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
-    batch) for key in schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
-    issue) for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
+    batch) for key in schema_version run_id batch_id first_issue last_issue branch base_commit accepted_head artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
+    issue) for key in schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging" ;;
     *) rm -f "$staging"; queue_state_error "Unsupported transition schema: ${schema}"; queue_state_finish_serialized_operation 1; return 1 ;;
   esac
   if queue_state_publish_file "$target" "$schema" "$staging"; then status=0; else status=$?; fi
@@ -555,14 +604,18 @@ queue_state_transition() {
 }
 
 queue_state_update_issue() {
-  local target="$1" entity="$2" expected="$3" requested="$4" commit_sha="$5" artifact_path="$6" staging status key
+  local target="$1" entity="$2" expected="$3" requested="$4" commit_sha="$5" artifact_path="$6" archive_hash="${7:-none}" staging status key
   local -A fields=()
   queue_state_begin_serialized_operation || return 1
   if ! queue_state_parse_file "$target" issue fields || ! queue_state_validate_file "$target" issue; then queue_state_finish_serialized_operation 1; return 1; fi
   [[ "${fields[state]}" == "$expected" ]] || { queue_state_error "Cannot update ${entity}: expected state '${expected}', actual state '${fields[state]}'"; queue_state_finish_serialized_operation 1; return 1; }
-  fields[state]="$requested"; fields[commit_sha]="$commit_sha"; fields[artifact_path]="$artifact_path"; fields[updated_at]="$(queue_state_now)"
+  case "${expected}:${requested}" in
+    running:committed|committed:artifacts_archived|artifacts_archived:acknowledged) ;;
+    *) queue_state_error "Invalid Issue update transition: ${expected} -> ${requested}"; queue_state_finish_serialized_operation 1; return 1 ;;
+  esac
+  fields[state]="$requested"; fields[commit_sha]="$commit_sha"; fields[artifact_path]="$artifact_path"; fields[archive_manifest_sha256]="$archive_hash"; fields[updated_at]="$(queue_state_now)"
   staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
-  for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  for key in schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
   if queue_state_publish_file "$target" issue "$staging"; then status=0; else status=$?; fi
   rm -f "$staging" || status=1
   queue_state_finish_serialized_operation "$status"
@@ -575,7 +628,37 @@ queue_state_set_issue_base() {
   if ! queue_state_parse_file "$target" issue fields || ! queue_state_validate_file "$target" issue; then queue_state_finish_serialized_operation 1; return 1; fi
   [[ "${fields[state]}" == "$expected" && "${fields[base_commit]}" == none ]] || { queue_state_error 'Issue base can only be recorded once in the expected state'; queue_state_finish_serialized_operation 1; return 1; }
   fields[base_commit]="$base"; fields[updated_at]="$(queue_state_now)"; staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
-  for key in schema_version run_id batch_id issue_number base_commit commit_sha artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  for key in schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  if queue_state_publish_file "$target" issue "$staging"; then status=0; else status=$?; fi
+  rm -f "$staging" || status=1
+  queue_state_finish_serialized_operation "$status"
+}
+
+queue_state_set_issue_context() {
+  local target="$1" context_path="$2" context_hash="$3" staging status key
+  local -A fields=()
+  queue_state_begin_serialized_operation || return 1
+  if ! queue_state_parse_file "$target" issue fields || ! queue_state_validate_file "$target" issue; then queue_state_finish_serialized_operation 1; return 1; fi
+  [[ "${fields[state]}" == leased && "${fields[context_path]}" != none && "${fields[context_sha256]}" == none && "${fields[context_path]}" == "$context_path" ]] || {
+    queue_state_error 'Issue context identity can only be recorded once while leased'; queue_state_finish_serialized_operation 1; return 1;
+  }
+  fields[context_sha256]="$context_hash"; fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
+  for key in schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  if queue_state_publish_file "$target" issue "$staging"; then status=0; else status=$?; fi
+  rm -f "$staging" || status=1
+  queue_state_finish_serialized_operation "$status"
+}
+
+queue_state_lease_issue() {
+  local target="$1" entity="$2" context_path="$3" staging status key
+  local -A fields=()
+  queue_state_begin_serialized_operation || return 1
+  if ! queue_state_parse_file "$target" issue fields || ! queue_state_validate_file "$target" issue; then queue_state_finish_serialized_operation 1; return 1; fi
+  [[ "${fields[state]}" == planned ]] || { queue_state_error "Cannot lease ${entity} from state ${fields[state]}"; queue_state_finish_serialized_operation 1; return 1; }
+  fields[state]=leased; fields[context_path]="$context_path"; fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
+  for key in schema_version run_id batch_id issue_number context_path context_sha256 base_commit commit_sha artifact_path archive_manifest_sha256 state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
   if queue_state_publish_file "$target" issue "$staging"; then status=0; else status=$?; fi
   rm -f "$staging" || status=1
   queue_state_finish_serialized_operation "$status"
@@ -587,9 +670,26 @@ queue_state_update_batch() {
   queue_state_begin_serialized_operation || return 1
   if ! queue_state_parse_file "$target" batch fields || ! queue_state_validate_file "$target" batch; then queue_state_finish_serialized_operation 1; return 1; fi
   [[ "${fields[state]}" == "$expected" ]] || { queue_state_error "Cannot update ${entity}: expected state '${expected}', actual state '${fields[state]}'"; queue_state_finish_serialized_operation 1; return 1; }
+  [[ "${expected}:${requested}" == planned:base_resolved ]] || { queue_state_error "Invalid batch base transition: ${expected} -> ${requested}"; queue_state_finish_serialized_operation 1; return 1; }
   fields[state]="$requested"; fields[base_commit]="$base_commit"; fields[updated_at]="$(queue_state_now)"
   staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
-  for key in schema_version run_id batch_id first_issue last_issue branch base_commit artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  for key in schema_version run_id batch_id first_issue last_issue branch base_commit accepted_head artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
+  if queue_state_publish_file "$target" batch "$staging"; then status=0; else status=$?; fi
+  rm -f "$staging" || status=1
+  queue_state_finish_serialized_operation "$status"
+}
+
+queue_state_mark_batch_accepted() {
+  local target="$1" entity="$2" accepted_head="$3" staging status key
+  local -A fields=()
+  queue_state_begin_serialized_operation || return 1
+  if ! queue_state_parse_file "$target" batch fields || ! queue_state_validate_file "$target" batch; then queue_state_finish_serialized_operation 1; return 1; fi
+  [[ "${fields[state]}" == review_running && "${fields[accepted_head]}" == none ]] || {
+    queue_state_error "Accepted head can only be recorded at the review boundary for ${entity}"; queue_state_finish_serialized_operation 1; return 1;
+  }
+  fields[state]=accepted; fields[accepted_head]="$accepted_head"; fields[updated_at]="$(queue_state_now)"
+  staging="$(mktemp)" || { queue_state_finish_serialized_operation 1; return 1; }
+  for key in schema_version run_id batch_id first_issue last_issue branch base_commit accepted_head artifact_path state updated_at; do printf '%s\t%s\n' "$key" "${fields[$key]}"; done > "$staging"
   if queue_state_publish_file "$target" batch "$staging"; then status=0; else status=$?; fi
   rm -f "$staging" || status=1
   queue_state_finish_serialized_operation "$status"

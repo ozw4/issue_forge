@@ -690,13 +690,13 @@ queue_side_effect_snapshot() {
 
 write_completion_cleanup_fixture() {
   local path="$1" run="$2" token="$3" generation="$4" lease_required="$5" batch="$6" phase="$7"
-  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nlease_required\t%s\nbatch_pointer\t%s\nphase\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+  printf 'schema_version\t3\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nlease_required\t%s\nbatch_pointer\t%s\nphase\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
     "$run" "$token" "$generation" "$lease_required" "$batch" "$phase" > "$path"
 }
 
 write_queue_pointer_fixture() {
   local path="$1" run="$2" token="$3" generation="$4"
-  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+  printf 'schema_version\t3\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
     "$run" "$token" "$generation" > "$path"
 }
 
@@ -856,7 +856,7 @@ if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
       issue_title='${QUEUE_ISSUE_TITLE}'
       issue_url='${QUEUE_ISSUE_URL}'
       ;;
-    42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63|64|65|66|67|68|69|70|71|72|73|74|75|76|77|78|79|80)
+    42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63|64|65|66|67|68|69|70|71|72|73|74|75|76|77|78|79|80|81|82|83|84)
       issue_title="Control Plane Issue \${issue_number}"
       issue_url="https://example.test/issues/\${issue_number}"
       ;;
@@ -2444,9 +2444,9 @@ CODEX_FLOW_QUEUE_RUNS_DIR="${QUEUE_STATE_STORE}/runs"; ISSUE_FORGE_INTERNAL_QUEU
 one="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"; two="$(queue_state_generate_run_id "${CODEX_FLOW_QUEUE_RUNS_DIR}")"
 [[ "${one}" != "${two}" && "${one}" =~ ^[A-Za-z0-9._-]+$ ]]
 dir_one="${CODEX_FLOW_QUEUE_RUNS_DIR}/${one}"; dir_two="${CODEX_FLOW_QUEUE_RUNS_DIR}/${two}"
-queue_state_create_manifest "$dir_one" "$one" 41,40 2 0 0 1 review fix check_fix main origin/main test/repository
+queue_state_create_manifest "$dir_one" "$one" 41,40 2 0 0 1 review fix check_fix batch/ main origin/main test/repository
 queue_state_create_run "${dir_one}/run.state" "$one" planned
-queue_state_create_manifest "$dir_two" "$two" 41,40 2 0 0 1 review fix check_fix main origin/main test/repository
+queue_state_create_manifest "$dir_two" "$two" 41,40 2 0 0 1 review fix check_fix batch/ main origin/main test/repository
 queue_state_create_run "${dir_two}/run.state" "$two" planned
 [[ "$(queue_state_read_field "${dir_one}/manifest.state" manifest issues)" == 41,40 && "$dir_one" != "$dir_two" ]]
 https_identity="$(queue_state_canonical_repository_identity https://user:secret@github.example/owner/repository.git)"
@@ -2467,8 +2467,14 @@ if queue_state_transition "${dir_one}/run.state" run "run ${one}" planned comple
 [[ "$(cksum < "${dir_one}/run.state")" == "$before" ]]
 queue_state_create_batch "${dir_one}/batch.state" "$one" batch-41-40 41 40 batch/41-40 .work/queue/batches/batch-41-40
 queue_state_create_issue "${dir_one}/issue.state" "$one" batch-41-40 41
+issue_before="$(cksum < "${dir_one}/issue.state")"
+if queue_state_update_issue "${dir_one}/issue.state" Issue-41 planned acknowledged 0123456789012345678901234567890123456789 .work/archive 0123456789012345678901234567890123456789012345678901234567890123; then exit 12; fi
+[[ "$(cksum < "${dir_one}/issue.state")" == "$issue_before" ]]
+if queue_state_transition "${dir_one}/batch.state" batch batch-41-40 planned completed; then exit 13; fi
+sed "s/^state$(printf "\\t")planned$/state$(printf "\\t")acknowledged/" "${dir_one}/issue.state" > "${QUEUE_STATE_STORE}/incoherent-issue.state"
+if queue_state_validate_file "${QUEUE_STATE_STORE}/incoherent-issue.state" issue; then exit 14; fi
 queue_state_publish_pointer "${QUEUE_STATE_STORE}/current" "$one" owner-token 1
-printf "schema_version\t2\nrun_id\t%s\nstate\tcompleted\nupdated_at\t2026-08-06T00:00:00Z\n" "$one" > "${QUEUE_STATE_STORE}/candidate"
+printf "schema_version\t3\nrun_id\t%s\nstate\tcompleted\nupdated_at\t2026-08-06T00:00:00Z\n" "$one" > "${QUEUE_STATE_STORE}/candidate"
 deny_owner() { return 1; }
 invoke_denied() {
   local context="$1"; shift
@@ -2900,18 +2906,19 @@ run_issue_queue_strict_issue_review_smoke() {
   run_id="$(sed -n 's/^\[queue\] run ID: //p' "${state_dir}/queue-after-manifest.log" | head -n 1)"
   assert_path_not_exists "${repo_dir}/.work/queue/current"
   assert_path_not_exists "${repo_dir}/.work/queue/lease.lock"
-  mkdir -p "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues"
-  printf 'schema_version\t2\nrun_id\t%s\nbatch_id\tbatch-%s-%s\nfirst_issue\t%s\nlast_issue\t%s\nbranch\tbatch/%s-%s\nbase_commit\tnone\nartifact_path\t.work/queue/batches/batch-%s-%s\nstate\tplanned\nupdated_at\t2026-08-06T00:00:00Z\n' \
-    "$run_id" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" \
-    > "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/batch.state"
-  printf 'schema_version\t2\nrun_id\t%s\nbatch_id\tbatch-%s-%s\nissue_number\t%s\nbase_commit\tnone\ncommit_sha\tnone\nartifact_path\tnone\nstate\tleased\nupdated_at\t2026-08-06T00:00:00Z\n' \
-    "$run_id" "$ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
-    > "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state"
+  cp "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" "${state_dir}/missing-entity.saved"
+  rm "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-partial-reconcile.log" 2>&1; then
-    fail 'partial initialization reconciliation failpoint should stop before Issue work'
+    fail 'resume must reject a missing authoritative Issue entity'
   fi
-  assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tleased'
+  assert_file_contains "${state_dir}/queue-partial-reconcile.log" 'Missing queue singleton state file'
+  cp "${state_dir}/missing-entity.saved" "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_FAILPOINT=after_lease_before_issue_fetch \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/queue-partial-reconcile-restored.log" 2>&1; then
+    fail 'restored graph should stop only at the requested pre-Issue failpoint'
+  fi
+  assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tplanned'
   assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" $'state\tplanned'
   assert_file_contains "${repo_dir}/.work/queue/current" "run_id$(printf '\t')${run_id}"
 
@@ -3157,6 +3164,7 @@ run_queue_completion_cleanup_transaction_smoke() {
   queue_side_effect_snapshot > "${state_dir}/active-b.side-effects"
   if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") \
       > "${state_dir}/completed-a-active-b.log" 2>&1; then
+    cat "${state_dir}/completed-a-active-b.log" >&2
     fail 'already-finalized A should succeed while B owns the active control plane'
   fi
   assert_file_contains "${state_dir}/completed-a-active-b.log" 'control plane is already finalized'
@@ -3184,7 +3192,7 @@ run_queue_completion_cleanup_transaction_smoke() {
 
   cp "${state_dir}/dead-b.active.before" "$active_file"
   mv "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state" "${state_dir}/completed-a-terminal.state"
-  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+  printf 'schema_version\t3\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
     "$run_id" "$owner_token" "$owner_generation" > "${repo_dir}/.work/queue/current"
   queue_tree_snapshot "$(dirname "$active_file")" > "${state_dir}/cross-run-active.before"
   queue_side_effect_snapshot > "${state_dir}/cross-run-active.side-effects.before"
@@ -3203,7 +3211,7 @@ run_queue_completion_cleanup_transaction_smoke() {
   mv "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state" "${state_dir}/completed-a-terminal.state"
   cp -a "$audit" "${repo_dir}/.work/queue/lease.lock"
   record="$(find "${repo_dir}/.work/queue/lease.lock" -maxdepth 1 -type f -name 'owner.*.state')"
-  printf 'schema_version\t2\nrun_id\t%s\nowner_token\tmismatched-token\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+  printf 'schema_version\t3\nrun_id\t%s\nowner_token\tmismatched-token\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
     "$run_id" "$owner_generation" > "${repo_dir}/.work/queue/current"
   queue_tree_snapshot "${repo_dir}/.work/queue" > "${state_dir}/fencing-mismatch.before"
   queue_side_effect_snapshot > "${state_dir}/fencing-mismatch.side-effects.before"
@@ -3730,6 +3738,182 @@ run_queue_guard_path_stability_smoke() {
   assert_file_contains "$log_file" 'state disappeared or became invalid; no resume command can be advertised'
 }
 
+queue_run_to_failpoint() {
+  local issue="$1" failpoint="$2" log_file="$3"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_TEST_MODE=1 CODEX_FLOW_QUEUE_FAILPOINT="$failpoint" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue") > "$log_file" 2>&1; then
+    fail "queue failpoint ${failpoint} unexpectedly succeeded for Issue ${issue}"
+  fi
+  assert_file_contains "$log_file" "Queue failpoint triggered: ${failpoint}"
+  sed -n 's/^\[queue\] run ID: //p' "$log_file" | head -n 1
+}
+
+queue_resume_success() {
+  local run="$1" log_file="$2"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run") > "$log_file" 2>&1; then
+    cat "$log_file" >&2
+    fail "queue run ${run} should resume successfully"
+  fi
+}
+
+queue_resume_failure() {
+  local run="$1" expected="$2" log_file="$3"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run") > "$log_file" 2>&1; then
+    fail "queue run ${run} unexpectedly resumed successfully"
+  fi
+  assert_file_contains "$log_file" "$expected"
+}
+
+run_queue_entity_integrity_smoke() {
+  local issue run run_dir batch state_file base commit archive manifest_hash accepted issues_file second_run second_dir first_archive second_archive
+  local log_file state_backup manifest_backup missing_file grandparent
+  log 'running queue manifest/entity/commit/archive integrity smoke'
+
+  clear_command_logs; reset_flow_counters
+  issue=71; log_file="${state_dir}/queue-branch-created.log"
+  run="$(queue_run_to_failpoint "$issue" after_batch_branch_creation "$log_file")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"
+  state_file="${run_dir}/batches/${batch}/batch.state"; base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"
+  assert_file_contains "$state_file" $'state\tbase_resolved'
+  assert_equals "$base" "$(${REAL_GIT} -C "$repo_dir" rev-parse "refs/heads/batch/${issue}-${issue}")" 'branch-created saved base'
+  queue_resume_success "$run" "${state_dir}/queue-branch-created.resume.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=72; run="$(queue_run_to_failpoint "$issue" after_batch_branch_creation "${state_dir}/queue-wrong-branch-head.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/batch.state"
+  base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"
+  printf 'unexpected branch commit\n' >> "${repo_dir}/smoke-target.txt"
+  "${REAL_GIT}" -C "$repo_dir" add smoke-target.txt
+  "${REAL_GIT}" -C "$repo_dir" commit -m 'unexpected branch drift' >/dev/null
+  queue_resume_failure "$run" 'does not match saved branch-ready boundary SHA' "${state_dir}/queue-wrong-branch-head.resume.log"
+  "${REAL_GIT}" -C "$repo_dir" reset --hard "$base" >/dev/null
+  queue_resume_success "$run" "${state_dir}/queue-wrong-branch-head.repaired.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=73; run="$(queue_run_to_failpoint "$issue" after_issue_flow_commit "${state_dir}/queue-fresh-commit.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/issues/${issue}.state"
+  assert_file_contains "$state_file" $'state\trunning'
+  assert_equals 1 "$(< "${state_dir}/implementation-count.txt")" 'fresh commit-window implementation count before resume'
+  queue_resume_success "$run" "${state_dir}/queue-fresh-commit.resume.log"
+  assert_equals 1 "$(< "${state_dir}/implementation-count.txt")" 'fresh commit-window implementation count after resume'
+  commit="$(awk -F '\t' '$1 == "commit_sha" { print $2 }' "$state_file")"; base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"
+  assert_equals 1 "$(${REAL_GIT} -C "$repo_dir" rev-list --count "${base}..${commit}")" 'fresh commit-window exact commit count'
+
+  clear_command_logs; reset_flow_counters
+  issue=74; run="$(queue_run_to_failpoint "$issue" during_artifact_archive_copy "${state_dir}/queue-archive-copy.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/issues/${issue}.state"
+  commit="$(${REAL_GIT} -C "$repo_dir" rev-parse HEAD)"; archive="${run_dir}/archives/${batch}/issues/${issue}/${commit}"
+  assert_path_not_exists "$archive"
+  assert_file_contains "$state_file" $'state\tcommitted'
+  queue_resume_success "$run" "${state_dir}/queue-archive-copy.resume.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=75; run="$(queue_run_to_failpoint "$issue" after_artifact_archive_publication "${state_dir}/queue-archive-published.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/issues/${issue}.state"
+  commit="$(${REAL_GIT} -C "$repo_dir" rev-parse HEAD)"; archive="${run_dir}/archives/${batch}/issues/${issue}/${commit}"
+  assert_file_exists "${archive}/archive.manifest"; assert_file_contains "$state_file" $'state\tcommitted'
+  manifest_hash="$(sha256sum "${archive}/archive.manifest")"
+  queue_resume_success "$run" "${state_dir}/queue-archive-published.resume.log"
+  assert_equals "$manifest_hash" "$(sha256sum "${archive}/archive.manifest")" 'published archive adopted without replacement'
+
+  clear_command_logs; reset_flow_counters
+  issue=76; run="$(queue_run_to_failpoint "$issue" after_artifact_archive_publication "${state_dir}/queue-archive-tamper.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/issues/${issue}.state"
+  commit="$(${REAL_GIT} -C "$repo_dir" rev-parse HEAD)"; archive="${run_dir}/archives/${batch}/issues/${issue}/${commit}"
+  manifest_backup="${state_dir}/archive-76.manifest"; cp "${archive}/archive.manifest" "$manifest_backup"
+  sed -i "s/^run_id.*/run_id$(printf '\t')cross-run/" "${archive}/archive.manifest"
+  queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-cross-run.log"; cp "$manifest_backup" "${archive}/archive.manifest"
+  sed -i "s/^issue_number.*/issue_number$(printf '\t')999/" "${archive}/archive.manifest"
+  queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-cross-issue.log"; cp "$manifest_backup" "${archive}/archive.manifest"
+  sed -i "s/^commit_sha.*/commit_sha$(printf '\t')0000000000000000000000000000000000000000/" "${archive}/archive.manifest"
+  queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-wrong-commit.log"; cp "$manifest_backup" "${archive}/archive.manifest"
+  missing_file="$(find "${archive}/codex" -type f | head -n 1)"; cp "$missing_file" "${state_dir}/archive-76.missing"; rm "$missing_file"
+  queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-partial.log"
+  cp "${state_dir}/archive-76.missing" "$missing_file"
+  queue_resume_success "$run" "${state_dir}/queue-archive-tamper.repaired.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=77; run="$(queue_run_to_failpoint "$issue" after_batch_acceptance "${state_dir}/queue-accepted-head.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/batch.state"
+  accepted="$(awk -F '\t' '$1 == "accepted_head" { print $2 }' "$state_file")"
+  printf 'accepted head drift\n' >> "${repo_dir}/smoke-target.txt"; "${REAL_GIT}" -C "$repo_dir" add smoke-target.txt
+  "${REAL_GIT}" -C "$repo_dir" commit -m 'unexpected accepted head drift' >/dev/null
+  queue_resume_failure "$run" 'does not match saved accepted head SHA' "${state_dir}/queue-accepted-head.resume.log"
+  "${REAL_GIT}" -C "$repo_dir" reset --hard "$accepted" >/dev/null
+  queue_resume_success "$run" "${state_dir}/queue-accepted-head.repaired.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=78; run="$(queue_run_to_failpoint "$issue" fail_batch_checks "${state_dir}/queue-issues-rebuild.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; issues_file="${repo_dir}/.work/queue/batches/${batch}/issues.txt"
+  printf 'unexpected stale Issue material\n' >> "$issues_file"
+  queue_resume_success "$run" "${state_dir}/queue-issues-rebuild.resume.log"
+  assert_equals 1 "$(grep -Fc "## Issue #${issue}" "$issues_file")" 'rebuilt Issue material membership count'
+  assert_file_not_contains "$issues_file" 'unexpected stale Issue material'
+
+  clear_command_logs; reset_flow_counters
+  issue=79; run="$(queue_run_to_failpoint "$issue" fail_issue_flow "${state_dir}/queue-dirty-inner.log")"
+  printf 'dirty interrupted implementation\n' >> "${repo_dir}/smoke-target.txt"
+  queue_resume_failure "$run" 'Refusing to silently replay dirty interrupted phase issue_flow' "${state_dir}/queue-dirty-inner.resume.log"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; assert_file_contains "${run_dir}/run.state" $'state\tmanual_review_required'
+  assert_file_contains "${run_dir}/manual-review.txt" "run_id$(printf '\t')${run}"
+  assert_file_contains "${run_dir}/manual-review.txt" 'smoke-target.txt'
+  [[ ! -f "${state_dir}/implementation-count.txt" ]] || assert_equals 0 "$(< "${state_dir}/implementation-count.txt")" 'dirty inner phase implementation replay count'
+  "${REAL_GIT}" -C "$repo_dir" restore smoke-target.txt
+  queue_resume_success "$run" "${state_dir}/queue-dirty-inner.repaired.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=80; run="$(queue_run_to_failpoint "$issue" after_minimal_run_publication "${state_dir}/queue-graph-a.log")"
+  issue=81; second_run="$(queue_run_to_failpoint "$issue" after_minimal_run_publication "${state_dir}/queue-graph-b.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; second_dir="${repo_dir}/.work/queue/runs/${second_run}"
+  state_backup="${state_dir}/queue-graph-b.issue"; cp "${second_dir}/batches/batch-81-81/issues/81.state" "$state_backup"
+  cp "${run_dir}/batches/batch-80-80/issues/80.state" "${second_dir}/batches/batch-81-81/issues/81.state"
+  clear_command_logs
+  queue_resume_failure "$second_run" 'Immutable Issue 81 field run_id differs' "${state_dir}/queue-graph-cross-run.log"
+  assert_equals 0 "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")" 'cross-run graph Issue side-effect count'
+  assert_equals 0 "$(awk '$1 == "switch" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")" 'cross-run graph Git mutation count'
+  cp "$state_backup" "${second_dir}/batches/batch-81-81/issues/81.state"
+  queue_resume_success "$second_run" "${state_dir}/queue-graph-b.resume.log"
+  queue_resume_success "$run" "${state_dir}/queue-graph-a.resume.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=82
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue") > "${state_dir}/queue-repeat-one.log" 2>&1; then fail 'first repeated-range run failed'; fi
+  run="$(grep -l $'^issues\t82$' "${repo_dir}"/.work/queue/runs/*/manifest.state | tail -n 1)"; run="$(basename "$(dirname "$run")")"
+  first_archive="$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "${repo_dir}/.work/queue/runs/${run}/batches/batch-82-82/issues/82.state")"
+  "${REAL_GIT}" -C "$repo_dir" switch --detach origin/main >/dev/null; "${REAL_GIT}" -C "$repo_dir" branch -D batch/82-82 >/dev/null
+  "${REAL_GIT}" -C "$repo_dir" push origin --delete batch/82-82 >/dev/null
+  reset_flow_counters
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue") > "${state_dir}/queue-repeat-two.log" 2>&1; then cat "${state_dir}/queue-repeat-two.log" >&2; fail 'second repeated-range run failed'; fi
+  second_run="$(grep -l $'^issues\t82$' "${repo_dir}"/.work/queue/runs/*/manifest.state | tail -n 1)"; second_run="$(basename "$(dirname "$second_run")")"
+  second_archive="$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "${repo_dir}/.work/queue/runs/${second_run}/batches/batch-82-82/issues/82.state")"
+  [[ "$run" != "$second_run" && "$first_archive" != "$second_archive" ]] || fail 'identical Issue ranges shared authoritative archive identity'
+
+  clear_command_logs; reset_flow_counters
+  issue=83; run="$(queue_run_to_failpoint "$issue" after_issue_flow_commit "${state_dir}/queue-nondirect-base.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; state_file="${run_dir}/batches/batch-83-83/issues/83.state"; state_backup="${state_dir}/queue-nondirect-base.issue"; cp "$state_file" "$state_backup"
+  base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"; grandparent="$(${REAL_GIT} -C "$repo_dir" rev-parse "${base}^")"
+  sed -i "s/^base_commit.*/base_commit$(printf '\t')${grandparent}/" "$state_file"
+  queue_resume_failure "$run" 'does not equal saved base' "${state_dir}/queue-nondirect-base.resume.log"
+  cp "$state_backup" "$state_file"
+  queue_resume_success "$run" "${state_dir}/queue-nondirect-base.repaired.log"
+
+  clear_command_logs; reset_flow_counters
+  issue=84; run="$(queue_run_to_failpoint "$issue" after_artifact_state_transition "${state_dir}/queue-ack-validation.log")"
+  run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-84-84"; state_file="${run_dir}/batches/${batch}/issues/84.state"
+  state_backup="${state_dir}/queue-ack-validation.issue"; cp "$state_file" "$state_backup"
+  base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"; grandparent="$(${REAL_GIT} -C "$repo_dir" rev-parse "${base}^")"
+  sed -i "s/^base_commit.*/base_commit$(printf '\t')${grandparent}/" "$state_file"
+  queue_resume_failure "$run" 'does not equal saved base' "${state_dir}/queue-ack-wrong-base.log"; cp "$state_backup" "$state_file"
+  commit="$(awk -F '\t' '$1 == "commit_sha" { print $2 }' "$state_file")"
+  sed -i "s/^commit_sha.*/commit_sha$(printf '\t')${base}/" "$state_file"
+  queue_resume_failure "$run" 'archive identity does not match' "${state_dir}/queue-ack-wrong-commit.log"; cp "$state_backup" "$state_file"
+  printf 'dirty acknowledgement\n' >> "${repo_dir}/smoke-target.txt"
+  queue_resume_failure "$run" 'Working tree must be clean before processing issue 84' "${state_dir}/queue-ack-dirty.log"
+  assert_file_contains "$state_file" $'state\tartifacts_archived'
+  "${REAL_GIT}" -C "$repo_dir" restore smoke-target.txt
+  queue_resume_success "$run" "${state_dir}/queue-ack-validation.repaired.log"
+}
+
 run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue.log"
@@ -3755,7 +3939,7 @@ run_issue_queue_smoke() {
   fi
 
   assert_equals "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'queue batch branch'
-  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} origin/main"
+  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} $(< "${batch_dir}/base_commit")"
   assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${QUEUE_ISSUE_NUMBER}"
   assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${ISSUE_NUMBER}"
   assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
@@ -4054,6 +4238,7 @@ main() {
   run_queue_private_environment_smoke
   run_queue_external_orphan_smoke
   run_queue_guard_path_stability_smoke
+  run_queue_entity_integrity_smoke
   run_vendor_worktree_visibility_smoke
   run_no_workflow_file_smoke
   log 'all smoke scenarios passed'

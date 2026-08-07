@@ -725,6 +725,7 @@ acquire_queue_lease() {
 
 discard_preflight_run() {
   run_initialized=0
+  rm -rf -- "${run_state_dir}/batches" || return 1
   rm -f -- "${run_state_dir}/manifest.state" "${run_state_dir}/run.state" "${run_state_dir}/checkpoint.state" || return 1
   rmdir -- "$run_state_dir" || return 1
 }
@@ -736,8 +737,9 @@ initialize_queue_run_minimal() {
   mkdir -p "$run_state_dir"
   queue_state_create_manifest "$run_state_dir" "$run_id" "$ordered" "$review_every" "$draft_pr" "$auto_merge" \
     "$([[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -eq 0 ]] && printf 0 || printf 1)" "$batch_review_effort" "$batch_review_fix_effort" \
-    "$batch_check_fix_effort" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(canonical_repository_identity)"
+    "$batch_check_fix_effort" "$CODEX_FLOW_BATCH_BRANCH_PREFIX" "$CODEX_FLOW_BASE_BRANCH" "$CODEX_FLOW_BASE_REF" "$(canonical_repository_identity)"
   queue_state_create_run "${run_state_dir}/run.state" "$run_id" planned
+  initialize_queue_run_entities
   run_initialized=1
   queue_test_pause after_minimal_run_publication
   queue_failpoint after_minimal_run_publication
@@ -745,20 +747,21 @@ initialize_queue_run_minimal() {
 
 complete_queue_run_initialization() {
   reconcile_current_pointer
-  reconcile_queue_run_entities
+  validate_queue_run_graph
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" planned running
 }
 
 validate_initial_entity() {
   local file="$1" schema="$2" label="$3"; shift 3
-  local pair key expected
+  local pair key expected actual
   queue_state_validate_file "$file" "$schema" || fail "Invalid existing ${label}: ${file}"
   for pair in "$@"; do key="${pair%%=*}"; expected="${pair#*=}"
-    [[ "$(queue_state_read_field "$file" "$schema" "$key")" == "$expected" ]] || fail "Immutable ${label} field ${key} differs in ${file}"
+    actual="$(queue_state_read_field "$file" "$schema" "$key")"
+    [[ "$actual" == "$expected" ]] || fail "Immutable ${label} field ${key} differs in ${file}: expected ${expected}, found ${actual}"
   done
 }
 
-reconcile_queue_run_entities() {
+initialize_queue_run_entities() {
   local start=0 end first last batch_id branch state_dir artifact index batch_file issue_file
   while [[ "$start" -lt "${#issue_numbers[@]}" ]]; do
     end=$((start + review_every)); [[ "$end" -le "${#issue_numbers[@]}" ]] || end="${#issue_numbers[@]}"
@@ -766,22 +769,63 @@ reconcile_queue_run_entities() {
     batch_id="$(batch_id_for_range "$first" "$last")"; branch="$(batch_branch_name_for_range "$first" "$last")"
     state_dir="${run_state_dir}/batches/${batch_id}"; artifact="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
     batch_file="${state_dir}/batch.state"
-    if [[ -f "$batch_file" ]]; then
-      validate_initial_entity "$batch_file" batch "batch ${batch_id}" "run_id=${run_id}" "batch_id=${batch_id}" "first_issue=${first}" "last_issue=${last}" "branch=${branch}" "artifact_path=${artifact}"
-    else
-      queue_state_create_batch "$batch_file" "$run_id" "$batch_id" "$first" "$last" "$branch" "$artifact"
-    fi
+    [[ ! -e "$batch_file" ]] || fail "Fresh queue entity already exists: ${batch_file}"
+    queue_state_create_batch "$batch_file" "$run_id" "$batch_id" "$first" "$last" "$branch" "$artifact"
     mkdir -p "${state_dir}/issues"
     for ((index = start; index < end; index += 1)); do
       issue_file="${state_dir}/issues/${issue_numbers[$index]}.state"
-      if [[ -f "$issue_file" ]]; then
-        validate_initial_entity "$issue_file" issue "Issue ${issue_numbers[$index]}" "run_id=${run_id}" "batch_id=${batch_id}" "issue_number=${issue_numbers[$index]}"
-      else
-        queue_state_create_issue "$issue_file" "$run_id" "$batch_id" "${issue_numbers[$index]}"
-      fi
+      [[ ! -e "$issue_file" ]] || fail "Fresh queue entity already exists: ${issue_file}"
+      queue_state_create_issue "$issue_file" "$run_id" "$batch_id" "${issue_numbers[$index]}"
     done
     start="$end"
   done
+}
+
+validate_queue_run_graph() {
+  local start=0 end first last batch_id branch state_dir artifact index batch_file issue_file entry name issue state commit context_path archive_path
+  local batches_root="${run_state_dir}/batches"
+  local -A expected_batches=() expected_issues=()
+  [[ -d "$batches_root" && ! -L "$batches_root" ]] || fail "Missing authoritative batch graph for run ${run_id}: ${batches_root}"
+  while [[ "$start" -lt "${#issue_numbers[@]}" ]]; do
+    end=$((start + review_every)); [[ "$end" -le "${#issue_numbers[@]}" ]] || end="${#issue_numbers[@]}"
+    first="${issue_numbers[$start]}"; last="${issue_numbers[$((end - 1))]}"
+    batch_id="$(batch_id_for_range "$first" "$last")"; branch="$(batch_branch_name_for_range "$first" "$last")"
+    expected_batches["$batch_id"]=1
+    state_dir="${batches_root}/${batch_id}"; artifact="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
+    [[ -d "$state_dir" && ! -L "$state_dir" ]] || fail "Missing authoritative batch entity ${batch_id} for run ${run_id}"
+    batch_file="${state_dir}/batch.state"
+    validate_initial_entity "$batch_file" batch "batch ${batch_id}" "run_id=${run_id}" "batch_id=${batch_id}" "first_issue=${first}" "last_issue=${last}" "branch=${branch}" "artifact_path=${artifact}"
+    [[ -d "${state_dir}/issues" && ! -L "${state_dir}/issues" ]] || fail "Missing authoritative Issue graph for batch ${batch_id}"
+    expected_issues=()
+    for ((index = start; index < end; index += 1)); do
+      issue="${issue_numbers[$index]}"; expected_issues["${issue}.state"]=1
+      issue_file="${state_dir}/issues/${issue}.state"
+      validate_initial_entity "$issue_file" issue "Issue ${issue}" "run_id=${run_id}" "batch_id=${batch_id}" "issue_number=${issue}"
+      context_path="$(queue_state_read_field "$issue_file" issue context_path)"
+      [[ "$context_path" == none || "$context_path" == ".work/queue/runs/${run_id}/contexts/${batch_id}/issues/${issue}.md" ]] || \
+        fail "Issue ${issue} context identity does not match the immutable manifest graph"
+      commit="$(queue_state_read_field "$issue_file" issue commit_sha)"
+      archive_path="$(queue_state_read_field "$issue_file" issue artifact_path)"
+      [[ "$archive_path" == none || ( "$commit" != none && "$archive_path" == ".work/queue/runs/${run_id}/archives/${batch_id}/issues/${issue}/${commit}" ) ]] || \
+        fail "Issue ${issue} archive identity does not match the immutable manifest graph"
+    done
+    while IFS= read -r entry; do
+      name="${entry##*/}"
+      [[ -n "${expected_issues[$name]:-}" && -f "$entry" && ! -L "$entry" ]] || fail "Unexpected authoritative Issue entity in ${batch_id}: ${name}"
+    done < <(find "${state_dir}/issues" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort)
+    state="$(queue_state_read_field "$batch_file" batch state)"
+    if [[ "$state" == completed ]]; then
+      for ((index = start; index < end; index += 1)); do
+        [[ "$(queue_state_read_field "${state_dir}/issues/${issue_numbers[$index]}.state" issue state)" == acknowledged ]] || \
+          fail "Completed batch ${batch_id} contains non-acknowledged Issue ${issue_numbers[$index]}"
+      done
+    fi
+    start="$end"
+  done
+  while IFS= read -r entry; do
+    name="${entry##*/}"
+    [[ -n "${expected_batches[$name]:-}" && -d "$entry" && ! -L "$entry" ]] || fail "Unexpected authoritative batch entity for run ${run_id}: ${name}"
+  done < <(find "$batches_root" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort)
 }
 
 reconcile_current_pointer() {
@@ -799,6 +843,32 @@ reconcile_current_pointer() {
   queue_state_publish_pointer "$pointer" "$run_id" "$lease_owner_token" "$lease_generation"
 }
 
+reconcile_interrupted_inner_phase() {
+  local existing_run_state="$1" checkpoint="${run_state_dir}/checkpoint.state" phase status dirty report temporary
+  [[ "$existing_run_state" == running || "$existing_run_state" == interrupted || "$existing_run_state" == failed || "$existing_run_state" == manual_review_required ]] || return 0
+  [[ -f "$checkpoint" ]] || return 0
+  queue_state_validate_file "$checkpoint" checkpoint || fail "Invalid recovery checkpoint for run ${run_id}"
+  phase="$(queue_state_read_field "$checkpoint" checkpoint phase)"; status="$(queue_state_read_field "$checkpoint" checkpoint status)"
+  [[ "$status" == before || "$status" == interrupted || "$status" == failed ]] || return 0
+  case "$phase" in issue_flow|batch_checks|batch_review) ;; *) return 0 ;; esac
+  dirty="$(status_outside_work)"
+  [[ -n "$dirty" ]] || return 0
+  report="${run_state_dir}/manual-review.txt"; temporary="$(mktemp "${run_state_dir}/.manual-review.tmp.XXXXXX")"
+  {
+    printf 'schema_version\t%s\nrun_id\t%s\nphase\t%s\n' "$CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION" "$run_id" "$phase"
+    printf 'dirty_paths_begin\n%s\ndirty_paths_end\n' "$dirty"
+  } > "$temporary"
+  mv -T -f -- "$temporary" "$report"
+  if [[ "$existing_run_state" != manual_review_required ]]; then
+    queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" "$existing_run_state" manual_review_required
+  fi
+  log_error "Dirty interrupted inner phase requires manual review: run=${run_id} phase=${phase}"
+  log_error "Dirty paths were preserved exactly in ${report}:"
+  printf '%s\n' "$dirty" >&2
+  log_error "Recovery: inspect and finish or revert these paths, make the consumer worktree clean, then run: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${run_id}"
+  fail "Refusing to silently replay dirty interrupted phase ${phase}"
+}
+
 load_queue_run_state() {
   local manifest="${run_state_dir}/manifest.state" issue_csv manifest_base_branch manifest_base_ref existing_run_state
   local -A manifest_fields=()
@@ -812,11 +882,13 @@ load_queue_run_state() {
   review_every="${manifest_fields[review_every]}"; draft_pr="${manifest_fields[draft_pr]}"; auto_merge="${manifest_fields[auto_merge]}"
   batch_review_effort="${manifest_fields[batch_review_reasoning]}"; batch_review_fix_effort="${manifest_fields[batch_fix_reasoning]}"
   batch_check_fix_effort="${manifest_fields[batch_check_fix_reasoning]}"
+  CODEX_FLOW_BATCH_BRANCH_PREFIX="${manifest_fields[batch_branch_prefix]}"
   CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW="${manifest_fields[light_issue_review]}"
   run_initialized=1
   existing_run_state="$(queue_state_read_field "${run_state_dir}/run.state" run state)"
   [[ "$existing_run_state" != completed ]] || fail "Queue run ${run_id} is already completed"
-  reconcile_queue_run_entities
+  validate_queue_run_graph
+  reconcile_interrupted_inner_phase "$existing_run_state"
   reconcile_current_pointer
   case "$existing_run_state" in
     running) ;;
@@ -827,43 +899,169 @@ load_queue_run_state() {
   esac
 }
 
-append_issue_context_to_batch_file() {
-  local issue_number="$1"
-  local issue_file="$2"
-  local issues_file="$3"
+validate_durable_issue_context() {
+  local path="$1" issue_number="$2" expected_hash="${3:-}" actual_hash
+  [[ -f "$path" && ! -L "$path" ]] || fail "Durable Issue ${issue_number} context is not a regular file: ${path}"
+  grep -Fqx "# Issue #${issue_number}" "$path" || fail "Durable Issue ${issue_number} context has the wrong Issue identity"
+  grep -Fq 'Title: ' "$path" || fail "Durable Issue ${issue_number} context lacks a title"
+  grep -Fq 'URL: ' "$path" || fail "Durable Issue ${issue_number} context lacks a URL"
+  actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+  [[ -z "$expected_hash" || "$expected_hash" == none || "$actual_hash" == "$expected_hash" ]] || fail "Durable Issue ${issue_number} context content changed"
+  printf '%s\n' "$actual_hash"
+}
 
+publish_durable_issue_context() {
+  local source="$1" destination="$2" issue_number="$3" directory temporary hash
+  directory="$(dirname "$destination")"; mkdir -p "$directory"
+  [[ ! -e "$destination" ]] || fail "Durable Issue context destination already exists without recorded identity: ${destination}"
+  temporary="$(mktemp "${directory}/.issue-context.tmp.XXXXXX")"
+  cp -- "$source" "$temporary"
+  hash="$(validate_durable_issue_context "$temporary" "$issue_number")"
+  mv -T -- "$temporary" "$destination"
+  printf '%s\n' "$hash"
+}
+
+rebuild_batch_issues_file() {
+  local batch_id="$1" start_index="$2" end_index="$3" issues_file="$4" directory temporary index issue state_file context_path context_hash
+  directory="$(dirname "$issues_file")"; mkdir -p "$directory"
+  temporary="$(mktemp "${directory}/.issues.txt.tmp.XXXXXX")"
+  for ((index = start_index; index < end_index; index += 1)); do
+    issue="${issue_numbers[$index]}"; state_file="${run_state_dir}/batches/${batch_id}/issues/${issue}.state"
+    context_path="$(queue_state_read_field "$state_file" issue context_path)"; context_hash="$(queue_state_read_field "$state_file" issue context_sha256)"
+    [[ "$context_path" != none && "$context_hash" != none ]] || { rm -f "$temporary"; fail "Issue ${issue} lacks complete durable context identity"; }
+    validate_durable_issue_context "${CODEX_FLOW_REPO_ROOT}/${context_path}" "$issue" "$context_hash" >/dev/null
+    {
+      printf '## Issue #%s\n\n' "$issue"
+      cat "${CODEX_FLOW_REPO_ROOT}/${context_path}"
+      printf '\n'
+    } >> "$temporary"
+  done
+  mv -T -f -- "$temporary" "$issues_file"
+}
+
+generate_issue_archive_manifest() {
+  local root="$1" output="$2" issue_number="$3" batch_id="$4" commit_sha="$5" path relative hash
+  [[ -d "${root}/codex" && ! -L "${root}/codex" ]] || return 1
+  if find "${root}/codex" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then return 1; fi
   {
-    printf '## Issue #%s\n\n' "$issue_number"
-    cat "$issue_file"
-    printf '\n'
-  } >> "$issues_file"
+    printf 'archive_schema_version\t1\nrun_id\t%s\nbatch_id\t%s\nissue_number\t%s\ncommit_sha\t%s\n' "$run_id" "$batch_id" "$issue_number" "$commit_sha"
+    while IFS= read -r path; do
+      relative="${path#"${root}"/}"
+      [[ "$relative" != *$'\t'* && "$relative" != *$'\n'* ]] || return 1
+      if [[ -d "$path" ]]; then
+        printf 'content_directory\t%s\n' "$relative"
+      else
+        hash="$(sha256sum "$path" | awk '{print $1}')" || return 1
+        printf 'content_sha256\t%s\t%s\n' "$hash" "$relative"
+      fi
+    done < <(find "${root}/codex" -mindepth 1 -print | LC_ALL=C sort)
+  } > "$output"
 }
 
-archive_issue_codex_artifacts() {
-  local batch_dir="$1"
-  local issue_number="$2"
-  local destination="${batch_dir}/issues/${issue_number}/codex"
-
-  if [[ ! -d "$CODEX_FLOW_CODEX_DIR" ]]; then
-    fail "Missing Codex artifact directory after issue ${issue_number}: ${CODEX_FLOW_CODEX_DIR}"
+validate_issue_archive() {
+  local destination="$1" issue_number="$2" batch_id="$3" commit_sha="$4" expected_manifest_hash="${5:-none}" source="${6:-}" generated manifest_hash source_root source_manifest
+  [[ -d "$destination" && ! -L "$destination" ]] || fail "Authoritative archive is missing for Issue ${issue_number}: ${destination}"
+  [[ -f "${destination}/archive.manifest" && ! -L "${destination}/archive.manifest" ]] || fail "Authoritative archive manifest is missing for Issue ${issue_number}"
+  [[ "$(find "$destination" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" == $'archive.manifest\ncodex' ]] || fail "Authoritative archive has unexpected top-level content for Issue ${issue_number}"
+  generated="$(mktemp)"
+  generate_issue_archive_manifest "$destination" "$generated" "$issue_number" "$batch_id" "$commit_sha" || { rm -f "$generated"; fail "Authoritative archive contains unsupported content for Issue ${issue_number}"; }
+  cmp -s "$generated" "${destination}/archive.manifest" || { rm -f "$generated"; fail "Authoritative archive content manifest does not match Issue ${issue_number}"; }
+  if [[ -n "$source" && -d "$source" ]]; then
+    source_root="$(mktemp -d)"; mkdir "${source_root}/codex"; cp -R -- "${source}/." "${source_root}/codex/"
+    source_manifest="$(mktemp)"
+    generate_issue_archive_manifest "$source_root" "$source_manifest" "$issue_number" "$batch_id" "$commit_sha" || { rm -rf "$source_root"; rm -f "$source_manifest" "$generated"; fail "Current Codex artifacts contain unsupported content for Issue ${issue_number}"; }
+    cmp -s "$source_manifest" "$generated" || { rm -rf "$source_root"; rm -f "$source_manifest" "$generated"; fail "Existing archive content differs from current Issue ${issue_number} artifacts"; }
+    rm -rf "$source_root"; rm -f "$source_manifest"
   fi
+  rm -f "$generated"
+  manifest_hash="$(sha256sum "${destination}/archive.manifest" | awk '{print $1}')"
+  [[ "$expected_manifest_hash" == none || "$manifest_hash" == "$expected_manifest_hash" ]] || fail "Authoritative archive identity changed for Issue ${issue_number}"
+  printf '%s\n' "$manifest_hash"
+}
 
+publish_issue_archive() {
+  local destination="$1" issue_number="$2" batch_id="$3" commit_sha="$4" parent temporary manifest_hash
+  [[ -d "$CODEX_FLOW_CODEX_DIR" ]] || fail "Missing Codex artifact directory after Issue ${issue_number}: ${CODEX_FLOW_CODEX_DIR}"
+  parent="$(dirname "$destination")"; mkdir -p "$parent"
+  find "$parent" -mindepth 1 -maxdepth 1 -type d -name '.archive.tmp.*' -exec rm -rf -- {} +
   if [[ -e "$destination" ]]; then
-    fail "Codex archive destination already exists: ${destination}"
+    validate_issue_archive "$destination" "$issue_number" "$batch_id" "$commit_sha" none "$CODEX_FLOW_CODEX_DIR"
+    return
   fi
-
-  mkdir -p "$(dirname "$destination")"
-  cp -R "$CODEX_FLOW_CODEX_DIR" "$destination"
+  temporary="$(mktemp -d "${parent}/.archive.tmp.XXXXXX")"
+  mkdir "${temporary}/codex"; cp -R -- "${CODEX_FLOW_CODEX_DIR}/." "${temporary}/codex/"
+  queue_failpoint during_artifact_archive_copy
+  generate_issue_archive_manifest "$temporary" "${temporary}/archive.manifest" "$issue_number" "$batch_id" "$commit_sha" || fail "Cannot build complete archive manifest for Issue ${issue_number}"
+  validate_issue_archive "$temporary" "$issue_number" "$batch_id" "$commit_sha" none "$CODEX_FLOW_CODEX_DIR" >/dev/null
+  mv -T -- "$temporary" "$destination"
+  queue_failpoint after_artifact_archive_publication
+  manifest_hash="$(validate_issue_archive "$destination" "$issue_number" "$batch_id" "$commit_sha" none "$CODEX_FLOW_CODEX_DIR")"
+  printf '%s\n' "$manifest_hash"
 }
 
-create_batch_branch() {
-  local branch_name="$1"
+publish_compatibility_archive_view() {
+  local authoritative="$1" compatibility="$2"
+  mkdir -p "$(dirname "$compatibility")"
+  rm -rf -- "$compatibility"
+  cp -R -- "${authoritative}/codex" "$compatibility"
+}
 
-  log_info "fetching origin/${CODEX_FLOW_BASE_BRANCH}"
-  git fetch origin "$CODEX_FLOW_BASE_BRANCH"
-  require_flow_base_ref
-  log_info "creating batch branch ${branch_name}"
-  git switch --create "$branch_name" "$CODEX_FLOW_BASE_REF"
+validate_batch_branch_ref() {
+  local branch_name="$1" expected_head="$2" boundary="$3" local_head remote_line remote_head
+  git show-ref --verify --quiet "refs/heads/${branch_name}" || fail "Missing expected batch branch ${branch_name} at ${boundary}"
+  local_head="$(git rev-parse --verify "refs/heads/${branch_name}^{commit}")"
+  [[ "$local_head" == "$expected_head" ]] || fail "Batch branch ${branch_name} HEAD ${local_head} does not match saved ${boundary} SHA ${expected_head}"
+  remote_line="$(git ls-remote --heads origin "refs/heads/${branch_name}" 2>/dev/null || true)"
+  if [[ -n "$remote_line" ]]; then
+    [[ "$(printf '%s\n' "$remote_line" | wc -l)" -eq 1 ]] || fail "Remote batch branch ${branch_name} is ambiguous"
+    remote_head="${remote_line%%[[:space:]]*}"
+    [[ "$remote_head" == "$expected_head" ]] || fail "Local/remote disagreement for batch branch ${branch_name}: local ${local_head}, remote ${remote_head}, saved ${expected_head}"
+  fi
+}
+
+prepare_batch_branch() {
+  local branch_name="$1" batch_id="$2" batch_state_file="$3" state="$4" saved_base resolved_base remote_line
+  if [[ "$state" == planned ]]; then
+    log_info "fetching origin/${CODEX_FLOW_BASE_BRANCH}"
+    git fetch origin "$CODEX_FLOW_BASE_BRANCH"
+    require_flow_base_ref
+    resolved_base="$(git rev-parse --verify "${CODEX_FLOW_BASE_REF}^{commit}")"
+    queue_state_update_batch "$batch_state_file" "$batch_id" planned base_resolved "$resolved_base"
+    state=base_resolved
+  fi
+  saved_base="$(queue_state_read_field "$batch_state_file" batch base_commit)"
+  [[ "$saved_base" != none ]] || fail "Batch ${batch_id} lacks its saved intended base"
+  git cat-file -e "${saved_base}^{commit}" || fail "Saved batch base does not resolve to a commit: ${saved_base}"
+  if [[ "$state" == base_resolved ]]; then
+    if git show-ref --verify --quiet "refs/heads/${branch_name}"; then
+      validate_batch_branch_ref "$branch_name" "$saved_base" 'branch-ready boundary'
+      git switch "$branch_name"
+    else
+      remote_line="$(git ls-remote --heads origin "refs/heads/${branch_name}" 2>/dev/null || true)"
+      [[ -z "$remote_line" ]] || fail "Remote branch ${branch_name} exists before its saved local branch-ready boundary"
+      log_info "creating batch branch ${branch_name} from saved base ${saved_base}"
+      git switch --create "$branch_name" "$saved_base"
+    fi
+    queue_failpoint after_batch_branch_creation
+    validate_batch_branch_ref "$branch_name" "$saved_base" 'branch-ready boundary'
+    queue_state_transition "$batch_state_file" batch "$batch_id" base_resolved branch_ready
+  fi
+}
+
+validate_exact_issue_commit() {
+  local issue_number="$1" batch_branch="$2" issue_base="$3" commit_sha="$4" commit_token parent extra count subject
+  [[ "$(git branch --show-current)" == "$batch_branch" ]] || fail "Issue ${issue_number} is not on expected branch ${batch_branch}"
+  git cat-file -e "${issue_base}^{commit}" || fail "Saved Issue ${issue_number} base is not a commit: ${issue_base}"
+  git cat-file -e "${commit_sha}^{commit}" || fail "Saved Issue ${issue_number} commit is not a commit: ${commit_sha}"
+  read -r commit_token parent extra <<< "$(git rev-list --parents -n 1 "$commit_sha")"
+  [[ "$commit_token" == "$commit_sha" && -n "$parent" && -z "${extra:-}" ]] || fail "Issue ${issue_number} commit must have exactly one parent"
+  [[ "$parent" == "$issue_base" ]] || fail "Issue ${issue_number} commit parent ${parent} does not equal saved base ${issue_base}"
+  count="$(git rev-list --count "${issue_base}..${commit_sha}")"
+  [[ "$count" == 1 ]] || fail "Issue ${issue_number} commit range must contain exactly one commit, found ${count}"
+  git merge-base --is-ancestor "$commit_sha" "refs/heads/${batch_branch}" || fail "Issue ${issue_number} commit is not reachable from expected branch ${batch_branch}"
+  subject="$(git show -s --format=%s "$commit_sha")"
+  [[ "$subject" == "chore: address issue #${issue_number}" ]] || fail "Issue ${issue_number} commit subject is not deterministic: ${subject}"
+  ensure_clean_worktree "Issue ${issue_number} commit validation requires a clean consumer worktree."
 }
 
 process_issue_on_batch_branch() {
@@ -875,56 +1073,50 @@ process_issue_on_batch_branch() {
   local issue_base_commit
   local issue_light_review=0
   local issue_state_file="${run_state_dir}/batches/${current_batch_id}/issues/${issue_number}.state"
-  local issue_state commit_sha recorded_sha artifact_rel destination expected_message
+  local issue_state commit_sha recorded_sha artifact_rel destination context_rel context_path context_hash archive_hash compatibility
 
   assert_queue_lease_owned || fail "Queue lease lost before Issue ${issue_number}"
   issue_state="$(queue_state_read_field "$issue_state_file" issue state)"
-  [[ "$issue_state" != acknowledged ]] || return 0
-
   ensure_clean_worktree "Working tree must be clean before processing issue ${issue_number}."
-  artifact_rel=".work/queue/batches/${current_batch_id}/issues/${issue_number}/codex"
-  destination="${CODEX_FLOW_REPO_ROOT}/${artifact_rel}"
-  expected_message="chore: address issue #${issue_number}"
-
-  if [[ "$issue_state" == artifacts_archived ]]; then
-    recorded_sha="$(queue_state_read_field "$issue_state_file" issue commit_sha)"
-    [[ -d "$destination" ]] || fail "Recorded archive is missing for Issue ${issue_number}: ${artifact_rel}"
-    git merge-base --is-ancestor "$recorded_sha" HEAD || fail "Recorded Issue ${issue_number} commit is not an ancestor of HEAD"
-    [[ "$(git show -s --format=%s "$recorded_sha")" == "$expected_message" ]] || fail "Recorded Issue ${issue_number} commit message does not match"
-    [[ "$(git branch --show-current)" == "$batch_branch" ]] || fail "Issue ${issue_number} is not on expected branch ${batch_branch}"
-    [[ "$(queue_state_read_field "$issue_state_file" issue artifact_path)" == "$artifact_rel" ]] || fail "Issue ${issue_number} archive ownership does not match its manifest entity"
-    ensure_clean_worktree "Issue ${issue_number} cannot be acknowledged with a dirty worktree."
-    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" artifacts_archived acknowledged "$recorded_sha" "$artifact_rel"
-    return 0
-  fi
 
   if [[ "$issue_state" == planned ]]; then
     rm -f -- "$(issue_file_path "$issue_number")"
-    queue_state_transition "$issue_state_file" issue "Issue ${issue_number}" planned leased
+    context_rel=".work/queue/runs/${run_id}/contexts/${current_batch_id}/issues/${issue_number}.md"
+    queue_state_lease_issue "$issue_state_file" "Issue ${issue_number}" "$context_rel"
     issue_state=leased
   fi
 
-  queue_set_active_phase issue_context_fetch; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
-  queue_failpoint fail_issue_context_fetch
-  log_info "fetching issue ${issue_number}"
+  context_rel="$(queue_state_read_field "$issue_state_file" issue context_path)"
+  context_path="${CODEX_FLOW_REPO_ROOT}/${context_rel}"
+  context_hash="$(queue_state_read_field "$issue_state_file" issue context_sha256)"
   if [[ "$issue_state" == leased ]]; then
-    if [[ -f "$(issue_file_path "$issue_number")" ]]; then
-      grep -Fqx "# Issue #${issue_number}" "$(issue_file_path "$issue_number")" \
-        || fail "Existing durable Issue ${issue_number} context is incomplete; refusing a duplicate fetch"
-      grep -Fq 'Title: ' "$(issue_file_path "$issue_number")" \
-        || fail "Existing durable Issue ${issue_number} context lacks a title; refusing a duplicate fetch"
-      grep -Fq 'URL: ' "$(issue_file_path "$issue_number")" \
-        || fail "Existing durable Issue ${issue_number} context lacks a URL; refusing a duplicate fetch"
+    queue_set_active_phase issue_context_fetch; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
+    if [[ "$context_hash" != none ]]; then
+      validate_durable_issue_context "$context_path" "$issue_number" "$context_hash" >/dev/null
       log_info "reconciled existing durable Issue ${issue_number} context without refetching"
     else
-      write_issue_context_file "$issue_number"
+      if [[ -e "$context_path" ]]; then
+        context_hash="$(validate_durable_issue_context "$context_path" "$issue_number")"
+        log_info "reconciled existing durable Issue ${issue_number} context without refetching; adopted complete run-owned publication"
+      else
+        queue_failpoint fail_issue_context_fetch
+        if [[ ! -f "$(issue_file_path "$issue_number")" ]]; then
+          log_info "fetching issue ${issue_number}"
+          write_issue_context_file "$issue_number"
+        fi
+        validate_durable_issue_context "$(issue_file_path "$issue_number")" "$issue_number" >/dev/null
+        context_hash="$(publish_durable_issue_context "$(issue_file_path "$issue_number")" "$context_path" "$issue_number")"
+      fi
+      queue_state_set_issue_context "$issue_state_file" "$context_rel" "$context_hash"
     fi
-  elif [[ ! -f "$(issue_file_path "$issue_number")" ]]; then
-    fail "Missing durable Issue ${issue_number} context while resuming state ${issue_state}"
+    cp -- "$context_path" "$(issue_file_path "$issue_number")"
+    queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch after
+  else
+    [[ "$context_hash" != none ]] || fail "Issue ${issue_number} state ${issue_state} lacks context identity"
+    validate_durable_issue_context "$context_path" "$issue_number" "$context_hash" >/dev/null
+    cp -- "$context_path" "$(issue_file_path "$issue_number")"
   fi
-  queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch after
   issue_file="$(require_issue_file "$issue_number")"
-  if ! grep -Fqx "## Issue #${issue_number}" "$issues_file" 2>/dev/null; then append_issue_context_to_batch_file "$issue_number" "$issue_file" "$issues_file"; fi
 
   issue_base_commit="$(queue_state_read_field "$issue_state_file" issue base_commit)"
   if [[ "$issue_base_commit" == none ]]; then
@@ -939,10 +1131,9 @@ process_issue_on_batch_branch() {
 
   if [[ "$issue_state" == running ]]; then
     commit_sha=''
-    if [[ "$(git show -s --format=%s HEAD)" == "$expected_message" ]]; then
+    if [[ "$(git rev-parse HEAD)" != "$issue_base_commit" ]]; then
       commit_sha="$(git rev-parse HEAD)"
-      queue_failpoint after_issue_flow_commit
-      git merge-base --is-ancestor "$issue_base_commit" "$commit_sha" || fail "Existing Issue ${issue_number} commit is not based on its saved base"
+      validate_exact_issue_commit "$issue_number" "$batch_branch" "$issue_base_commit" "$commit_sha"
       log_info "reconciled existing commit ${commit_sha} for issue ${issue_number}"
     else
       rm -rf "$CODEX_FLOW_CODEX_DIR"
@@ -955,32 +1146,40 @@ process_issue_on_batch_branch() {
         "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
       queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow after
       commit_sha="$(git rev-parse HEAD)"
+      queue_failpoint after_issue_flow_commit
     fi
     queue_set_active_phase issue_commit_reconciliation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation before
-    [[ "$(git show -s --format=%s "$commit_sha")" == "$expected_message" ]] || fail "Issue ${issue_number} commit message is not deterministic"
-    ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
-    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" running committed "$commit_sha" none
+    validate_exact_issue_commit "$issue_number" "$batch_branch" "$issue_base_commit" "$commit_sha"
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" running committed "$commit_sha" none none
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation after
     issue_state=committed
   fi
 
   recorded_sha="$(queue_state_read_field "$issue_state_file" issue commit_sha)"
+  artifact_rel=".work/queue/runs/${run_id}/archives/${current_batch_id}/issues/${issue_number}/${recorded_sha}"
+  destination="${CODEX_FLOW_REPO_ROOT}/${artifact_rel}"
   if [[ "$issue_state" == committed ]]; then
+    validate_exact_issue_commit "$issue_number" "$batch_branch" "$issue_base_commit" "$recorded_sha"
     queue_set_active_phase artifact_archive; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive before
-    if [[ -d "$destination" ]]; then
-      [[ -f "${destination}/implementation.prompt.md" ]] || fail "Existing archive for Issue ${issue_number} is incomplete"
-    else
-      archive_issue_codex_artifacts "$batch_dir" "$issue_number"
-    fi
+    archive_hash="$(publish_issue_archive "$destination" "$issue_number" "$current_batch_id" "$recorded_sha")"
     queue_failpoint after_artifact_archive
-    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" committed artifacts_archived "$recorded_sha" "$artifact_rel"
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" committed artifacts_archived "$recorded_sha" "$artifact_rel" "$archive_hash"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" artifact_archive after
+    issue_state=artifacts_archived
+    queue_failpoint after_artifact_state_transition
   fi
-  ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
-  [[ -d "$destination" ]] || fail "Issue ${issue_number} archive validation failed"
-  [[ "$(git branch --show-current)" == "$batch_branch" ]] || fail "Issue ${issue_number} is not on expected branch ${batch_branch}"
-  queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" artifacts_archived acknowledged "$recorded_sha" "$artifact_rel"
-  rm -rf "$CODEX_FLOW_CODEX_DIR"
+  artifact_rel="$(queue_state_read_field "$issue_state_file" issue artifact_path)"; destination="${CODEX_FLOW_REPO_ROOT}/${artifact_rel}"
+  archive_hash="$(queue_state_read_field "$issue_state_file" issue archive_manifest_sha256)"
+  validate_exact_issue_commit "$issue_number" "$batch_branch" "$issue_base_commit" "$recorded_sha"
+  validate_issue_archive "$destination" "$issue_number" "$current_batch_id" "$recorded_sha" "$archive_hash" >/dev/null
+  if [[ "$issue_state" == artifacts_archived ]]; then
+    queue_state_update_issue "$issue_state_file" "Issue ${issue_number}" artifacts_archived acknowledged "$recorded_sha" "$artifact_rel" "$archive_hash"
+    issue_state=acknowledged
+  fi
+  [[ "$issue_state" == acknowledged ]] || fail "Issue ${issue_number} stopped in unexpected state ${issue_state}"
+  compatibility="${batch_dir}/issues/${issue_number}/codex"
+  publish_compatibility_archive_view "$destination" "$compatibility"
+  rm -rf -- "$CODEX_FLOW_CODEX_DIR"
 }
 
 read_pr_state_tsv() {
@@ -1144,29 +1343,28 @@ process_batch_body() {
   queue_state_publish_plain_singleton "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id" || \
     fail 'Cannot publish current_batch singleton'
 
-  if [[ "$batch_state" == planned ]]; then
+  if [[ "$batch_state" == planned || "$batch_state" == base_resolved ]]; then
     queue_set_active_phase batch_branch_preparation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
-    if git show-ref --verify --quiet "refs/heads/${batch_branch}"; then
-      git switch "$batch_branch"
-    else
-      create_batch_branch "$batch_branch"
-    fi
-    batch_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+    prepare_batch_branch "$batch_branch" "$batch_id" "$batch_state_file" "$batch_state"
+    batch_base_commit="$(queue_state_read_field "$batch_state_file" batch base_commit)"
     printf '%s\n' "$batch_base_commit" > "${batch_dir}/base_commit"
-    queue_state_update_batch "$batch_state_file" "$batch_id" planned branch_ready "$batch_base_commit"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation after
     batch_state=branch_ready
   else
-    [[ "$(git branch --show-current)" == "$batch_branch" ]] || git switch "$batch_branch"
     batch_base_commit="$(queue_state_read_field "$batch_state_file" batch base_commit)"
     [[ "$batch_base_commit" != none ]] || fail "Batch ${batch_id} lacks its durable base commit"
+    git show-ref --verify --quiet "refs/heads/${batch_branch}" || fail "Missing expected batch branch ${batch_branch}"
+    [[ "$(git branch --show-current)" == "$batch_branch" ]] || git switch "$batch_branch"
   fi
+  if [[ "$batch_state" == branch_ready ]]; then validate_batch_branch_ref "$batch_branch" "$batch_base_commit" 'branch-ready boundary'; fi
   if [[ "$batch_state" == branch_ready ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" branch_ready issues_running; batch_state=issues_running; fi
 
   for ((index = start_index; index < end_index; index += 1)); do
     batch_issues+=("${issue_numbers[$index]}")
     process_issue_on_batch_branch "${issue_numbers[$index]}" "$batch_branch" "$batch_dir" "$issues_file"
   done
+
+  rebuild_batch_issues_file "$batch_id" "$start_index" "$end_index" "$issues_file"
 
   for ((index = start_index; index < end_index; index += 1)); do
     [[ "$(queue_state_read_field "${run_state_dir}/batches/${batch_id}/issues/${issue_numbers[$index]}.state" issue state)" == acknowledged ]] || \
@@ -1197,14 +1395,19 @@ process_batch_body() {
     "$batch_review_fix_effort" \
     "$batch_check_fix_effort"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review after
-    queue_state_transition "$batch_state_file" batch "$batch_id" review_running accepted; batch_state=accepted
+    batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+    queue_state_mark_batch_accepted "$batch_state_file" "$batch_id" "$batch_head_commit"; batch_state=accepted
+    queue_failpoint after_batch_acceptance
   fi
 
-  batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+  batch_head_commit="$(queue_state_read_field "$batch_state_file" batch accepted_head)"
+  [[ "$batch_head_commit" != none ]] || fail "Batch ${batch_id} lacks its accepted head identity"
+  validate_batch_branch_ref "$batch_branch" "$batch_head_commit" 'accepted head'
   printf '%s\n' "$batch_head_commit" > "${batch_dir}/head_commit"
   write_batch_changed_files "$batch_base_commit" "${batch_dir}/changed-files.txt"
 
   if [[ "$batch_state" == accepted ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" accepted publishing; batch_state=publishing; fi
+  validate_batch_branch_ref "$batch_branch" "$batch_head_commit" 'publication input'
   queue_set_active_phase batch_publish; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
   queue_failpoint fail_batch_publish
   if [[ -f "$publish_state_file" ]]; then
@@ -1227,7 +1430,7 @@ process_batch_body() {
     "${batch_issues[@]}"
     queue_failpoint after_batch_publish
     queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
-      "$CODEX_FLOW_BASE_BRANCH" "$(git rev-parse HEAD)" open
+      "$CODEX_FLOW_BASE_BRANCH" "$batch_head_commit" open
   fi
   queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish after
 
@@ -1236,7 +1439,7 @@ process_batch_body() {
     auto_merge_batch_pr "$batch_pr_number"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge after
     queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
-      "$CODEX_FLOW_BASE_BRANCH" "$(git rev-parse HEAD)" merged
+      "$CODEX_FLOW_BASE_BRANCH" "$batch_head_commit" merged
   fi
   queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
   assert_queue_lease_owned || fail 'Queue lease lost after batch phase'
@@ -1361,6 +1564,9 @@ validate_completed_queue_run() {
   [[ "${state_fields[run_id]}" == "$run_id" ]] || fail "Run state identity mismatch for ${run_id}"
   state="${state_fields[state]}"
   [[ "$state" == completed ]] || return 2
+  IFS=',' read -r -a issue_numbers <<< "${fields[issues]}"
+  review_every="${fields[review_every]}"
+  CODEX_FLOW_BATCH_BRANCH_PREFIX="${fields[batch_branch_prefix]}"
 }
 
 resolve_completed_lease_without_current() {
@@ -1597,6 +1803,7 @@ finalize_completed_queue_run() {
       return 0
     fi
   fi
+  validate_queue_run_graph
   queue_state_guard_enter || fail 'Cannot acquire queue serialization guard for completed-run finalization'
 
   queue_state_require_singleton_path "$marker" optional || {
@@ -1979,6 +2186,9 @@ main() {
   require_command flock
   require_command mktemp
   require_command sed
+  require_command sha256sum
+  require_command cmp
+  require_command find
   require_command stat
   lease_owned=0; run_initialized=0; run_completed=0; active_phase=startup; queue_state_set_owner_assertion ''
   if [[ "$resume_requested" -eq 0 ]]; then

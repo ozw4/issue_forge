@@ -29,6 +29,9 @@ external consumer は engine を `vendor/issue_forge` に bind mount または s
 - `tr`
 - `cut`
 - `mktemp`
+- `cmp`
+- `find`
+- `sha256sum`
 
 加えて、GitHub CLI が対象 repository に対して認証済みである必要があります。
 
@@ -36,7 +39,7 @@ external consumer は engine を `vendor/issue_forge` に bind mount または s
 gh auth status
 ```
 
-`tools/issue/create_from_zip.sh` を使う場合は `unzip`、`find`、`sort` も必要です。self-hosting tests を実行する場合は Python と `pytest` が必要です。
+`tools/issue/create_from_zip.sh` を使う場合は `unzip` と `sort` も必要です。self-hosting tests を実行する場合は Python と `pytest` が必要です。
 
 > [!CAUTION]
 > default の Codex write/read sandbox はどちらも `danger-full-access` です。また、通常 flow は branch push と PR 作成・更新を行います。queue の `--auto-merge` は batch PR の auto-merge を有効化します。利用環境の security policy に合わせて `.issue_forge/project.sh` を明示的に設定してください。
@@ -204,9 +207,9 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--resume RUN_ID|current`: unfinished run は保存済み manifest の順序・effective options で再開し、completed run は cleanup-only finalization
 - `--take-over-lease`: 別 host / 検証不能な lease を明示的に引き継ぐ resume 専用 option
 
-branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
+branch は `batch/<first_issue>-<last_issue>`、batch compatibility artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。Issue の authoritative archive と durable context は run 固有の `.work/queue/runs/<run_id>/` 配下に置かれます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v2 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest と最小 `run.state` は unadvertised candidate です。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v3 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest、最小 `run.state`、manifest-derived entity graph は unadvertised candidate です。resume は graph、strict state/field transition、保存 base、direct-child Issue commit、run-owned archive manifest/hash、accepted batch head を mutation 前に検証します。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
 
 serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。ただし authoritative lease/current/run state は worktree-local なので、queue は `.work/queue` や common control path に触れる前に absolute Git dir と Git common dir を比較し、linked worktree からの fresh/resume を拒否します。primary worktree（他の linked worktree が登録済みでも可）または separate clone を使います。この local lease は separate clone/machine を協調しません。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch worker は親/worker の PID・PGID・process-start identity と lease token/generation を registration に記録し、親が distinct PGID と durable `active-process.state` を検証して matching authorization を publish するまで mutation を開始しません。authorization 前に親 identity が消えた worker は mutation なしで終了します。authorization 後に親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否し、group 終了後は同じ run ID の resume が回復します。worker の terminal result は実際の failure/signal phase を親 checkpoint に伝えます。
 
