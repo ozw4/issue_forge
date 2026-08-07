@@ -140,3 +140,18 @@ def test_pr_creation_view_bypasses_binding_until_publish_state_exists(tmp_path: 
     )
     assert result.returncode == 0, result.stderr
     assert invocation_count(tmp_path / "gh.log") == 1
+
+
+def test_temporary_state_files_use_schema_validation_without_authoritative_binding(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        command=(
+            'publish_tmp="$(dirname "$publish_state_file")/.queue-state.tmp.publish"; '
+            'batch_tmp="$(dirname "$batch_state_file")/.queue-state.tmp.batch"; '
+            'cp "$publish_state_file" "$publish_tmp"; cp "$batch_state_file" "$batch_tmp"; '
+            'queue_state_validate_file "$publish_tmp" publish; '
+            'queue_state_validate_file "$batch_tmp" batch'
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert invocation_count(tmp_path / "gh.log") == 0
