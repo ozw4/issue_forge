@@ -184,7 +184,7 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
   --review-every 3 \
   123 124 125
 
-# Resume the immutable run manifest (or use --resume current)
+# Resume unfinished work, or finalize a completed run's stale control plane
 ./vendor/issue_forge/tools/codex/run_issue_queue.sh --resume <run_id>
 ```
 
@@ -208,7 +208,9 @@ branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batch
 
 各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v2 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest と最小 `run.state` は unadvertised candidate です。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
 
-serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch は durable identity を持つ専用 process group で実行され、親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否します。group 終了後は同じ run ID の resume が token を rotate し generation を 1 増やして回復します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
+serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch worker は親/worker の PID・PGID・process-start identity と lease token/generation を registration に記録し、親が distinct PGID と durable `active-process.state` を検証して matching authorization を publish するまで mutation を開始しません。authorization 前に親 identity が消えた worker は mutation なしで終了します。authorization 後に親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否し、group 終了後は同じ run ID の resume が回復します。worker の terminal result は実際の failure/signal phase を親 checkpoint に伝えます。
+
+`run.state=completed` の publish 後、`current` / lease cleanup 前に owner が停止した場合は、`--resume current` または `--resume <completed_run_id>` が work を再実行せず control plane だけを finalize します。dead same-run lease は audit path に retire され、matching `current` と stale `current_batch` が削除されます。この command は idempotent で、completed run に work-resume command は表示されません。singleton state path は regular file だけを受け付け、directory、symlink、FIFO/device/socket、unexpected hard link を read/replace/remove 前に拒否します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
 
 ## Issue zip import
 

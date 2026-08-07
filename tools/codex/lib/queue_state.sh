@@ -137,6 +137,31 @@ queue_state_cleanup_temporary_files() {
   while IFS= read -r path; do rm -f -- "$path" || return 1; done <<< "$listing"
 }
 
+queue_state_require_singleton_path() {
+  local path="$1" requirement="${2:-optional}" links
+  if [[ -L "$path" ]]; then
+    queue_state_error "Queue singleton path must not be a symlink: ${path}"
+    return 1
+  fi
+  if [[ ! -e "$path" ]]; then
+    [[ "$requirement" == optional ]] && return 0
+    queue_state_error "Missing queue singleton state file: ${path}"
+    return 1
+  fi
+  if [[ ! -f "$path" ]]; then
+    queue_state_error "Queue singleton path is not a regular file: ${path}"
+    return 1
+  fi
+  links="$(stat -c '%h' -- "$path" 2>/dev/null)" || {
+    queue_state_error "Cannot inspect queue singleton path identity: ${path}"
+    return 1
+  }
+  [[ "$links" == 1 ]] || {
+    queue_state_error "Queue singleton path has unexpected hard-link count ${links}: ${path}"
+    return 1
+  }
+}
+
 queue_state_enum_contains() {
   local value="$1" candidate
   shift
@@ -226,12 +251,15 @@ queue_state_parse_file() {
     pointer) required=(schema_version run_id owner_token lease_generation updated_at) ;;
     checkpoint) required=(schema_version run_id entity phase status updated_at) ;;
     publish) required=(schema_version run_id batch_id pr_number pr_url head_branch base_branch head_sha state updated_at) ;;
-    active_process) required=(schema_version run_id phase child_pid child_pgid process_start owner_pid owner_process_start started_at) ;;
+    active_process) required=(schema_version run_id phase child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation started_at) ;;
+    worker_registration) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation registered_at) ;;
+    worker_authorization) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation authorized_at) ;;
+    worker_result) required=(schema_version run_id child_pid child_pgid process_start owner_pid owner_process_start owner_token lease_generation phase exit_status signal completed_at) ;;
     *) queue_state_error "Unknown state schema: ${schema}"; return 1 ;;
   esac
   for key in "${required[@]}"; do allowed["$key"]=1; done
   output=()
-  [[ -f "$file" ]] || { queue_state_error "Missing ${schema} state file: ${file}"; return 1; }
+  queue_state_require_singleton_path "$file" required || return 1
   if [[ -s "$file" && -n "$(tail -c 1 "$file")" ]]; then
     queue_state_error "Malformed ${schema} state file (missing final newline): ${file}"; return 1
   fi
@@ -259,6 +287,9 @@ queue_state_validate_file() {
   if [[ "$schema" == manifest ]]; then queue_state_require_timestamp manifest "${fields[created_at]}" || return 1
   elif [[ "$schema" == lease ]]; then queue_state_require_timestamp lease "${fields[acquired_at]}" || return 1
   elif [[ "$schema" == active_process ]]; then queue_state_require_timestamp active_process "${fields[started_at]}" || return 1
+  elif [[ "$schema" == worker_registration ]]; then queue_state_require_timestamp worker_registration "${fields[registered_at]}" || return 1
+  elif [[ "$schema" == worker_authorization ]]; then queue_state_require_timestamp worker_authorization "${fields[authorized_at]}" || return 1
+  elif [[ "$schema" == worker_result ]]; then queue_state_require_timestamp worker_result "${fields[completed_at]}" || return 1
   else queue_state_require_timestamp "$schema" "${fields[updated_at]}" || return 1; fi
   case "$schema" in
     manifest)
@@ -333,6 +364,29 @@ queue_state_validate_file() {
       [[ "${fields[process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed active process-start identity: ${fields[process_start]}"; return 1; }
       [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed active owner PID: ${fields[owner_pid]}"; return 1; }
       [[ "${fields[owner_process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed active owner process-start identity: ${fields[owner_process_start]}"; return 1; }
+      queue_state_require_token 'active owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed active lease generation: ${fields[lease_generation]}"; return 1; }
+      ;;
+    worker_registration|worker_authorization)
+      [[ "${fields[child_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker child PID: ${fields[child_pid]}"; return 1; }
+      [[ "${fields[child_pgid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker child PGID: ${fields[child_pgid]}"; return 1; }
+      [[ "${fields[process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed worker process-start identity: ${fields[process_start]}"; return 1; }
+      [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker owner PID: ${fields[owner_pid]}"; return 1; }
+      [[ "${fields[owner_process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed worker owner process-start identity: ${fields[owner_process_start]}"; return 1; }
+      queue_state_require_token 'worker owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker lease generation: ${fields[lease_generation]}"; return 1; }
+      ;;
+    worker_result)
+      [[ "${fields[child_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker-result child PID: ${fields[child_pid]}"; return 1; }
+      [[ "${fields[child_pgid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker-result child PGID: ${fields[child_pgid]}"; return 1; }
+      [[ "${fields[process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed worker-result process-start identity: ${fields[process_start]}"; return 1; }
+      [[ "${fields[owner_pid]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker-result owner PID: ${fields[owner_pid]}"; return 1; }
+      [[ "${fields[owner_process_start]}" =~ ^[0-9]+$ ]] || { queue_state_error "Malformed worker-result owner process-start identity: ${fields[owner_process_start]}"; return 1; }
+      queue_state_require_token 'worker-result owner token' "${fields[owner_token]}" || return 1
+      [[ "${fields[lease_generation]}" =~ ^[1-9][0-9]*$ ]] || { queue_state_error "Malformed worker-result lease generation: ${fields[lease_generation]}"; return 1; }
+      queue_state_require_token 'worker-result phase' "${fields[phase]}" || return 1
+      [[ "${fields[exit_status]}" =~ ^[0-9]+$ && "${fields[exit_status]}" -le 255 ]] || { queue_state_error "Malformed worker exit status: ${fields[exit_status]}"; return 1; }
+      [[ "${fields[signal]}" == none ]] || queue_state_require_token 'worker signal' "${fields[signal]}" || return 1
       ;;
   esac
 }
@@ -340,6 +394,9 @@ queue_state_validate_file() {
 queue_state_publish_file() {
   local target="$1" schema="$2" content_file="$3" directory temporary_file status=1
   queue_state_begin_serialized_operation || return 1
+  if ! queue_state_require_singleton_path "$target" optional; then
+    queue_state_finish_serialized_operation 1; return 1
+  fi
   directory="$(dirname "$target")"
   if ! mkdir -p "$directory" || ! queue_state_cleanup_temporary_files "$directory"; then
     queue_state_finish_serialized_operation 1; return 1
@@ -356,7 +413,11 @@ queue_state_publish_file() {
     return 1
   fi
   if ! queue_state_test_pause before_state_replace; then queue_state_finish_serialized_operation 1; return 1; fi
-  if mv -f -- "$temporary_file" "$target"; then status=0; fi
+  if ! queue_state_require_singleton_path "$target" optional; then
+    rm -f -- "$temporary_file" || true
+    queue_state_finish_serialized_operation 1; return 1
+  fi
+  if mv -T -f -- "$temporary_file" "$target"; then status=0; fi
   queue_state_finish_serialized_operation "$status"
 }
 
@@ -368,6 +429,27 @@ queue_state_write_content() {
   if queue_state_publish_file "$target" "$schema" "$staging"; then status=0; else status=$?; fi
   rm -f -- "$staging" || status=1
   return "$status"
+}
+
+queue_state_publish_plain_singleton() {
+  local target="$1" value="$2" directory temporary_file status=1
+  queue_state_begin_serialized_operation || return 1
+  if ! queue_state_require_singleton_path "$target" optional; then queue_state_finish_serialized_operation 1; return 1; fi
+  directory="$(dirname "$target")"
+  if ! mkdir -p "$directory" || ! queue_state_cleanup_temporary_files "$directory"; then queue_state_finish_serialized_operation 1; return 1; fi
+  temporary_file="$(mktemp "${directory}/.queue-state.tmp.XXXXXX")" || { queue_state_finish_serialized_operation 1; return 1; }
+  if ! printf '%s\n' "$value" > "$temporary_file" || ! queue_state_require_singleton_path "$temporary_file" required; then
+    rm -f -- "$temporary_file" || true
+    queue_state_finish_serialized_operation 1
+    return 1
+  fi
+  if ! queue_state_require_singleton_path "$target" optional; then
+    rm -f -- "$temporary_file" || true
+    queue_state_finish_serialized_operation 1
+    return 1
+  fi
+  if mv -T -f -- "$temporary_file" "$target"; then status=0; fi
+  queue_state_finish_serialized_operation "$status"
 }
 
 queue_state_generate_run_id() {
@@ -522,7 +604,8 @@ queue_state_publish_pointer() {
 queue_state_remove_pointer_if_matches() {
   local target="$1" expected_run="$2" expected_token="${3:-}" expected_generation="${4:-}" actual
   queue_state_begin_serialized_operation || return 1
-  if [[ ! -f "$target" ]]; then queue_state_finish_serialized_operation 0; return 0; fi
+  if ! queue_state_require_singleton_path "$target" optional; then queue_state_finish_serialized_operation 1; return 1; fi
+  if [[ ! -e "$target" ]]; then queue_state_finish_serialized_operation 0; return 0; fi
   actual="$(queue_state_read_field "$target" pointer run_id)" || { queue_state_finish_serialized_operation 1; return 1; }
   [[ "$actual" == "$expected_run" ]] || { queue_state_error "Current pointer belongs to run ${actual}, not ${expected_run}"; queue_state_finish_serialized_operation 1; return 1; }
   if [[ -n "$expected_token" ]]; then
@@ -543,5 +626,24 @@ queue_state_record_publish() {
 queue_state_write_active_process() {
   queue_state_write_content "$1" active_process "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
     "phase	$3" "child_pid	$4" "child_pgid	$5" "process_start	$6" "owner_pid	$7" \
-    "owner_process_start	$8" "started_at	$(queue_state_now)"
+    "owner_process_start	$8" "owner_token	$9" "lease_generation	${10}" "started_at	$(queue_state_now)"
+}
+
+queue_state_write_worker_registration() {
+  queue_state_write_content "$1" worker_registration "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "child_pid	$3" "child_pgid	$4" "process_start	$5" "owner_pid	$6" "owner_process_start	$7" \
+    "owner_token	$8" "lease_generation	$9" "registered_at	$(queue_state_now)"
+}
+
+queue_state_write_worker_authorization() {
+  queue_state_write_content "$1" worker_authorization "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "child_pid	$3" "child_pgid	$4" "process_start	$5" "owner_pid	$6" "owner_process_start	$7" \
+    "owner_token	$8" "lease_generation	$9" "authorized_at	$(queue_state_now)"
+}
+
+queue_state_write_worker_result() {
+  queue_state_write_content "$1" worker_result "schema_version	${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}" "run_id	$2" \
+    "child_pid	$3" "child_pgid	$4" "process_start	$5" "owner_pid	$6" "owner_process_start	$7" \
+    "owner_token	$8" "lease_generation	$9" "phase	${10}" "exit_status	${11}" "signal	${12}" \
+    "completed_at	$(queue_state_now)"
 }

@@ -392,7 +392,7 @@ queue_guard_busy_diagnostic() {
 }
 
 initialize_queue_serialization_guard() {
-  local git_common guard_dir guard
+  local git_common guard_dir guard guard_links
   git_common="$(git rev-parse --path-format=absolute --git-common-dir)" || fail 'Cannot resolve the Git common directory for queue serialization'
   [[ "$git_common" == /* && -d "$git_common" ]] || fail "Invalid Git common directory: ${git_common}"
   guard_dir="${git_common}/issue-forge/queue"
@@ -409,7 +409,11 @@ initialize_queue_serialization_guard() {
     (umask 077; : > "$guard") || fail "Cannot create queue serialization guard: ${guard}"
   fi
   chmod 600 "$guard" || fail "Cannot restrict queue serialization guard permissions: ${guard}"
+  guard_links="$(stat -c '%h' -- "$guard" 2>/dev/null)" || fail "Cannot inspect queue serialization guard identity: ${guard}"
+  [[ "$guard_links" == 1 ]] || fail "Queue serialization guard has unexpected hard-link count ${guard_links}: ${guard}"
   ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE="${guard_dir}/active-process.state"
+  queue_state_require_singleton_path "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" optional || \
+    fail "Invalid active queue process path: ${ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE}"
   queue_state_configure_guard "$guard" queue_guard_busy_diagnostic || fail 'Cannot configure queue serialization guard'
 }
 
@@ -479,16 +483,24 @@ record_abnormal_exit() {
        queue_state_validate_file "${run_state_dir}/manifest.state" manifest 2>/dev/null && \
        queue_state_validate_file "${run_state_dir}/run.state" run 2>/dev/null; then
       current="$(queue_state_read_field "${run_state_dir}/run.state" run state 2>/dev/null || true)"
-      if [[ "$current" == running ]]; then
+      if [[ "$current" == completed ]]; then
+        log_error "Queue run ${run_id} completed its work; finalize control-plane cleanup with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${run_id}"
+      elif [[ "$current" == running ]]; then
         if [[ -n "$signal_name" ]]; then
           queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running interrupted || true
         else
           queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running failed || true
         fi
+        queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" \
+          "$([[ -n "$signal_name" ]] && printf interrupted || printf failed)" 2>/dev/null || true
+        print_resume_hint >&2
+      elif queue_state_enum_contains "$current" planned interrupted failed manual_review_required; then
+        queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" \
+          "$([[ -n "$signal_name" ]] && printf interrupted || printf failed)" 2>/dev/null || true
+        print_resume_hint >&2
+      else
+        log_error "Run ${run_id} has no valid recovery command for state ${current:-unknown}"
       fi
-      queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" "${signal_name:+interrupted}" 2>/dev/null || \
-        queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" run "${active_phase:-queue}" failed 2>/dev/null || true
-      print_resume_hint >&2
     else
       log_error "Run ${run_id} state disappeared or became invalid; no resume command can be advertised"
     fi
@@ -501,7 +513,11 @@ record_abnormal_exit() {
 terminate_controlled_process_tree() {
   local attempt
   [[ "${controlled_child_active:-0}" -eq 1 ]] || return 0
-  if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ -f "${ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE:-}" ]] && \
+     queue_state_validate_file "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" active_process 2>/dev/null; then
+    active_phase="$(queue_state_read_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" active_process phase 2>/dev/null || printf '%s' "${active_phase:-startup}")"
+  fi
+  if [[ "${controlled_child_group_verified:-0}" -eq 1 && "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
     log_error "terminating controlled queue process group ${controlled_child_pgid} before releasing ownership"
     kill -TERM -- "-${controlled_child_pgid}" 2>/dev/null || true
   else
@@ -509,21 +525,25 @@ terminate_controlled_process_tree() {
     kill -TERM "$controlled_child_pid" 2>/dev/null || true
   fi
   for ((attempt = 0; attempt < 200; attempt += 1)); do
-    if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "${controlled_child_group_verified:-0}" -eq 1 && "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]]; then
       kill -0 -- "-${controlled_child_pgid}" 2>/dev/null || break
     else
       kill -0 "$controlled_child_pid" 2>/dev/null || break
     fi
     sleep 0.01
   done
-  if [[ "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]] && kill -0 -- "-${controlled_child_pgid}" 2>/dev/null; then
+  if [[ "${controlled_child_group_verified:-0}" -eq 1 && "${controlled_child_pgid:-}" =~ ^[1-9][0-9]*$ ]] && kill -0 -- "-${controlled_child_pgid}" 2>/dev/null; then
     kill -KILL -- "-${controlled_child_pgid}" 2>/dev/null || true
   elif kill -0 "$controlled_child_pid" 2>/dev/null; then
     kill -KILL "$controlled_child_pid" 2>/dev/null || true
   fi
   wait "${controlled_child_pid}" 2>/dev/null || true
+  if [[ -f "${controlled_worker_result:-}" ]] && validate_controlled_worker_identity_file "$controlled_worker_result" worker_result 2>/dev/null; then
+    active_phase="$(queue_state_read_field "$controlled_worker_result" worker_result phase 2>/dev/null || printf '%s' "${active_phase:-startup}")"
+  fi
   controlled_child_active=0
-  rm -f -- "${controlled_worker_gate:-}" "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || true
+  rm -f -- "${controlled_worker_registration:-}" "${controlled_worker_authorization:-}" "${controlled_worker_result:-}" \
+    "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || true
 }
 
 install_queue_traps() {
@@ -534,7 +554,8 @@ install_queue_traps() {
 
 reconcile_active_process_record_under_guard() {
   local file="$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" child_pid child_pgid child_start recorded_start recorded_run
-  [[ -f "$file" ]] || return 0
+  queue_state_require_singleton_path "$file" optional || fail "Invalid active queue process path: ${file}"
+  [[ -e "$file" ]] || return 0
   queue_state_validate_file "$file" active_process || fail "Invalid active queue process record: ${file}"
   recorded_run="$(queue_state_read_field "$file" active_process run_id)"
   child_pid="$(queue_state_read_field "$file" active_process child_pid)"
@@ -553,7 +574,6 @@ acquire_queue_lease() {
   local -A owner_fields=()
   mkdir -p "$CODEX_FLOW_QUEUE_DIR"; queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"; local_host="$(queue_host_identity)"
   lease_owner_token="$(queue_owner_token)"; lease_owner_host="$local_host"; local_start="$(queue_process_start_identity "$$")"; lease_generation=1
-  lease_owner_process_start="$local_start"
   [[ "$local_start" != unavailable ]] || fail 'Cannot establish local process-start identity; queue lease acquisition is unverifiable'
   queue_test_barrier lease_acquire
   queue_state_guard_enter || fail 'Cannot acquire queue serialization guard'
@@ -815,6 +835,7 @@ process_issue_on_batch_branch() {
   fi
 
   queue_set_active_phase issue_context_fetch; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_context_fetch before
+  queue_failpoint fail_issue_context_fetch
   log_info "fetching issue ${issue_number}"
   if [[ "$issue_state" == leased ]]; then
     if [[ -f "$(issue_file_path "$issue_number")" ]]; then
@@ -856,6 +877,7 @@ process_issue_on_batch_branch() {
     else
       rm -rf "$CODEX_FLOW_CODEX_DIR"
       queue_set_active_phase issue_flow; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow before
+      queue_failpoint fail_issue_flow
 
       log_info "running issue flow for issue ${issue_number}"
       if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then issue_light_review=1; fi
@@ -945,7 +967,75 @@ queue_set_active_phase() {
   active_phase="$requested"
   [[ "${controlled_worker:-0}" -eq 1 ]] || return 0
   queue_state_write_active_process "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" "$run_id" "$requested" \
-    "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" "$$" "$lease_owner_process_start"
+    "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" "$controlled_parent_pid" \
+    "$controlled_parent_process_start" "$lease_owner_token" "$lease_generation" || return 1
+  controlled_worker_test_pause "after_active_phase_${requested}"
+}
+
+queue_exact_process_is_live() {
+  local pid="$1" expected_start="$2" actual_start
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual_start="$(queue_process_start_identity "$pid")"
+  [[ "$actual_start" != unavailable && "$actual_start" == "$expected_start" ]]
+}
+
+controlled_worker_parent_is_live() {
+  queue_exact_process_is_live "$controlled_parent_pid" "$controlled_parent_process_start"
+}
+
+controlled_worker_require_parent() {
+  local attempt
+  controlled_worker_parent_is_live && return 0
+  if [[ "${controlled_worker_registered:-0}" -eq 1 ]]; then
+    for ((attempt = 0; attempt < 150; attempt += 1)); do sleep 0.01; done
+  fi
+  return 1
+}
+
+controlled_worker_test_pause() {
+  local name="$1" directory="${CODEX_FLOW_QUEUE_TEST_PAUSE_DIR:-}" label="${CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL:-$$}"
+  [[ "$ISSUE_FORGE_INTERNAL_QUEUE_TEST_MODE" == 1 && -n "$directory" && "${CODEX_FLOW_QUEUE_TEST_PAUSE_AT:-}" == "$name" ]] || return 0
+  mkdir -p "$directory"
+  : > "${directory}/paused.${name}.${label}"
+  while [[ ! -f "${directory}/release.${name}.${label}" ]]; do
+    controlled_worker_require_parent || return 1
+    sleep 0.01
+  done
+}
+
+controlled_worker_record_result() {
+  local status="$1"
+  [[ "${controlled_worker_registered:-0}" -eq 1 ]] || return 0
+  trap - EXIT INT TERM
+  queue_state_write_worker_result "$controlled_worker_result" "$run_id" "$controlled_child_pid" "$controlled_child_pgid" \
+    "$controlled_child_process_start" "$controlled_parent_pid" "$controlled_parent_process_start" "$lease_owner_token" \
+    "$lease_generation" "${active_phase:-worker_startup}" "$status" "${controlled_worker_signal:-none}" || true
+  rm -f -- "$controlled_worker_registration" "$controlled_worker_authorization" || true
+  if ! controlled_worker_parent_is_live && [[ -e "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" ]]; then
+    if queue_state_validate_file "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" active_process 2>/dev/null && \
+       [[ "$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" child_pid)" == "$controlled_child_pid" ]] && \
+       [[ "$(queue_diagnostic_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" owner_token)" == "$lease_owner_token" ]]; then
+      rm -f -- "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || true
+    fi
+  fi
+}
+
+controlled_worker_signal_exit() {
+  controlled_worker_signal="$1"
+  case "$1" in INT) exit 130 ;; TERM) exit 143 ;; esac
+}
+
+validate_controlled_worker_identity_file() {
+  local file="$1" schema="$2"
+  queue_state_validate_file "$file" "$schema" || return 1
+  [[ "$(queue_state_read_field "$file" "$schema" run_id)" == "$run_id" && \
+     "$(queue_state_read_field "$file" "$schema" child_pid)" == "$controlled_child_pid" && \
+     "$(queue_state_read_field "$file" "$schema" child_pgid)" == "$controlled_child_pgid" && \
+     "$(queue_state_read_field "$file" "$schema" process_start)" == "$controlled_child_process_start" && \
+     "$(queue_state_read_field "$file" "$schema" owner_pid)" == "$controlled_parent_pid" && \
+     "$(queue_state_read_field "$file" "$schema" owner_process_start)" == "$controlled_parent_process_start" && \
+     "$(queue_state_read_field "$file" "$schema" owner_token)" == "$lease_owner_token" && \
+     "$(queue_state_read_field "$file" "$schema" lease_generation)" == "$lease_generation" ]]
 }
 
 process_batch_body() {
@@ -981,7 +1071,8 @@ process_batch_body() {
   mkdir -p "${batch_dir}/history"
   [[ -f "${batch_dir}/token-usage.tsv" ]] || initialize_batch_token_usage_tsv "$batch_dir"
   [[ -f "$issues_file" ]] || : > "$issues_file"
-  printf '%s\n' "$batch_id" > "${CODEX_FLOW_QUEUE_DIR}/current_batch"
+  queue_state_publish_plain_singleton "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id" || \
+    fail 'Cannot publish current_batch singleton'
 
   if [[ "$batch_state" == planned ]]; then
     queue_set_active_phase batch_branch_preparation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
@@ -1017,12 +1108,14 @@ process_batch_body() {
   if [[ "$batch_state" == issues_running ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" issues_running checks_running; batch_state=checks_running; fi
   if [[ "$batch_state" == checks_running ]]; then
     queue_set_active_phase batch_checks; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
+    queue_failpoint fail_batch_checks
     ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks after
     queue_state_transition "$batch_state_file" batch "$batch_id" checks_running review_running; batch_state=review_running
   fi
   if [[ "$batch_state" == review_running ]]; then
     queue_set_active_phase batch_review; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review before
+    queue_failpoint fail_batch_review
     ensure_batch_review_accepted \
     "$batch_dir" \
     "$issues_file" \
@@ -1043,6 +1136,7 @@ process_batch_body() {
 
   if [[ "$batch_state" == accepted ]]; then queue_state_transition "$batch_state_file" batch "$batch_id" accepted publishing; batch_state=publishing; fi
   queue_set_active_phase batch_publish; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
+  queue_failpoint fail_batch_publish
   if [[ -f "$publish_state_file" ]]; then
     queue_state_validate_file "$publish_state_file" publish
     batch_pr_number="$(queue_state_read_field "$publish_state_file" publish pr_number)"
@@ -1079,12 +1173,18 @@ process_batch_body() {
 }
 
 process_batch() {
-  local start_index="$1" end_index="$2" worker_status=1 attempt
+  local start_index="$1" end_index="$2" worker_status=1 attempt parent_pgid registration_phase
   local first_issue="${issue_numbers[$start_index]}" last_issue="${issue_numbers[$((end_index - 1))]}"
   queue_state_guard_enter || fail 'Cannot acquire queue serialization guard before batch phase'
   assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
-  controlled_worker_gate="$(dirname "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE")/worker.${run_id}.${lease_owner_token}.start"
-  rm -f -- "$controlled_worker_gate"
+  controlled_parent_pid="$$"
+  controlled_parent_process_start="$(queue_process_start_identity "$$")"
+  parent_pgid="$(queue_process_group_identity "$$")" || {
+    queue_state_guard_leave || true
+    fail 'Cannot establish queue parent process-group identity'
+  }
+  controlled_worker_prefix="$(dirname "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE")/worker.${run_id}.${lease_owner_token}.${lease_generation}"
+  rm -f -- "${controlled_worker_prefix}."*.registration "${controlled_worker_prefix}."*.authorization "${controlled_worker_prefix}."*.result
   set -m
   (
     trap - EXIT INT TERM
@@ -1092,43 +1192,236 @@ process_batch() {
     controlled_child_pid="$BASHPID"
     controlled_child_pgid="$(queue_process_group_identity "$BASHPID")"
     controlled_child_process_start="$(queue_process_start_identity "$BASHPID")"
-    while [[ ! -f "$controlled_worker_gate" ]]; do sleep 0.01; done
+    controlled_worker_registration="${controlled_worker_prefix}.${controlled_child_pid}.registration"
+    controlled_worker_authorization="${controlled_worker_prefix}.${controlled_child_pid}.authorization"
+    controlled_worker_result="${controlled_worker_prefix}.${controlled_child_pid}.result"
+    controlled_worker_registered=0
+    controlled_worker_signal=none
+    active_phase="batch-${first_issue}-${last_issue}"
+    [[ "$controlled_child_pgid" =~ ^[1-9][0-9]*$ && "$controlled_child_process_start" != unavailable ]] || exit 1
+    controlled_worker_test_pause after_worker_fork_before_registration || exit 1
+    controlled_worker_require_parent || exit 1
+    queue_state_write_worker_registration "$controlled_worker_registration" "$run_id" "$controlled_child_pid" \
+      "$controlled_child_pgid" "$controlled_child_process_start" "$controlled_parent_pid" "$controlled_parent_process_start" \
+      "$lease_owner_token" "$lease_generation"
+    controlled_worker_registered=1
+    trap 'controlled_worker_record_result $?' EXIT
+    trap 'controlled_worker_signal_exit INT' INT
+    trap 'controlled_worker_signal_exit TERM' TERM
+    while [[ ! -e "$controlled_worker_authorization" ]]; do
+      controlled_worker_require_parent || exit 1
+      sleep 0.01
+    done
+    validate_controlled_worker_identity_file "$controlled_worker_authorization" worker_authorization || exit 1
+    controlled_worker_require_parent || exit 1
+    controlled_worker_test_pause after_worker_authorization_before_first_external_mutation || exit 1
+    controlled_worker_require_parent || exit 1
     process_batch_body "$start_index" "$end_index"
   ) &
   controlled_child_pid=$!
   set +m
   controlled_child_active=1
+  controlled_child_group_verified=0
   controlled_child_pgid=''
-  for ((attempt = 0; attempt < 100; attempt += 1)); do
-    controlled_child_pgid="$(queue_process_group_identity "$controlled_child_pid" || true)"
-    [[ -n "$controlled_child_pgid" ]] && break
+  controlled_child_process_start="$(queue_process_start_identity "$controlled_child_pid")"
+  controlled_worker_registration="${controlled_worker_prefix}.${controlled_child_pid}.registration"
+  controlled_worker_authorization="${controlled_worker_prefix}.${controlled_child_pid}.authorization"
+  controlled_worker_result="${controlled_worker_prefix}.${controlled_child_pid}.result"
+  for ((attempt = 0; attempt < 1000; attempt += 1)); do
+    if [[ -e "$controlled_worker_registration" ]]; then break; fi
+    queue_exact_process_is_live "$controlled_child_pid" "$controlled_child_process_start" || break
     sleep 0.01
   done
-  controlled_child_process_start="$(queue_process_start_identity "$controlled_child_pid")"
-  if [[ -z "$controlled_child_pgid" || "$controlled_child_process_start" == unavailable ]]; then
+  if [[ ! -e "$controlled_worker_registration" ]] || ! queue_state_validate_file "$controlled_worker_registration" worker_registration; then
     terminate_controlled_process_tree || true
     queue_state_guard_leave || true
-    fail 'Cannot establish controlled batch process-group identity'
+    fail 'Controlled batch worker exited before publishing a complete registration'
   fi
+  controlled_child_pgid="$(queue_state_read_field "$controlled_worker_registration" worker_registration child_pgid)"
+  controlled_child_process_start="$(queue_state_read_field "$controlled_worker_registration" worker_registration process_start)"
+  if ! validate_controlled_worker_identity_file "$controlled_worker_registration" worker_registration || \
+     [[ "$controlled_child_pgid" == "$parent_pgid" ]] || \
+     [[ "$(queue_process_group_identity "$controlled_child_pid" || true)" != "$controlled_child_pgid" ]]; then
+    terminate_controlled_process_tree || true
+    queue_state_guard_leave || true
+    fail 'Controlled batch worker registration has an invalid or non-distinct process-group identity'
+  fi
+  controlled_child_group_verified=1
+  registration_phase="batch-${first_issue}-${last_issue}"
   queue_state_write_active_process "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" "$run_id" \
-    "batch-${first_issue}-${last_issue}" "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" \
-    "$$" "$lease_owner_process_start"
-  : > "$controlled_worker_gate"
+    "$registration_phase" "$controlled_child_pid" "$controlled_child_pgid" "$controlled_child_process_start" \
+    "$controlled_parent_pid" "$controlled_parent_process_start" "$lease_owner_token" "$lease_generation"
+  queue_test_pause after_worker_registration_before_authorization
+  queue_state_write_worker_authorization "$controlled_worker_authorization" "$run_id" "$controlled_child_pid" \
+    "$controlled_child_pgid" "$controlled_child_process_start" "$controlled_parent_pid" "$controlled_parent_process_start" \
+    "$lease_owner_token" "$lease_generation"
   if wait "$controlled_child_pid"; then worker_status=0; else worker_status=$?; fi
   controlled_child_active=0
-  rm -f -- "$controlled_worker_gate"
   if kill -0 -- "-${controlled_child_pgid}" 2>/dev/null; then
     queue_state_guard_abandon || true
     log_error "Controlled process group ${controlled_child_pgid} outlived batch worker ${controlled_child_pid}; ownership remains fenced by the inherited guard"
     log_error "safe recovery: terminate it with: kill -TERM -- -${controlled_child_pgid}; then resume run ${run_id}"
     return 1
   fi
+  if [[ -f "$controlled_worker_result" ]] && validate_controlled_worker_identity_file "$controlled_worker_result" worker_result; then
+    active_phase="$(queue_state_read_field "$controlled_worker_result" worker_result phase)"
+  elif [[ -f "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" ]]; then
+    active_phase="$(queue_state_read_field "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" active_process phase)"
+  fi
+  rm -f -- "$controlled_worker_registration" "$controlled_worker_authorization" "$controlled_worker_result"
   rm -f -- "$ISSUE_FORGE_INTERNAL_QUEUE_ACTIVE_PROCESS_FILE" || {
     queue_state_guard_leave || true
     fail 'Cannot remove completed active-process record'
   }
   queue_state_guard_leave || fail 'Cannot release queue serialization guard after batch phase'
   return "$worker_status"
+}
+
+validate_completed_queue_run() {
+  local manifest="${run_state_dir}/manifest.state" state_file="${run_state_dir}/run.state" state
+  local -A fields=()
+  [[ -d "$run_state_dir" && ! -L "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
+  queue_state_parse_file "$manifest" manifest fields || fail "Invalid completed-run manifest: ${manifest}"
+  queue_state_validate_file "$manifest" manifest || fail "Invalid completed-run manifest: ${manifest}"
+  [[ "${fields[run_id]}" == "$run_id" ]] || fail "Manifest run ID mismatch for ${run_id}"
+  [[ "${fields[base_branch]}" == "$CODEX_FLOW_BASE_BRANCH" && "${fields[base_ref]}" == "$CODEX_FLOW_BASE_REF" ]] || \
+    fail "Completed-run repository configuration mismatch for ${run_id}"
+  [[ "${fields[repository_identity]}" == "$(canonical_repository_identity)" ]] || \
+    fail 'Completed-run repository identity does not match the immutable manifest'
+  queue_state_validate_file "$state_file" run || fail "Invalid completed run state: ${state_file}"
+  [[ "$(queue_state_read_field "$state_file" run run_id)" == "$run_id" ]] || fail "Run state identity mismatch for ${run_id}"
+  state="$(queue_state_read_field "$state_file" run state)"
+  [[ "$state" == completed ]] || return 2
+}
+
+finalize_completed_queue_run() {
+  local pointer="${CODEX_FLOW_QUEUE_DIR}/current" batch_pointer="${CODEX_FLOW_QUEUE_DIR}/current_batch"
+  local found='' record='' owner_run='' owner_host='' owner_pid='' owner_start='' owner_token='' owner_generation=''
+  local owner_status local_host audit pointed
+  local -A owner_fields=()
+  validate_completed_queue_run || fail "Queue run ${run_id} is not completed and cannot use completion finalization"
+  queue_lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock"
+  queue_state_guard_enter || fail 'Cannot acquire queue serialization guard for completed-run finalization'
+  reconcile_active_process_record_under_guard
+  queue_state_require_singleton_path "$pointer" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid current queue pointer path: ${pointer}"
+  }
+  if [[ -e "$pointer" ]]; then
+    pointed="$(queue_state_read_field "$pointer" pointer run_id)" || {
+      queue_state_guard_leave || true
+      fail "Invalid current queue pointer: ${pointer}"
+    }
+    [[ "$pointed" == "$run_id" ]] || {
+      queue_state_guard_leave || true
+      fail "Current pointer belongs to different run ${pointed}; completed run ${run_id} was not modified"
+    }
+  fi
+  queue_state_require_singleton_path "$batch_pointer" optional || {
+    queue_state_guard_leave || true
+    fail "Invalid current_batch singleton path: ${batch_pointer}"
+  }
+  if [[ -d "$queue_lock" && ! -L "$queue_lock" ]]; then
+    found="$(find "$queue_lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+    [[ -n "$found" && "$found" != *$'\n'* ]] || {
+      queue_state_guard_leave || true
+      fail "Invalid queue lease during completed-run finalization: ${queue_lock}"
+    }
+    record="$found"
+    if ! queue_state_parse_file "$record" lease owner_fields || ! queue_state_validate_file "$record" lease; then
+      queue_state_guard_leave || true
+      fail "Invalid queue lease owner during completed-run finalization: ${record}"
+    fi
+    owner_run="${owner_fields[run_id]}"; owner_host="${owner_fields[owner_host]}"; owner_pid="${owner_fields[owner_pid]}"
+    owner_start="${owner_fields[process_start]}"; owner_token="${owner_fields[owner_token]}"; owner_generation="${owner_fields[lease_generation]}"
+    [[ "$owner_run" == "$run_id" ]] || {
+      queue_state_guard_leave || true
+      fail "Queue lease belongs to different run ${owner_run}; completed run ${run_id} was not modified"
+    }
+    local_host="$(queue_host_identity)"; owner_status=unverifiable
+    if [[ "$owner_host" == "$local_host" ]]; then
+      if queue_exact_process_is_live "$owner_pid" "$owner_start"; then owner_status=live
+      elif [[ -d /proc && ! -e "/proc/${owner_pid}" ]]; then owner_status=dead
+      fi
+      if [[ "$owner_status" == live ]]; then
+        queue_state_guard_leave || true
+        fail "Completed-run finalization is still active in same-host PID ${owner_pid} for run ${run_id}"
+      fi
+      if [[ "$owner_status" != dead && "$take_over_lease" -ne 1 ]]; then
+        queue_state_guard_leave || true
+        fail "Completed-run lease owner is unverifiable; rerun --resume ${run_id} --take-over-lease only after asserting it stopped"
+      fi
+    elif [[ "$take_over_lease" -ne 1 ]]; then
+      queue_state_guard_leave || true
+      fail "Completed-run lease belongs to host ${owner_host}; rerun --resume ${run_id} --take-over-lease"
+    fi
+    audit="${CODEX_FLOW_QUEUE_DIR}/lease.finalized.${owner_generation}.${owner_token}"
+    [[ ! -e "$audit" ]] || {
+      queue_state_guard_leave || true
+      fail "Completed-run lease audit destination already exists: ${audit}"
+    }
+    mv -T -- "$queue_lock" "$audit" || {
+      queue_state_guard_leave || true
+      fail 'Completed-run stale lease retirement failed'
+    }
+  elif [[ -e "$queue_lock" || -L "$queue_lock" ]]; then
+    queue_state_guard_leave || true
+    fail "Invalid queue lease path during completed-run finalization: ${queue_lock}"
+  fi
+  if [[ -e "$pointer" ]]; then
+    pointed="$(queue_state_read_field "$pointer" pointer run_id)" || {
+      queue_state_guard_leave || true
+      fail "Invalid current queue pointer: ${pointer}"
+    }
+    [[ "$pointed" == "$run_id" ]] || {
+      queue_state_guard_leave || true
+      fail "Current pointer belongs to different run ${pointed}; completed run ${run_id} was not modified"
+    }
+    queue_state_remove_pointer_if_matches "$pointer" "$run_id" || {
+      queue_state_guard_leave || true
+      fail 'Current pointer changed during completed-run finalization'
+    }
+  fi
+  [[ ! -e "$batch_pointer" ]] || rm -- "$batch_pointer" || {
+    queue_state_guard_leave || true
+    fail 'Cannot remove stale current_batch during completed-run finalization'
+  }
+  queue_state_guard_leave || fail 'Cannot release serialization guard after completed-run finalization'
+  run_completed=1
+  trap - EXIT INT TERM
+  log_info "Queue run ${run_id} is already completed; control plane finalized without rerunning work"
+}
+
+resolve_completed_lease_without_current() {
+  local lock="${CODEX_FLOW_QUEUE_DIR}/lease.lock" found state
+  local -A fields=()
+  resolved_completion_run_id=''
+  queue_state_guard_enter || fail 'Cannot inspect queue lease while resolving --resume current'
+  if [[ -d "$lock" && ! -L "$lock" ]]; then
+    found="$(find "$lock" -maxdepth 1 -type f -name 'owner.*.state' -print 2>/dev/null | LC_ALL=C sort)"
+    [[ -n "$found" && "$found" != *$'\n'* ]] || {
+      queue_state_guard_leave || true
+      fail "Invalid queue lease while resolving --resume current: ${lock}"
+    }
+    if ! queue_state_parse_file "$found" lease fields || ! queue_state_validate_file "$found" lease; then
+      queue_state_guard_leave || true
+      fail "Invalid queue lease owner while resolving --resume current: ${found}"
+    fi
+    resolved_completion_run_id="${fields[run_id]}"
+    [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${resolved_completion_run_id}/run.state" ]] || {
+      queue_state_guard_leave || true
+      fail "Queue lease names unknown run ${resolved_completion_run_id}"
+    }
+    state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${resolved_completion_run_id}/run.state" run state)"
+    if [[ "$state" != completed ]]; then
+      queue_state_guard_leave || true
+      fail "No current pointer is published; queue lease names unfinished run ${resolved_completion_run_id}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${resolved_completion_run_id}"
+    fi
+  elif [[ -e "$lock" || -L "$lock" ]]; then
+    queue_state_guard_leave || true
+    fail "Invalid queue lease path while resolving --resume current: ${lock}"
+  fi
+  queue_state_guard_leave || fail 'Cannot release queue guard after resolving --resume current'
 }
 
 main() {
@@ -1172,27 +1465,40 @@ main() {
   if [[ -e "${CODEX_FLOW_QUEUE_DIR}/lease.state" ]]; then
     fail 'Unsupported legacy queue lease schema/path .work/queue/lease.state; manual migration is required'
   fi
-  if [[ -f "${CODEX_FLOW_QUEUE_DIR}/current" ]] && ! grep -q $'^schema_version\t' "${CODEX_FLOW_QUEUE_DIR}/current"; then
+  queue_state_require_singleton_path "${CODEX_FLOW_QUEUE_DIR}/current" optional || \
+    fail "Invalid current queue pointer path: ${CODEX_FLOW_QUEUE_DIR}/current"
+  if [[ -e "${CODEX_FLOW_QUEUE_DIR}/current" ]] && ! grep -q $'^schema_version\t' "${CODEX_FLOW_QUEUE_DIR}/current"; then
     fail 'Unsupported legacy queue current schema v1; manual migration is required'
   fi
   install_queue_traps
   if [[ "$resume_requested" -eq 1 ]]; then
     if [[ "$resume_target" == current ]]; then
       current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
-      [[ -f "$current_pointer" ]] || fail 'No current resumable queue run is published'
-      queue_state_validate_file "$current_pointer" pointer || fail "Invalid current queue pointer: ${current_pointer}"
-      run_id="$(queue_state_read_field "$current_pointer" pointer run_id)"
-      [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" ]] || fail "Current pointer names unknown queue run ${run_id}"
-      current_state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" run state)"
-      if [[ "$current_state" == completed ]]; then
-        queue_state_remove_pointer_if_matches "$current_pointer" "$run_id" || fail 'Current pointer changed while repairing completed run'
-        fail 'No current resumable queue run is published (removed stale completed pointer)'
+      if [[ ! -e "$current_pointer" ]]; then
+        resolve_completed_lease_without_current
+        if [[ -n "$resolved_completion_run_id" ]]; then
+          run_id="$resolved_completion_run_id"
+        else
+          trap - EXIT INT TERM
+          log_info 'No current queue control-plane cleanup is pending; control plane is already finalized'
+          return 0
+        fi
+      else
+        queue_state_validate_file "$current_pointer" pointer || fail "Invalid current queue pointer: ${current_pointer}"
+        run_id="$(queue_state_read_field "$current_pointer" pointer run_id)"
+        [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" ]] || fail "Current pointer names unknown queue run ${run_id}"
+        current_state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}/run.state" run state)"
       fi
     else
       run_id="$resume_target"; queue_state_require_token 'resume run ID' "$run_id"
     fi
     run_state_dir="${CODEX_FLOW_QUEUE_RUNS_DIR}/${run_id}"
     [[ -d "$run_state_dir" ]] || fail "Unknown queue run ID: ${run_id}"
+    current_state="$(queue_state_read_field "${run_state_dir}/run.state" run state)"
+    if [[ "$current_state" == completed ]]; then
+      finalize_completed_queue_run
+      return 0
+    fi
     acquire_queue_lease
     queue_test_pause after_acquire
     load_queue_run_state
@@ -1200,13 +1506,16 @@ main() {
   else
     ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
     current_pointer="${CODEX_FLOW_QUEUE_DIR}/current"
-    if [[ -f "$current_pointer" ]]; then
+    queue_state_require_singleton_path "$current_pointer" optional || fail "Invalid current queue pointer path: ${current_pointer}"
+    if [[ -e "$current_pointer" ]]; then
       queue_state_validate_file "$current_pointer" pointer || fail "Invalid current queue pointer: ${current_pointer}"
       pointed_run="$(queue_state_read_field "$current_pointer" pointer run_id)"
       [[ -f "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed_run}/run.state" ]] || fail "Current pointer names unknown queue run ${pointed_run}"
       current_state="$(queue_state_read_field "${CODEX_FLOW_QUEUE_RUNS_DIR}/${pointed_run}/run.state" run state)"
-      [[ "$current_state" == completed ]] || fail "Current pointer names unfinished run ${pointed_run}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${pointed_run}"
-      queue_state_remove_pointer_if_matches "$current_pointer" "$pointed_run"
+      if [[ "$current_state" == completed ]]; then
+        fail "Current pointer names completed run ${pointed_run}; finalize control-plane cleanup with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${pointed_run}"
+      fi
+      fail "Current pointer names unfinished run ${pointed_run}; resume with: ${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_queue.sh --resume ${pointed_run}"
     fi
     run_id="$(queue_state_generate_run_id "$CODEX_FLOW_QUEUE_RUNS_DIR")"
     initialize_queue_run_minimal
@@ -1228,9 +1537,11 @@ main() {
     start_index="$end_index"
   done
   queue_state_transition "${run_state_dir}/run.state" run "run ${run_id}" running completed
+  queue_test_pause after_run_completed_before_current_cleanup
   queue_failpoint after_run_completed_before_current_cleanup
   assert_queue_lease_owned || fail 'Queue lease lost before completion pointer cleanup'
   queue_state_remove_pointer_if_matches "${CODEX_FLOW_QUEUE_DIR}/current" "$run_id" "$lease_owner_token" "$lease_generation"
+  queue_state_require_singleton_path "${CODEX_FLOW_QUEUE_DIR}/current_batch" optional || fail 'Invalid current_batch singleton path during completion'
   rm -f -- "${CODEX_FLOW_QUEUE_DIR}/current_batch"
   run_completed=1
   release_queue_lease
