@@ -59,6 +59,141 @@ status_outside_work() {
   git status --porcelain --untracked-files=all -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
 }
 
+queue_issue_frontier_error() {
+  printf 'Queue Issue frontier validation failed: %s\n' "$1" >&2
+  return 1
+}
+
+queue_validate_direct_issue_commit() {
+  local issue_number="$1"
+  local expected_base="$2"
+  local commit_sha="$3"
+  local commit_token parent extra count subject
+
+  git cat-file -e "${expected_base}^{commit}" 2>/dev/null \
+    || queue_issue_frontier_error "saved base ${expected_base} for Issue ${issue_number} is not a commit" \
+    || return 1
+  git cat-file -e "${commit_sha}^{commit}" 2>/dev/null \
+    || queue_issue_frontier_error "commit ${commit_sha} for Issue ${issue_number} is not a commit" \
+    || return 1
+  read -r commit_token parent extra <<< "$(git rev-list --parents -n 1 "$commit_sha")"
+  [[ "$commit_token" == "$commit_sha" && -n "$parent" && -z "${extra:-}" ]] \
+    || queue_issue_frontier_error "Issue ${issue_number} commit ${commit_sha} must have exactly one parent" \
+    || return 1
+  [[ "$parent" == "$expected_base" ]] \
+    || queue_issue_frontier_error "Issue ${issue_number} commit parent ${parent} does not equal expected frontier ${expected_base}" \
+    || return 1
+  count="$(git rev-list --count "${expected_base}..${commit_sha}")"
+  [[ "$count" == 1 ]] \
+    || queue_issue_frontier_error "Issue ${issue_number} commit range from ${expected_base} must contain exactly one commit, found ${count}" \
+    || return 1
+  subject="$(git show -s --format=%s "$commit_sha")"
+  [[ "$subject" == "chore: address issue #${issue_number}" ]] \
+    || queue_issue_frontier_error "Issue ${issue_number} commit subject is not deterministic: ${subject}" \
+    || return 1
+}
+
+validate_queue_issue_frontier() {
+  local batch_state_file batch_state batch_branch current_branch expected_frontier head
+  local issue_number issue_state_file issue_state issue_base issue_commit frontier_closed=0
+
+  [[ -n "${run_state_dir:-}" && -n "${current_batch_id:-}" ]] || return 0
+  declare -F queue_state_read_field >/dev/null 2>&1 || return 0
+  declare -p issue_numbers >/dev/null 2>&1 || return 0
+
+  batch_state_file="${run_state_dir}/batches/${current_batch_id}/batch.state"
+  [[ -f "$batch_state_file" && ! -L "$batch_state_file" ]] || return 0
+  batch_state="$(queue_state_read_field "$batch_state_file" batch state)" || return 1
+  expected_frontier="$(queue_state_read_field "$batch_state_file" batch base_commit)" || return 1
+  [[ "$expected_frontier" != none ]] || return 0
+  batch_branch="$(queue_state_read_field "$batch_state_file" batch branch)" || return 1
+  current_branch="$(git branch --show-current)"
+  [[ "$current_branch" == "$batch_branch" ]] \
+    || queue_issue_frontier_error "current branch ${current_branch:-detached} does not match batch branch ${batch_branch}" \
+    || return 1
+  head="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+    || queue_issue_frontier_error 'current HEAD is not a commit' \
+    || return 1
+
+  for issue_number in "${issue_numbers[@]}"; do
+    issue_state_file="${run_state_dir}/batches/${current_batch_id}/issues/${issue_number}.state"
+    [[ -f "$issue_state_file" && ! -L "$issue_state_file" ]] || continue
+    issue_state="$(queue_state_read_field "$issue_state_file" issue state)" || return 1
+    issue_base="$(queue_state_read_field "$issue_state_file" issue base_commit)" || return 1
+    issue_commit="$(queue_state_read_field "$issue_state_file" issue commit_sha)" || return 1
+
+    if [[ "$frontier_closed" -eq 1 ]]; then
+      [[ "$issue_state" == planned && "$issue_base" == none && "$issue_commit" == none ]] \
+        || queue_issue_frontier_error "Issue ${issue_number} follows the active frontier but is not pristine planned state" \
+        || return 1
+      continue
+    fi
+
+    case "$issue_state" in
+      acknowledged)
+        [[ "$issue_base" == "$expected_frontier" ]] \
+          || queue_issue_frontier_error "Issue ${issue_number} saved base ${issue_base} does not equal expected frontier ${expected_frontier}" \
+          || return 1
+        [[ "$issue_commit" != none ]] \
+          || queue_issue_frontier_error "acknowledged Issue ${issue_number} has no commit" \
+          || return 1
+        queue_validate_direct_issue_commit "$issue_number" "$expected_frontier" "$issue_commit" || return 1
+        expected_frontier="$issue_commit"
+        ;;
+      committed|artifacts_archived)
+        [[ "$issue_base" == "$expected_frontier" ]] \
+          || queue_issue_frontier_error "Issue ${issue_number} saved base ${issue_base} does not equal expected frontier ${expected_frontier}" \
+          || return 1
+        [[ "$issue_commit" != none ]] \
+          || queue_issue_frontier_error "Issue ${issue_number} state ${issue_state} has no commit" \
+          || return 1
+        queue_validate_direct_issue_commit "$issue_number" "$expected_frontier" "$issue_commit" || return 1
+        expected_frontier="$issue_commit"
+        [[ "$head" == "$expected_frontier" ]] \
+          || queue_issue_frontier_error "branch HEAD ${head} does not equal active Issue frontier ${expected_frontier}" \
+          || return 1
+        frontier_closed=1
+        ;;
+      running)
+        [[ "$issue_base" == "$expected_frontier" && "$issue_commit" == none ]] \
+          || queue_issue_frontier_error "running Issue ${issue_number} does not start from expected frontier ${expected_frontier}" \
+          || return 1
+        if [[ "$head" != "$expected_frontier" ]]; then
+          queue_validate_direct_issue_commit "$issue_number" "$expected_frontier" "$head" || return 1
+        fi
+        frontier_closed=1
+        ;;
+      leased)
+        [[ "$issue_commit" == none && ( "$issue_base" == none || "$issue_base" == "$expected_frontier" ) ]] \
+          || queue_issue_frontier_error "leased Issue ${issue_number} has an invalid base or commit identity" \
+          || return 1
+        [[ "$head" == "$expected_frontier" ]] \
+          || queue_issue_frontier_error "branch HEAD ${head} cannot become Issue ${issue_number} base; expected frontier is ${expected_frontier}" \
+          || return 1
+        frontier_closed=1
+        ;;
+      planned)
+        [[ "$issue_base" == none && "$issue_commit" == none ]] \
+          || queue_issue_frontier_error "planned Issue ${issue_number} already has base or commit identity" \
+          || return 1
+        [[ "$head" == "$expected_frontier" ]] \
+          || queue_issue_frontier_error "branch HEAD ${head} cannot become Issue ${issue_number} base; expected frontier is ${expected_frontier}" \
+          || return 1
+        frontier_closed=1
+        ;;
+      *)
+        queue_issue_frontier_error "Issue ${issue_number} has unsupported state ${issue_state}" || return 1
+        ;;
+    esac
+  done
+
+  if [[ "$frontier_closed" -eq 0 && "$batch_state" == issues_running ]]; then
+    [[ "$head" == "$expected_frontier" ]] \
+      || queue_issue_frontier_error "branch HEAD ${head} does not equal final acknowledged Issue frontier ${expected_frontier}" \
+      || return 1
+  fi
+}
+
 ensure_clean_worktree() {
   local message="$1"
 
@@ -66,6 +201,8 @@ ensure_clean_worktree() {
     printf '%s\n' "$message" >&2
     exit 1
   fi
+
+  validate_queue_issue_frontier || exit 1
 }
 
 resolve_issue_number() {
