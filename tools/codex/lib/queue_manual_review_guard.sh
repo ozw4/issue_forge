@@ -12,8 +12,8 @@ queue_manual_review_guard_error() {
 queue_manual_review_validate_report() {
   local report="$1"
   local expected_run="$2"
-  local phase_output="$3"
-  local schema run phase last_index index
+  local -n phase_result="$3"
+  local schema run report_phase last_index index
   local -a lines=()
 
   queue_state_require_singleton_path "$report" required \
@@ -49,11 +49,11 @@ queue_manual_review_validate_report() {
   [[ "${lines[2]}" == $'phase\t'* ]] \
     || queue_manual_review_guard_error "manual-review report lacks phase: ${report}" \
     || return 1
-  phase="${lines[2]#*$'\t'}"
-  case "$phase" in
+  report_phase="${lines[2]#*$'\t'}"
+  case "$report_phase" in
     issue_flow|batch_checks|batch_review) ;;
     *)
-      queue_manual_review_guard_error "unsupported manual-review phase ${phase}: ${report}"
+      queue_manual_review_guard_error "unsupported manual-review phase ${report_phase}: ${report}"
       return 1
       ;;
   esac
@@ -77,14 +77,14 @@ queue_manual_review_validate_report() {
     esac
   done
 
-  printf -v "$phase_output" '%s' "$phase"
+  phase_result="$report_phase"
 }
 
 queue_manual_review_inspect_state() {
   local state_file="$1"
-  local report_output="$2"
-  local phase_output="$3"
-  local state run report phase
+  local -n report_result="$2"
+  local -n phase_result="$3"
+  local state run report_path report_phase
 
   [[ -e "$state_file" ]] || return 1
   queue_state_validate_file "$state_file" run \
@@ -93,10 +93,10 @@ queue_manual_review_inspect_state() {
   state="$(queue_state_read_field "$state_file" run state)" || return 2
   [[ "$state" == manual_review_required ]] || return 1
   run="$(queue_state_read_field "$state_file" run run_id)" || return 2
-  report="$(dirname "$state_file")/manual-review.txt"
-  queue_manual_review_validate_report "$report" "$run" phase || return 2
-  printf -v "$report_output" '%s' "$report"
-  printf -v "$phase_output" '%s' "$phase"
+  report_path="$(dirname "$state_file")/manual-review.txt"
+  queue_manual_review_validate_report "$report_path" "$run" report_phase || return 2
+  report_result="$report_path"
+  phase_result="$report_phase"
 }
 
 queue_manual_review_require_clean_resolution() {
