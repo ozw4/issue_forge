@@ -97,3 +97,8 @@ bootstrap_issue_branch() {
   # shellcheck disable=SC2034
   CODEX_FLOW_BOOTSTRAP_BRANCH_NAME="$branch_name"
 }
+
+if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 ]]; then
+  # shellcheck source=tools/codex/lib/queue_publish_binding.sh
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/queue_publish_binding.sh"
+fi
