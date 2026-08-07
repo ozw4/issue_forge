@@ -176,11 +176,11 @@ queue_install_publish_state_validation() {
   eval "$definition"
 
   queue_state_validate_file() {
-    local file="$1" schema="$2"
+    local file="$1" schema="$2" name="${1##*/}"
     issue_forge_queue_state_validate_file_original "$@" || return 1
-    case "$schema" in
-      batch) queue_validate_publish_state_for_batch_file "$file" ;;
-      publish) queue_validate_publish_state_file_path "$file" ;;
+    case "$schema:$name" in
+      batch:batch.state) queue_validate_publish_state_for_batch_file "$file" ;;
+      publish:publish.state) queue_validate_publish_state_file_path "$file" ;;
     esac
   }
 }
