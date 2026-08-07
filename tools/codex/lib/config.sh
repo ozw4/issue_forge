@@ -98,6 +98,23 @@ if ! CODEX_FLOW_RESOLVED_REPO_ROOT="$(resolve_issue_forge_consumer_repo_root)"; 
   exit 1
 fi
 
-issue_forge_load_consumer_config "${CODEX_FLOW_RESOLVED_REPO_ROOT}"
+if [[ "${ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG:-0}" == 1 ]]; then
+  ISSUE_FORGE_CONFIG_CALLER="${BASH_SOURCE[1]:-}"
+  ISSUE_FORGE_CONFIG_CALLER_DIR="$(cd "$(dirname "${ISSUE_FORGE_CONFIG_CALLER}")" 2>/dev/null && pwd -P)" || \
+    issue_forge_config_error 'Cannot validate the private queue configuration bootstrap caller'
+  ISSUE_FORGE_CONFIG_ENGINE_CODEX_DIR="$(cd "${ISSUE_FORGE_ENGINE_CODEX_DIR}" 2>/dev/null && pwd -P)" || \
+    issue_forge_config_error 'Cannot validate the private queue configuration bootstrap engine path'
+  ISSUE_FORGE_CONFIG_MINIMAL_DECLARATION="$(declare -p ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG 2>/dev/null || true)"
+  if [[ "${ISSUE_FORGE_CONFIG_CALLER_DIR}/$(basename "${ISSUE_FORGE_CONFIG_CALLER}")" != \
+        "${ISSUE_FORGE_CONFIG_ENGINE_CODEX_DIR}/run_issue_queue.sh" || \
+        "${ISSUE_FORGE_CONFIG_MINIMAL_DECLARATION}" != declare\ -r* ]]; then
+    issue_forge_config_error 'Private minimal queue configuration bootstrap is available only to run_issue_queue.sh'
+  fi
+  issue_forge_load_consumer_config_unvalidated "${CODEX_FLOW_RESOLVED_REPO_ROOT}"
+  unset ISSUE_FORGE_CONFIG_CALLER ISSUE_FORGE_CONFIG_CALLER_DIR ISSUE_FORGE_CONFIG_ENGINE_CODEX_DIR \
+    ISSUE_FORGE_CONFIG_MINIMAL_DECLARATION
+else
+  issue_forge_load_consumer_config "${CODEX_FLOW_RESOLVED_REPO_ROOT}"
+fi
 unset CODEX_FLOW_RESOLVED_REPO_ROOT
 readonly ISSUE_FORGE_RUNTIME_CONFIG_LOADED=1

@@ -688,6 +688,18 @@ queue_side_effect_snapshot() {
   printf 'merge\t%s\n' "$(awk '$1 == "pr" && $2 == "merge" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")"
 }
 
+write_completion_cleanup_fixture() {
+  local path="$1" run="$2" token="$3" generation="$4" lease_required="$5" batch="$6" phase="$7"
+  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nlease_required\t%s\nbatch_pointer\t%s\nphase\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+    "$run" "$token" "$generation" "$lease_required" "$batch" "$phase" > "$path"
+}
+
+write_queue_pointer_fixture() {
+  local path="$1" run="$2" token="$3" generation="$4"
+  printf 'schema_version\t2\nrun_id\t%s\nowner_token\t%s\nlease_generation\t%s\nupdated_at\t2026-08-07T00:00:00Z\n' \
+    "$run" "$token" "$generation" > "$path"
+}
+
 write_fixture_files() {
   cat > "${repo_dir}/smoke-target.txt" <<'EOF'
 baseline
@@ -844,7 +856,7 @@ if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
       issue_title='${QUEUE_ISSUE_TITLE}'
       issue_url='${QUEUE_ISSUE_URL}'
       ;;
-    42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63)
+    42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63|64|65|66|67|68|69|70|71|72|73|74|75|76|77|78|79|80)
       issue_title="Control Plane Issue \${issue_number}"
       issue_url="https://example.test/issues/\${issue_number}"
       ;;
@@ -2526,6 +2538,7 @@ run_queue_private_environment_smoke() {
     'QUEUE_STATE_ASSERT_IN_PROGRESS=1'
     'QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9'
     'QUEUE_STATE_GUARD_DEPTH=1 QUEUE_STATE_GUARD_FD=9 QUEUE_STATE_ASSERT_IN_PROGRESS=1'
+    'ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG=1'
   )
   local -a injection_words=()
   log 'running queue private-environment and preflight-signal smoke'
@@ -2550,6 +2563,13 @@ run_queue_private_environment_smoke() {
   done
   assert_equals 0 "$(awk '$1 == "issue" && $2 == "view" { count += 1 } END { print count + 0 }' "${state_dir}/gh.log")" 'private-variable injection Issue fetch count'
   assert_equals 0 "$(awk '$1 == "switch" || $1 == "push" { count += 1 } END { print count + 0 }' "${state_dir}/git.log")" 'private-variable injection Git mutation count'
+
+  if (cd "$repo_dir"; env ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG=1 bash -c \
+      'source vendor/issue_forge/tools/codex/lib/config.sh') > "${state_dir}/queue-private-config-bootstrap.log" 2>&1; then
+    fail 'a caller outside run_issue_queue.sh bypassed full consumer configuration validation'
+  fi
+  assert_file_contains "${state_dir}/queue-private-config-bootstrap.log" \
+    'Private minimal queue configuration bootstrap is available only to run_issue_queue.sh'
 
   before_snapshot="$(queue_tree_snapshot "${repo_dir}/.work/queue")"
   if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_QUEUE_FAILPOINT=after_minimal_run_publication \
@@ -2988,6 +3008,22 @@ run_queue_completion_cleanup_transaction_smoke() {
     before_completion_cleanup_terminal
   )
   local -a issues=(56 57 58 59 60 61)
+  local -a config_overrides=(
+    $'CODEX_FLOW_BASE_BRANCH=\'changed-after-completion\'\nCODEX_FLOW_BASE_REF=\'origin/changed-after-completion\'\nCODEX_FLOW_PROMPTS_DIR=\'/missing/completion-only-prompts\''
+    "CODEX_FLOW_QUEUE_REVIEW_EVERY=0"
+    "CODEX_FLOW_BATCH_REVIEW_REASONING=''"
+    "CODEX_FLOW_CHECKS_COMMAND=''"
+    "CODEX_FLOW_PROMPTS_DIR=''"
+    "CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS=0"
+  )
+  local -a config_diagnostics=(
+    'Missing prompt template'
+    'queue review interval must be a positive integer: 0'
+    'Missing required consumer config: batch review reasoning'
+    'Missing required consumer config: checks command'
+    'Missing required consumer config: prompts directory'
+    'auto-merge wait seconds must be a positive integer: 0'
+  )
 
   log 'running completed cleanup transaction SIGKILL smoke'
   marker="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)/issue-forge/queue/completion-cleanup.state"
@@ -3025,14 +3061,10 @@ run_queue_completion_cleanup_transaction_smoke() {
     kill -0 "$owner_pid" 2>/dev/null && fail "completed owner survived kill -9 before ${boundary}"
     assert_file_contains "${repo_dir}/.work/queue/runs/${run_id}/run.state" $'state\tcompleted'
 
-    if [[ "$index" -eq 0 ]]; then
-      {
-        cat "$project_backup"
-        printf '%s\n' "CODEX_FLOW_BASE_BRANCH='changed-after-completion'"
-        printf '%s\n' "CODEX_FLOW_BASE_REF='origin/changed-after-completion'"
-        printf '%s\n' "CODEX_FLOW_PROMPTS_DIR='/missing/completion-only-prompts'"
-      } > "${repo_dir}/.issue_forge/project.sh"
-    fi
+    {
+      cat "$project_backup"
+      printf '%s\n' "${config_overrides[$index]}"
+    } > "${repo_dir}/.issue_forge/project.sh"
 
     queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.before"
     assert_file_contains "${state_dir}/${label}.side-effects.before" $'issue_fetch\t1'
@@ -3090,7 +3122,15 @@ run_queue_completion_cleanup_transaction_smoke() {
     queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.idempotent"
     cmp -s "${state_dir}/${label}.side-effects.before" "${state_dir}/${label}.side-effects.idempotent" || \
       fail "idempotent completed cleanup changed side effects after ${boundary}"
-    [[ "$index" -ne 0 ]] || cp "$project_backup" "${repo_dir}/.issue_forge/project.sh"
+    if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 63) \
+        > "${state_dir}/${label}.invalid-new-run.log" 2>&1; then
+      fail "normal queue startup accepted invalid work configuration after ${boundary}"
+    fi
+    assert_file_contains "${state_dir}/${label}.invalid-new-run.log" "${config_diagnostics[$index]}"
+    queue_side_effect_snapshot > "${state_dir}/${label}.side-effects.invalid-new-run"
+    cmp -s "${state_dir}/${label}.side-effects.before" "${state_dir}/${label}.side-effects.invalid-new-run" || \
+      fail "strict invalid configuration check changed side effects after ${boundary}"
+    cp "$project_backup" "${repo_dir}/.issue_forge/project.sh"
   done
 
   pause="${state_dir}/queue-completed-a-active-b"
@@ -3194,6 +3234,248 @@ run_queue_completion_cleanup_transaction_smoke() {
   cmp -s "${state_dir}/renamed-owner.side-effects.before" "${state_dir}/renamed-owner.side-effects.after" || fail 'renamed owner failure changed side effects'
   rm -rf "${repo_dir}/.work/queue/lease.lock"
   mv "${state_dir}/completed-a-terminal.state" "${repo_dir}/.work/queue/runs/${run_id}/completion-cleanup.state"
+}
+
+run_queue_completion_cleanup_invariant_smoke() {
+  local manifest run_id terminal token generation lease_required batch marker guard_dir audit saved_audit
+  local queue_root="${repo_dir}/.work/queue" pointer batch_pointer lock active log_file case_name
+
+  log 'running completion cleanup phase-postcondition invariant smoke'
+  clear_command_logs; reset_flow_counters
+  rm -f "${state_dir}/batch-pr-url.txt"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 69) > "${state_dir}/cleanup-invariant-owner.log" 2>&1; then
+    cat "${state_dir}/cleanup-invariant-owner.log" >&2
+    fail 'cleanup invariant fixture queue did not complete'
+  fi
+  manifest="$(grep -l $'^issues\t69$' "${queue_root}"/runs/*/manifest.state | head -n 1)"
+  [[ -n "$manifest" ]] || fail 'cannot locate cleanup invariant fixture run'
+  run_id="$(basename "$(dirname "$manifest")")"
+  terminal="${queue_root}/runs/${run_id}/completion-cleanup.state"
+  token="$(awk -F '\t' '$1 == "owner_token" { print $2 }' "$terminal")"
+  generation="$(awk -F '\t' '$1 == "lease_generation" { print $2 }' "$terminal")"
+  lease_required="$(awk -F '\t' '$1 == "lease_required" { print $2 }' "$terminal")"
+  batch="$(awk -F '\t' '$1 == "batch_pointer" { print $2 }' "$terminal")"
+  guard_dir="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)/issue-forge/queue"
+  marker="${guard_dir}/completion-cleanup.state"; active="${guard_dir}/active-process.state"
+  audit="${queue_root}/lease.finalized.${generation}.${token}"; saved_audit="${state_dir}/cleanup-invariant-audit"
+  pointer="${queue_root}/current"; batch_pointer="${queue_root}/current_batch"; lock="${queue_root}/lease.lock"
+  assert_equals 1 "$lease_required" 'cleanup invariant fixture lease requirement'
+  assert_file_exists "${audit}/owner.${token}.state"
+  queue_side_effect_snapshot > "${state_dir}/cleanup-invariant.side-effects.baseline"
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'issue_fetch\t1'
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'implementation\t1'
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'branch_switch\t1'
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'push\t1'
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'pr_mutation\t1'
+  assert_file_contains "${state_dir}/cleanup-invariant.side-effects.baseline" $'merge\t0'
+
+  case_name='missing-audit'
+  mv "$audit" "$saved_audit"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" lease_retired
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.before"
+  log_file="${state_dir}/${case_name}.log"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
+    fail 'lease_retired cleanup without its required audit must fail'
+  fi
+  assert_file_contains "$log_file" 'requires finalized lease audit'
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/${case_name}.queue.before" "${state_dir}/${case_name}.queue.after" || fail 'missing-audit rejection mutated queue state'
+  cmp -s "${state_dir}/${case_name}.control.before" "${state_dir}/${case_name}.control.after" || fail 'missing-audit rejection mutated common control state'
+  cmp -s "${state_dir}/${case_name}.side-effects.before" "${state_dir}/${case_name}.side-effects.after" || fail 'missing-audit rejection changed side effects'
+  rm "$marker"; mv "$saved_audit" "$audit"
+
+  case_name='lease-still-present'
+  cp -a "$audit" "$lock"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" lease_retired
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.before"
+  log_file="${state_dir}/${case_name}.log"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "$log_file" 2>&1; then
+    fail 'lease_retired cleanup with a same-run lease path must fail'
+  fi
+  assert_file_contains "$log_file" 'requires the same-run lease path to be absent'
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/${case_name}.queue.before" "${state_dir}/${case_name}.queue.after" || fail 'remaining-lease rejection mutated queue state'
+  cmp -s "${state_dir}/${case_name}.control.before" "${state_dir}/${case_name}.control.after" || fail 'remaining-lease rejection mutated common control state'
+  cmp -s "${state_dir}/${case_name}.side-effects.before" "${state_dir}/${case_name}.side-effects.after" || fail 'remaining-lease rejection changed side effects'
+  rm -rf "$lock"; rm "$marker"
+
+  case_name='reappeared-batch'
+  printf '%s\n' "$batch" > "$batch_pointer"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" batch_pointer_removed
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'exact reappeared current_batch was not reconciled'
+  fi
+  assert_path_not_exists "$batch_pointer"; assert_path_not_exists "$marker"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/cleanup-invariant.side-effects.baseline" "${state_dir}/${case_name}.side-effects.after" || fail 'batch reconciliation changed side effects'
+
+  case_name='different-batch'
+  printf 'batch-different\n' > "$batch_pointer"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" batch_pointer_removed
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'different current_batch must fail cleanup without mutation'
+  fi
+  assert_file_contains "${state_dir}/${case_name}.log" 'current_batch does not match completed run'
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/${case_name}.queue.before" "${state_dir}/${case_name}.queue.after" || fail 'different-batch rejection mutated queue state'
+  cmp -s "${state_dir}/${case_name}.control.before" "${state_dir}/${case_name}.control.after" || fail 'different-batch rejection mutated common control state'
+  cmp -s "${state_dir}/${case_name}.side-effects.before" "${state_dir}/${case_name}.side-effects.after" || fail 'different-batch rejection changed side effects'
+  rm "$batch_pointer" "$marker"
+
+  case_name='reappeared-current'
+  write_queue_pointer_fixture "$pointer" "$run_id" "$token" "$generation"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" current_removed
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'exact reappeared current pointer was not reconciled'
+  fi
+  assert_path_not_exists "$pointer"; assert_path_not_exists "$marker"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/cleanup-invariant.side-effects.baseline" "${state_dir}/${case_name}.side-effects.after" || fail 'current reconciliation changed side effects'
+
+  case_name='different-current-fencing'
+  write_queue_pointer_fixture "$pointer" "$run_id" mismatched-token "$generation"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" current_removed
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'different current fencing identity must fail cleanup'
+  fi
+  assert_file_contains "${state_dir}/${case_name}.log" 'current pointer contradicts its cleanup transaction identity'
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/${case_name}.queue.before" "${state_dir}/${case_name}.queue.after" || fail 'different-current rejection mutated queue state'
+  cmp -s "${state_dir}/${case_name}.control.before" "${state_dir}/${case_name}.control.after" || fail 'different-current rejection mutated common control state'
+  cmp -s "${state_dir}/${case_name}.side-effects.before" "${state_dir}/${case_name}.side-effects.after" || fail 'different-current rejection changed side effects'
+  rm "$pointer" "$marker"
+
+  case_name='completed-residue'
+  printf '%s\n' "$batch" > "$batch_pointer"
+  write_queue_pointer_fixture "$pointer" "$run_id" "$token" "$generation"
+  write_completion_cleanup_fixture "$marker" "$run_id" "$token" "$generation" 1 "$batch" completed
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'completed marker did not reconcile exact same-run residue'
+  fi
+  assert_path_not_exists "$batch_pointer"; assert_path_not_exists "$pointer"; assert_path_not_exists "$marker"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/cleanup-invariant.side-effects.baseline" "${state_dir}/${case_name}.side-effects.after" || fail 'completed residue reconciliation changed side effects'
+
+  case_name='terminal-pointer-residue'
+  write_queue_pointer_fixture "$pointer" "$run_id" "$token" "$generation"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'terminal tombstone fast path ignored same-run current residue'
+  fi
+  assert_path_not_exists "$pointer"; assert_path_not_exists "$marker"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/cleanup-invariant.side-effects.baseline" "${state_dir}/${case_name}.side-effects.after" || fail 'terminal-pointer reconciliation changed side effects'
+
+  case_name='terminal-lease-residue'
+  cp -a "$audit" "$lock"
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.before"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.before"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.before"
+  if (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$run_id") > "${state_dir}/${case_name}.log" 2>&1; then
+    fail 'terminal tombstone plus same-run lease/audit contradiction must fail'
+  fi
+  assert_file_contains "${state_dir}/${case_name}.log" 'requires the same-run lease path to be absent'
+  queue_tree_snapshot "$queue_root" > "${state_dir}/${case_name}.queue.after"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/${case_name}.control.after"
+  queue_side_effect_snapshot > "${state_dir}/${case_name}.side-effects.after"
+  cmp -s "${state_dir}/${case_name}.queue.before" "${state_dir}/${case_name}.queue.after" || fail 'terminal-lease rejection mutated queue state'
+  cmp -s "${state_dir}/${case_name}.control.before" "${state_dir}/${case_name}.control.after" || fail 'terminal-lease rejection mutated common control state'
+  cmp -s "${state_dir}/${case_name}.side-effects.before" "${state_dir}/${case_name}.side-effects.after" || fail 'terminal-lease rejection changed side effects'
+  rm -rf "$lock"
+  assert_path_not_exists "$marker"; assert_path_not_exists "$active"
+}
+
+run_queue_linked_worktree_rejection_smoke() {
+  local linked_dir="${temp_root}/linked-queue-worktree" git_common guard_dir existing_run invocation label log_file
+  local -a invocations=()
+
+  log 'running linked-worktree queue rejection smoke'
+  git_common="$(${REAL_GIT} -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)"
+  guard_dir="${git_common}/issue-forge/queue"
+  existing_run="$(find "${repo_dir}/.work/queue/runs" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort | head -n 1)"
+  [[ -n "$existing_run" ]] || fail 'linked-worktree smoke requires an existing primary-worktree run'
+  "${REAL_GIT}" -C "$repo_dir" worktree add --detach "$linked_dir" HEAD >/dev/null
+  assert_path_not_exists "${linked_dir}/.work/queue"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/linked-worktree.control.before"
+  clear_command_logs; reset_flow_counters
+
+  invocations=(
+    "70"
+    "--resume ${existing_run}"
+    "--resume current"
+  )
+  for invocation in "${invocations[@]}"; do
+    label="$(printf '%s' "$invocation" | tr ' ' '-')"
+    log_file="${state_dir}/linked-worktree-${label}.log"
+    # shellcheck disable=SC2086 # the fixture intentionally expands one fixed argument string
+    if (cd "$linked_dir"; env ISSUE_FORGE_CONSUMER_ROOT="$linked_dir" PATH="${stub_dir}:$PATH" \
+        "${REPO_ROOT}/tools/codex/run_issue_queue.sh" $invocation) > "$log_file" 2>&1; then
+      fail "linked-worktree queue invocation unexpectedly succeeded: ${invocation}"
+    fi
+    assert_file_contains "$log_file" 'Queue execution from a linked Git worktree is unsupported because queue ownership state is worktree-local'
+    assert_file_contains "$log_file" 'primary worktree or use a separate clone'
+    assert_file_not_contains "$log_file" 'resume with:'
+  done
+  assert_path_not_exists "${linked_dir}/.work/queue"
+  queue_tree_snapshot "$guard_dir" > "${state_dir}/linked-worktree.control.after"
+  cmp -s "${state_dir}/linked-worktree.control.before" "${state_dir}/linked-worktree.control.after" || \
+    fail 'rejected linked-worktree invocation changed Git-common-dir queue control state'
+  queue_side_effect_snapshot > "${state_dir}/linked-worktree.side-effects"
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'issue_fetch\t0'
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'implementation\t0'
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'branch_switch\t0'
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'push\t0'
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'pr_mutation\t0'
+  assert_file_contains "${state_dir}/linked-worktree.side-effects" $'merge\t0'
+
+  clear_command_logs; reset_flow_counters
+  if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" CODEX_FLOW_SKIP_PUBLISH=1 \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" 70) > "${state_dir}/primary-after-linked.log" 2>&1; then
+    cat "${state_dir}/primary-after-linked.log" >&2
+    fail 'primary worktree queue failed after linked-worktree rejection'
+  fi
+  queue_side_effect_snapshot > "${state_dir}/primary-after-linked.side-effects"
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'issue_fetch\t1'
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'implementation\t1'
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'branch_switch\t1'
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'push\t1'
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'pr_mutation\t1'
+  assert_file_contains "${state_dir}/primary-after-linked.side-effects" $'merge\t0'
+  "${REAL_GIT}" -C "$repo_dir" worktree remove "$linked_dir" >/dev/null
 }
 
 run_queue_worker_registration_smoke() {
@@ -3765,6 +4047,8 @@ main() {
   run_queue_lease_smoke
   run_issue_queue_strict_issue_review_smoke
   run_queue_completion_cleanup_transaction_smoke
+  run_queue_completion_cleanup_invariant_smoke
+  run_queue_linked_worktree_rejection_smoke
   run_queue_worker_registration_smoke
   run_queue_worker_phase_checkpoint_smoke
   run_queue_private_environment_smoke

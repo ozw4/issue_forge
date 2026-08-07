@@ -92,35 +92,48 @@ validate_consumer_project_config() {
   validate_positive_integer_config CODEX_FLOW_AUTO_MERGE_POLL_SECONDS 'auto-merge poll seconds'
 }
 
-apply_consumer_project_defaults() {
-  : "${CODEX_FLOW_BASE_BRANCH:=main}"
-  : "${CODEX_FLOW_BASE_REF:=origin/${CODEX_FLOW_BASE_BRANCH}}"
-  : "${CODEX_FLOW_BRANCH_PREFIX:=issue/}"
-  : "${CODEX_FLOW_CHECKS_COMMAND:=./.issue_forge/checks/run_changed.sh}"
-  : "${CODEX_FLOW_PROMPTS_DIR:=${ISSUE_FORGE_ENGINE_ROOT}/tools/codex/prompts}"
-  : "${CODEX_FLOW_PR_DRAFT_DEFAULT:=1}"
-  : "${CODEX_FLOW_PROFILE_WRITE_SANDBOX:=danger-full-access}"
-  : "${CODEX_FLOW_PROFILE_WRITE_REASONING:=high}"
-  : "${CODEX_FLOW_PROFILE_READ_SANDBOX:=danger-full-access}"
-  : "${CODEX_FLOW_PROFILE_READ_REASONING:=medium}"
-  : "${CODEX_FLOW_IMPLEMENTATION_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
-  : "${CODEX_FLOW_CHECK_FIX_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
-  : "${CODEX_FLOW_REVIEW_REASONING:=${CODEX_FLOW_PROFILE_READ_REASONING}}"
-  : "${CODEX_FLOW_REVIEW_FIX_REASONING:=${CODEX_FLOW_PROFILE_WRITE_REASONING}}"
-  : "${CODEX_FLOW_BATCH_BRANCH_PREFIX:=batch/}"
-  : "${CODEX_FLOW_QUEUE_REVIEW_EVERY:=3}"
-  : "${CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW:=1}"
-  : "${CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT:=0}"
-  : "${CODEX_FLOW_BATCH_REVIEW_REASONING:=xhigh}"
-  : "${CODEX_FLOW_BATCH_FIX_REASONING:=xhigh}"
-  : "${CODEX_FLOW_BATCH_CHECK_FIX_REASONING:=xhigh}"
-  : "${CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS:=5}"
-  : "${CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS:=5}"
-  : "${CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS:=900}"
-  : "${CODEX_FLOW_AUTO_MERGE_POLL_SECONDS:=15}"
+apply_consumer_config_default() {
+  local variable_name="$1" default_value="$2" preserve_explicit_empty="${3:-0}"
+  if [[ ! -v "$variable_name" || ( "$preserve_explicit_empty" -ne 1 && -z "${!variable_name}" ) ]]; then
+    printf -v "$variable_name" '%s' "$default_value"
+  fi
 }
 
-issue_forge_load_consumer_config() {
+apply_consumer_project_defaults() {
+  local preserve_explicit_empty="${1:-0}"
+  apply_consumer_config_default CODEX_FLOW_BASE_BRANCH main "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BASE_REF "origin/${CODEX_FLOW_BASE_BRANCH}" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BRANCH_PREFIX issue/ "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_CHECKS_COMMAND ./.issue_forge/checks/run_changed.sh "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PROMPTS_DIR "${ISSUE_FORGE_ENGINE_ROOT}/tools/codex/prompts" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PR_DRAFT_DEFAULT 1 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PROFILE_WRITE_SANDBOX danger-full-access "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PROFILE_WRITE_REASONING high "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PROFILE_READ_SANDBOX danger-full-access "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_PROFILE_READ_REASONING medium "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_IMPLEMENTATION_REASONING "${CODEX_FLOW_PROFILE_WRITE_REASONING}" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_CHECK_FIX_REASONING "${CODEX_FLOW_PROFILE_WRITE_REASONING}" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_REVIEW_REASONING "${CODEX_FLOW_PROFILE_READ_REASONING}" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_REVIEW_FIX_REASONING "${CODEX_FLOW_PROFILE_WRITE_REASONING}" "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_BRANCH_PREFIX batch/ "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_QUEUE_REVIEW_EVERY 3 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW 1 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT 0 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_REVIEW_REASONING xhigh "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_FIX_REASONING xhigh "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_CHECK_FIX_REASONING xhigh "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS 5 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS 5 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS 900 "$preserve_explicit_empty"
+  apply_consumer_config_default CODEX_FLOW_AUTO_MERGE_POLL_SECONDS 15 "$preserve_explicit_empty"
+}
+
+issue_forge_validate_queue_consumer_config() {
+  apply_consumer_project_defaults 1
+  validate_consumer_project_config
+}
+
+issue_forge_load_consumer_config_unvalidated() {
   local repo_root="${1:?repo root is required}"
   local config_file="${repo_root}/.issue_forge/project.sh"
 
@@ -133,6 +146,13 @@ issue_forge_load_consumer_config() {
 
   # shellcheck source=/dev/null
   source "${config_file}"
+}
+
+issue_forge_load_consumer_config() {
+  local repo_root="${1:?repo root is required}"
+  local config_file="${repo_root}/.issue_forge/project.sh"
+
+  issue_forge_load_consumer_config_unvalidated "$repo_root"
   apply_consumer_project_defaults
   validate_consumer_project_config
 }
