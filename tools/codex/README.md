@@ -17,6 +17,7 @@ Covered behavior includes:
 - `CODEX_RUN_REASONING_EFFORT` overrides reasoning for one `run_codex.sh` invocation without changing normal write/read profile defaults
 - the direct vendor issue-flow entrypoint passes phase-specific reasoning for implementation, checks repair, review, and review repair while preserving profile-derived defaults
 - Codex token usage TSV artifacts are initialized for single-issue and batch flows, and token counts are recorded when Codex logs include a `tokens used` block
+- immutable attempt artifacts are created for issue and batch phases, parsed reviews are published only after validation, queue batch attempts are isolated by run ID, and token log references remain valid after archive relocation
 - queue mode defaults to a light per-issue review prompt and retains strict final batch review
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
@@ -36,7 +37,7 @@ Manual run:
 ./tools/codex/smoke_harness.sh
 ```
 
-The harness does not call external GitHub or Codex services.
+The harness first runs the focused attempt-store contract smoke and then the existing full consumer/queue smoke suite. It does not call external GitHub or Codex services.
 
 ## Single-Issue Reasoning
 
@@ -65,16 +66,16 @@ Batch reasoning remains controlled by the existing batch-specific variables and 
 Issue flows write `.work/codex/token-usage.tsv` with this header:
 
 ```text
-phase	issue	round	reasoning	tokens	log
+phase\tissue\tround\treasoning\ttokens\tlog
 ```
 
 Batch flows write `.work/queue/batches/<batch>/token-usage.tsv` with this header:
 
 ```text
-phase	issues	round	reasoning	tokens	log
+phase\tissues\tround\treasoning\ttokens\tlog
 ```
 
-Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow. New rows reference the immutable attempt `output.log`, not the mutable compatibility log.
+Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow. When the log is inside the same artifact tree as the TSV, the `log` column is relative to the TSV directory, for example `./attempts/<attempt>/output.log`. Copying the complete tree to a queue archive therefore preserves the reference.
 
 ## Attempt Artifacts
 
@@ -86,24 +87,31 @@ Single-Issue attempts are stored under:
 .work/codex/attempts/<phase>.round-<round>.attempt-<id>/
 ```
 
-Batch attempts are stored under:
+Queue batch attempts are stored under the authoritative run directory:
 
 ```text
-.work/queue/batches/<batch>/attempts/<phase>.round-<round>.attempt-<id>/
+.work/queue/runs/<run-id>/batches/<batch>/attempts/<phase>.round-<round>.attempt-<id>/
 ```
+
+`.work/queue/batches/<batch>/` remains a compatibility artifact path and does not own authoritative attempt directories.
 
 An attempt contains:
 
 ```text
-input.state     # immutable invocation identity and input hashes
-output.log      # command output; stderr is combined unless the phase uses stdout-only output
-stderr.log      # present for stdout-only review phases
-result.state    # terminal exit status and output hashes
+input.state        # immutable identity, invocation data, and input hashes
+output.log         # command output; stderr is combined unless the phase uses stdout-only output
+stderr.log         # present for stdout-only review phases
+parsed-review.txt  # present only after a review is parsed successfully
+result.state       # terminal status and output hashes
 ```
 
-`result.state` is created only after the command returns. Its absence means the attempt was interrupted or otherwise did not reach terminal publication. Terminal attempt files are made read-only and are never reused by a later invocation.
+`input.state` records `run_id`, `scope`, and `scope_id`; standalone invocations use `none`, issue attempts identify the issue, and queue batch attempts identify both the queue run and batch.
 
-The existing files such as `implementation.log`, `checks.log`, `review.raw.txt`, and `batch-review.raw.txt` remain compatibility views. They are replaced atomically only after an attempt reaches a terminal result, so an interrupted attempt does not overwrite the last published compatibility output. `attempts/latest/<phase>.state` identifies the latest terminal attempt for that phase.
+`result.state` is published only after its output, stderr, and optional parsed review have been frozen read-only. Compatibility files and `attempts/latest/<phase>.state` are updated only after that terminal result exists. A small `attempts/pending/<phase>.state` journal lets the next invocation finish an interrupted compatibility/latest publication from the same verified terminal attempt.
+
+For review phases, a zero process exit is not sufficient. The raw review must parse successfully before the raw compatibility file, parsed compatibility file, and `latest` pointer are advanced. A parse failure records an `invalid` attempt and leaves the previously published review generation intact.
+
+The existing files such as `implementation.log`, `checks.log`, `review.raw.txt`, and `batch-review.raw.txt` remain writable compatibility views for prompts, history, and PR generation. Terminal files inside an attempt remain read-only and are never reused by a later invocation.
 
 ## Queue Light Review
 

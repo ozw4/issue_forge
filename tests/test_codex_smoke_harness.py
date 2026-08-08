@@ -17,4 +17,5 @@ def test_codex_smoke_harness() -> None:
 	)
 
 	assert completed.returncode == 0, completed.stderr or completed.stdout
+	assert '[smoke] attempt store contract passed' in completed.stdout
 	assert '[smoke] all smoke scenarios passed' in completed.stdout

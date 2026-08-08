@@ -12,13 +12,16 @@
    - direct vendor invocation contract
    - minimal consumer-owned files
    - config defaults、PR body/title sync、`.work` invariants、review format invariants
-3. `docs/codex_working_rules.md`
+3. `docs/attempt-artifacts.md`
+   - `docs/consumer-contract.md` の normative addendum
+   - immutable attempt、review publication、run-scoped batch attempts、archive-stable token log paths
+4. `docs/codex_working_rules.md`
    - 実装時の具体的な working rules
    - smoke fixture と git exclusion の注意点
-4. `README.md`
+5. `README.md`
    - repo の概要
    - consumer layout と日常的な使い方
-5. `tools/codex/README.md`
+6. `tools/codex/README.md`
    - smoke harness の目的と手動実行方法
 
 ## この repo で特に重視すること
@@ -27,7 +30,7 @@
 - external consumers は `./tools/codex` や `./tools/issue` の shim を持つ必要がありません。
 - consumer docs の primary entrypoint は `README.md` です。`docs/README.md` は追加 docs が必要な場合だけ optional です。
 - typical consumer-owned paths は `.issue_forge/project.sh`、`.issue_forge/checks/run_changed.sh`、`AGENTS.md`、`README.md`、optional `docs/README.md`、`vendor/issue_forge` です。`tools/consumer/init.sh [--scaffold-checks|--scaffold-run] [consumer-root]` は `.gitignore` を更新し、`.issue_forge/project.sh` を初期化できます。no-flag では checks file を作らず、missing warning は `.issue_forge/checks/run_changed.sh` と `README.md` にだけ出し、`tools/run_issue.sh` や `.issue_forge/shell.sh` も作りません。`--scaffold-checks` の場合だけ `.issue_forge/checks/run_changed.sh` の最小 starter を作れます。`--scaffold-run` の場合だけ optional convenience として `tools/run_issue.sh` と `.issue_forge/shell.sh` を作れます。これらの local wrapper はなくても engine は direct vendor entrypoint で動きます。`README.md` と `docs/README.md` は作りません。
-- `.work/current_issue`、`.work/current_branch`、`.work/issues/<issue>.md`、`.work/codex/*` の path と命名は維持します。
+- `.work/current_issue`、`.work/current_branch`、`.work/issues/<issue>.md`、`.work/codex/*` の compatibility path と命名は維持します。attempt artifact の authoritative layout と publication contract は `docs/attempt-artifacts.md` を正とします。
 - review output の厳密フォーマットを維持します。
 - PR publish は deterministic な body を生成し、open PR がある場合は title/body だけを同期更新します。
 - consumer git hygiene として `.work`、`.work/`、`vendor/issue_forge`、`vendor/issue_forge/` を ignore することを推奨します。
@@ -35,6 +38,7 @@
 
 ## 読み分け
 
-- 動作契約を確認したいときは `docs/consumer-contract.md` を優先します。
+- direct vendor と既存 `.work` compatibility の動作契約は `docs/consumer-contract.md` を優先します。
+- attempt artifact、review publication、batch attempt identity、token log path の契約は `docs/attempt-artifacts.md` を優先します。
 - 実装時の判断基準を確認したいときは `docs/codex_working_rules.md` を見ます。
 - 背景や利用イメージを把握したいときは `README.md` を見ます。
