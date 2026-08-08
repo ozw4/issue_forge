@@ -104,7 +104,7 @@ queue_manual_review_require_clean_resolution() {
   local report phase dirty
 
   queue_manual_review_inspect_state "$state_file" report phase || return $?
-  if ! dirty="$(status_outside_work)"; then
+  if ! dirty="$(issue_forge_status_outside_work_original)"; then
     queue_manual_review_guard_error "cannot inspect the consumer worktree for ${report}"
     return 2
   fi
@@ -140,7 +140,7 @@ queue_install_manual_review_guard() {
   status_outside_work() {
     local state_file report phase inspect_status
 
-    if [[ "${FUNCNAME[1]:-}" == reconcile_interrupted_inner_phase && -n "${run_state_dir:-}" ]]; then
+    if [[ -n "${run_state_dir:-}" ]]; then
       state_file="${run_state_dir}/run.state"
       if queue_manual_review_inspect_state "$state_file" report phase; then
         return 0
