@@ -58,6 +58,7 @@ def invoke(
 set -euo pipefail
 readonly ISSUE_FORGE_INTERNAL_QUEUE_MINIMAL_CONFIG=1
 CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION=3
+run_state_dir={shlex.quote(str(run_dir))}
 STATE_FILE={shlex.quote(str(state_file))}
 CHECKPOINT_FILE={shlex.quote(str(checkpoint_file))}
 TRANSITION_LOG={shlex.quote(str(transition_log))}
@@ -128,6 +129,42 @@ printf '%s %s\n' "$first" "$second"
     assert report.read_bytes() == report_before
     assert checkpoint.read_bytes() == checkpoint_before
     assert result.stderr.count("phase=issue_flow") == 2
+    assert "Original manual-review report is preserved" in result.stderr
+
+
+def test_second_resume_does_not_rewrite_manual_review_report(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    state_file = run_dir / "run.state"
+    report = run_dir / "manual-review.txt"
+    checkpoint = run_dir / "checkpoint.state"
+    write_run_state(state_file)
+    write_report(report)
+    write_checkpoint(checkpoint)
+    report_before = report.read_bytes()
+
+    result = invoke(
+        tmp_path,
+        dirty=" M changed-after-first-resume.txt",
+        body="""
+reconcile_interrupted_inner_phase() {
+  local dirty report_path
+  dirty="$(status_outside_work)"
+  [[ -n "$dirty" ]] || return 0
+  report_path="$(dirname "$STATE_FILE")/manual-review.txt"
+  printf 'overwritten\n' > "$report_path"
+}
+reconcile_interrupted_inner_phase
+status=0
+queue_state_transition "$STATE_FILE" run 'run run-a' manual_review_required running || status=$?
+printf '%s\n' "$status"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "1"
+    assert report.read_bytes() == report_before
+    assert "state\tmanual_review_required" in state_file.read_text(encoding="utf-8")
+    assert "changed-after-first-resume.txt" in result.stderr
     assert "Original manual-review report is preserved" in result.stderr
 
 
