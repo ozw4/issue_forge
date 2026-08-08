@@ -11,6 +11,10 @@ source "${ATTEMPT_STORE_LIB_DIR}/core.sh"
 source "${ATTEMPT_STORE_LIB_DIR}/publication.sh"
 # shellcheck source=tools/codex/lib/attempt_store/run.sh
 source "${ATTEMPT_STORE_LIB_DIR}/run.sh"
+# shellcheck source=tools/codex/lib/attempt_store/publication_recovery.sh
+source "${ATTEMPT_STORE_LIB_DIR}/publication_recovery.sh"
+# shellcheck source=tools/codex/lib/attempt_store/publication_guard.sh
+source "${ATTEMPT_STORE_LIB_DIR}/publication_guard.sh"
 unset ATTEMPT_STORE_LIB_DIR
 
 readonly ISSUE_FORGE_ATTEMPT_STORE_LOADED=1
