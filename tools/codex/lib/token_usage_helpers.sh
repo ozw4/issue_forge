@@ -28,17 +28,14 @@ extract_codex_token_usage() {
 }
 
 relative_token_usage_path() {
-  local path="$1"
-  local repo_root
+  local output_file="$1"
+  local path="$2"
+  local output_dir
 
+  output_dir="$(dirname "$output_file")"
   case "$path" in
-    /*)
-      repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-      if [[ -n "$repo_root" && "$path" == "$repo_root/"* ]]; then
-        printf '%s\n' "${path#"$repo_root"/}"
-      else
-        printf '%s\n' "$path"
-      fi
+    "$output_dir"/*)
+      printf './%s\n' "${path#"$output_dir"/}"
       ;;
     *)
       printf '%s\n' "$path"
@@ -74,7 +71,7 @@ append_codex_token_usage() {
     return 0
   fi
 
-  log_path="$(relative_token_usage_path "$log_file")"
+  log_path="$(relative_token_usage_path "$output_file" "$log_file")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$phase" "$subject" "$round" "$reasoning" "$tokens" "$log_path" >> "$output_file"
 }
