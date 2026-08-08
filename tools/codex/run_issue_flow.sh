@@ -9,6 +9,8 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "${SCRIPT_DIR}/lib/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/attempt_store.sh
+source "${SCRIPT_DIR}/lib/attempt_store.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
@@ -34,29 +36,40 @@ run_codex_phase() {
   local prompt_file="$2"
   local output_file="$3"
   local reasoning_effort="$4"
-  local stderr_policy="${5:-combined}"
+  local phase="$5"
+  local round="$6"
+  local stderr_policy="${7:-combined}"
+  local attempt_dir=''
+  local attempt_log=''
+  local status
 
-  case "$stderr_policy" in
-    combined)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file" 2>&1
-      ;;
-    stdout)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file"
-      ;;
-    *)
-      printf 'Invalid Codex phase stderr policy: %s\n' "$stderr_policy" >&2
-      exit 1
-      ;;
-  esac
+  if run_logged_attempt attempt_dir attempt_log \
+    "${CODEX_FLOW_CODEX_DIR}/attempts" \
+    "$phase" \
+    "$round" \
+    "$mode" \
+    "$reasoning_effort" \
+    "$prompt_file" \
+    "$output_file" \
+    "$stderr_policy" \
+    -- \
+    env CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+      "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  CODEX_FLOW_LAST_ATTEMPT_DIR="$attempt_dir"
+  CODEX_FLOW_LAST_ATTEMPT_LOG="$attempt_log"
+  return "$status"
 }
 
 run_implementation_phase() {
   log_info 'codex implementation'
-  run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
+  run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING" implementation 0
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
-  ensure_issue_token_usage_tsv 'implementation' "$issue_number" 0 "$CODEX_FLOW_IMPLEMENTATION_REASONING" "$implementation_log"
+  ensure_issue_token_usage_tsv 'implementation' "$issue_number" 0 "$CODEX_FLOW_IMPLEMENTATION_REASONING" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
 
   if [[ -z "$(status_outside_work)" ]]; then
     log_fail_with_path 'initial implementation session produced no file changes' "$implementation_log"
@@ -93,6 +106,7 @@ require_command awk
 require_command git
 require_command mktemp
 require_command sed
+require_command sha256sum
 
 skip_publish="$(resolve_skip_publish_flag)"
 if [[ "$skip_publish" -eq 0 ]]; then

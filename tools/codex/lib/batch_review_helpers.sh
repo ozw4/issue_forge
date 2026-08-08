@@ -4,6 +4,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/attempt_store.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/attempt_store.sh"
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -49,30 +51,68 @@ run_codex_batch_write() {
   local prompt_file="$1"
   local output_log="$2"
   local reasoning_effort="$3"
+  local attempts_root="$4"
+  local phase="$5"
+  local round="$6"
+  local attempt_dir=''
+  local attempt_log=''
+  local status
 
-  CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$prompt_file" > "$output_log" 2>&1
+  if run_logged_attempt attempt_dir attempt_log \
+    "$attempts_root" "$phase" "$round" write "$reasoning_effort" "$prompt_file" "$output_log" combined -- \
+    env CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+      "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$prompt_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  CODEX_FLOW_LAST_ATTEMPT_DIR="$attempt_dir"
+  CODEX_FLOW_LAST_ATTEMPT_LOG="$attempt_log"
+  return "$status"
 }
 
 run_codex_batch_read() {
   local prompt_file="$1"
   local output_log="$2"
   local reasoning_effort="$3"
+  local attempts_root="$4"
+  local phase="$5"
+  local round="$6"
+  local attempt_dir=''
+  local attempt_log=''
+  local status
 
-  CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$prompt_file" > "$output_log"
+  if run_logged_attempt attempt_dir attempt_log \
+    "$attempts_root" "$phase" "$round" read "$reasoning_effort" "$prompt_file" "$output_log" stdout -- \
+    env CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+      "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$prompt_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  CODEX_FLOW_LAST_ATTEMPT_DIR="$attempt_dir"
+  CODEX_FLOW_LAST_ATTEMPT_LOG="$attempt_log"
+  return "$status"
 }
 
 run_batch_checks_once() {
   local base_commit="$1"
   local checks_log="$2"
+  local attempts_root="$3"
+  local round="$4"
+  local attempt_dir=''
+  local attempt_log=''
   local status
 
-  set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
-  status=$?
-  set -e
-
+  if run_logged_attempt attempt_dir attempt_log \
+    "$attempts_root" batch-checks "$round" check none none "$checks_log" combined -- \
+    "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit"; then
+    status=0
+  else
+    status=$?
+  fi
+  CODEX_FLOW_LAST_ATTEMPT_DIR="$attempt_dir"
+  CODEX_FLOW_LAST_ATTEMPT_LOG="$attempt_log"
   return "$status"
 }
 
@@ -89,18 +129,21 @@ ensure_batch_checks_pass() {
   local fix_checks_log="${batch_dir}/fix-from-batch-checks.log"
   local fix_round=0
   local history_dir="${batch_dir}/history"
+  local attempts_root="${batch_dir}/attempts"
+  local check_round
 
   mkdir -p "$history_dir"
 
   while true; do
     log_info 'running batch checks'
-    if run_batch_checks_once "$base_commit" "$checks_log"; then
-      archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
+    check_round=$((fix_round + 1))
+    if run_batch_checks_once "$base_commit" "$checks_log" "$attempts_root" "$check_round"; then
+      archive_round_file "$checks_log" 'batch-checks' "$check_round" '.log'
       log_info 'batch checks passed'
       return 0
     fi
 
-    archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
+    archive_round_file "$checks_log" 'batch-checks' "$check_round" '.log'
 
     if [[ "$fix_round" -ge "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" ]]; then
       printf '[queue] batch checks failed after %s fix rounds\n' "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" >&2
@@ -112,9 +155,11 @@ ensure_batch_checks_pass() {
     write_fix_from_batch_checks_prompt_file "$issues_file" "$checks_log" "$fix_checks_prompt"
     ensure_clean_worktree 'Working tree must be clean before batch checks fix.'
     log_info "codex fix from batch checks (round ${fix_round})"
-    run_codex_batch_write "$fix_checks_prompt" "$fix_checks_log" "$check_fix_effort"
+    run_codex_batch_write "$fix_checks_prompt" "$fix_checks_log" "$check_fix_effort" \
+      "$attempts_root" fix-from-batch-checks "$fix_round"
     archive_round_file "$fix_checks_log" 'fix-from-batch-checks' "$fix_round" '.log'
-    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-checks' "$issues_label" "$fix_round" "$check_fix_effort" "$fix_checks_log"
+    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-checks' "$issues_label" "$fix_round" \
+      "$check_fix_effort" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
 
     if [[ -z "$(status_outside_work)" ]]; then
       printf 'Batch checks fix produced no repository changes.\n' >&2
@@ -159,6 +204,7 @@ run_batch_review_once() {
   local before_status
   local after_status
   local history_dir="${batch_dir}/history"
+  local attempts_root="${batch_dir}/attempts"
 
   mkdir -p "$history_dir"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
@@ -169,9 +215,11 @@ run_batch_review_once() {
 
   before_status="$(status_outside_work)"
   log_info "codex batch review (round ${review_round})"
-  run_codex_batch_read "$batch_review_prompt" "$batch_review_raw" "$review_effort"
+  run_codex_batch_read "$batch_review_prompt" "$batch_review_raw" "$review_effort" \
+    "$attempts_root" batch-review "$review_round"
   archive_round_file "$batch_review_raw" 'batch-review-raw' "$review_round" '.txt'
-  ensure_batch_token_usage_tsv "$batch_dir" 'batch-review' "$issues_label" "$review_round" "$review_effort" "$batch_review_raw"
+  ensure_batch_token_usage_tsv "$batch_dir" 'batch-review' "$issues_label" "$review_round" \
+    "$review_effort" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
   after_status="$(status_outside_work)"
 
   if [[ "$before_status" != "$after_status" ]]; then
@@ -185,6 +233,7 @@ run_batch_review_once() {
     printf 'Batch review raw log: %s\n' "$batch_review_raw" >&2
     exit 1
   fi
+  attempt_store_publish_derived "$CODEX_FLOW_LAST_ATTEMPT_DIR" parsed-review.txt "$batch_review_output"
   archive_round_file "$batch_review_output" 'batch-review' "$review_round" '.txt'
   ensure_valid_batch_review_output "$batch_review_raw" "$batch_review_output"
 }
@@ -205,6 +254,7 @@ ensure_batch_review_accepted() {
   local review_fix_round=0
   local review_round=1
   local history_dir="${batch_dir}/history"
+  local attempts_root="${batch_dir}/attempts"
 
   mkdir -p "$history_dir"
   run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
@@ -220,9 +270,11 @@ ensure_batch_review_accepted() {
     write_fix_from_batch_review_prompt_file "$issues_file" "$batch_review_output" "$fix_review_prompt"
     ensure_clean_worktree 'Working tree must be clean before batch review fix.'
     log_info "codex fix from batch review (round ${review_fix_round})"
-    run_codex_batch_write "$fix_review_prompt" "$fix_review_log" "$review_fix_effort"
+    run_codex_batch_write "$fix_review_prompt" "$fix_review_log" "$review_fix_effort" \
+      "$attempts_root" fix-from-batch-review "$review_fix_round"
     archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
-    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
+    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" \
+      "$review_fix_effort" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
 
     if [[ -z "$(status_outside_work)" ]]; then
       printf 'Batch review fix produced no repository changes.\n' >&2

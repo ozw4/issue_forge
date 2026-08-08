@@ -8,6 +8,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/attempt_store.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/attempt_store.sh"
 
 generate_review_material() {
   local has_material=0
@@ -45,15 +47,30 @@ run_checks_round() {
   local status
   local round
   local base_commit
+  local attempt_dir=''
+  local attempt_log=''
 
   checks_run_round=$((checks_run_round + 1))
   round="$checks_run_round"
   base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
-  set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
-  status=$?
-  set -e
+  if run_logged_attempt attempt_dir attempt_log \
+    "${CODEX_FLOW_CODEX_DIR}/attempts" \
+    checks \
+    "$round" \
+    check \
+    none \
+    none \
+    "$checks_log" \
+    combined \
+    -- \
+    "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit"; then
+    status=0
+  else
+    status=$?
+  fi
+  CODEX_FLOW_LAST_ATTEMPT_DIR="$attempt_dir"
+  CODEX_FLOW_LAST_ATTEMPT_LOG="$attempt_log"
 
   archive_round_file "$checks_log" "checks" "$round" ".log"
 
@@ -65,9 +82,11 @@ run_fix_from_checks_round() {
 
   fix_checks_round=$((fix_checks_round + 1))
   log_info "codex fix from checks (round ${fix_round})"
-  run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
+  run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING" \
+    fix-from-checks "$fix_checks_round"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
-  ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" "$CODEX_FLOW_CHECK_FIX_REASONING" "$fix_checks_log"
+  ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" \
+    "$CODEX_FLOW_CHECK_FIX_REASONING" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
 }
 
 ensure_checks_pass() {
@@ -312,6 +331,7 @@ extract_review_candidate_from_line() {
 
 extract_review_output() {
   extract_structured_review_output_file "$review_raw_output" "$review_output"
+  attempt_store_publish_derived "$CODEX_FLOW_LAST_ATTEMPT_DIR" parsed-review.txt "$review_output"
 
   archive_round_file "$review_output" "review" "$review_run_round" ".txt"
 }
@@ -327,9 +347,11 @@ run_review_round() {
   archive_round_file "$review_summary" "review-summary" "$review_run_round" ".txt"
   before_status="$(status_outside_work)"
   log_info "codex review"
-  run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
+  run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" \
+    review "$review_run_round" stdout
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
-  ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" "$CODEX_FLOW_REVIEW_REASONING" "$review_raw_output"
+  ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" \
+    "$CODEX_FLOW_REVIEW_REASONING" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
   after_status="$(status_outside_work)"
 
   if [[ "$before_status" != "$after_status" ]]; then
@@ -471,9 +493,11 @@ run_fix_from_review_round() {
 
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
+  run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING" \
+    fix-from-review "$fix_review_round"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
-  ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
+  ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" \
+    "$CODEX_FLOW_REVIEW_FIX_REASONING" "$CODEX_FLOW_LAST_ATTEMPT_LOG"
 }
 
 ensure_review_accepted() {

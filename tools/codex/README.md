@@ -74,7 +74,36 @@ Batch flows write `.work/queue/batches/<batch>/token-usage.tsv` with this header
 phase	issues	round	reasoning	tokens	log
 ```
 
-Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow.
+Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow. New rows reference the immutable attempt `output.log`, not the mutable compatibility log.
+
+## Attempt Artifacts
+
+Each implementation, checks, review, and repair invocation writes to a unique attempt directory before updating the established compatibility filenames.
+
+Single-Issue attempts are stored under:
+
+```text
+.work/codex/attempts/<phase>.round-<round>.attempt-<id>/
+```
+
+Batch attempts are stored under:
+
+```text
+.work/queue/batches/<batch>/attempts/<phase>.round-<round>.attempt-<id>/
+```
+
+An attempt contains:
+
+```text
+input.state     # immutable invocation identity and input hashes
+output.log      # command output; stderr is combined unless the phase uses stdout-only output
+stderr.log      # present for stdout-only review phases
+result.state    # terminal exit status and output hashes
+```
+
+`result.state` is created only after the command returns. Its absence means the attempt was interrupted or otherwise did not reach terminal publication. Terminal attempt files are made read-only and are never reused by a later invocation.
+
+The existing files such as `implementation.log`, `checks.log`, `review.raw.txt`, and `batch-review.raw.txt` remain compatibility views. They are replaced atomically only after an attempt reaches a terminal result, so an interrupted attempt does not overwrite the last published compatibility output. `attempts/latest/<phase>.state` identifies the latest terminal attempt for that phase.
 
 ## Queue Light Review
 
