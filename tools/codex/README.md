@@ -66,13 +66,13 @@ Batch reasoning remains controlled by the existing batch-specific variables and 
 Issue flows write `.work/codex/token-usage.tsv` with this header:
 
 ```text
-phase\tissue\tround\treasoning\ttokens\tlog
+phase	issue	round	reasoning	tokens	log
 ```
 
 Batch flows write `.work/queue/batches/<batch>/token-usage.tsv` with this header:
 
 ```text
-phase\tissues\tround\treasoning\ttokens\tlog
+phase	issues	round	reasoning	tokens	log
 ```
 
 Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow. When the log is inside the same artifact tree as the TSV, the `log` column is relative to the TSV directory, for example `./attempts/<attempt>/output.log`. Copying the complete tree to a queue archive therefore preserves the reference.
