@@ -37,6 +37,41 @@ attempt_store_require_round() {
   fi
 }
 
+attempt_store_require_identity() {
+  local run_id="$1"
+  local scope="$2"
+  local scope_id="$3"
+
+  attempt_store_require_scalar 'attempt run ID' "$run_id" || return 1
+  attempt_store_require_scalar 'attempt scope' "$scope" || return 1
+  attempt_store_require_scalar 'attempt scope ID' "$scope_id" || return 1
+
+  case "$scope" in
+    standalone)
+      [[ "$run_id" == none && "$scope_id" == none ]] || {
+        attempt_store_error 'Standalone attempt identity must use run_id=none and scope_id=none'
+        return 1
+      }
+      ;;
+    issue)
+      [[ "$scope_id" != none ]] || {
+        attempt_store_error 'Issue attempt identity requires a scope ID'
+        return 1
+      }
+      ;;
+    batch)
+      [[ "$run_id" != none && "$scope_id" != none ]] || {
+        attempt_store_error 'Batch attempt identity requires run and scope IDs'
+        return 1
+      }
+      ;;
+    *)
+      attempt_store_error "Invalid attempt scope: ${scope}"
+      return 1
+      ;;
+  esac
+}
+
 attempt_store_sha256_file() {
   local path="$1"
 
@@ -113,6 +148,9 @@ attempt_store_create() {
   local prompt_copy='none'
   local command_sha
   local formatted_round
+  local identity_run_id="${CODEX_FLOW_ATTEMPT_RUN_ID:-none}"
+  local identity_scope="${CODEX_FLOW_ATTEMPT_SCOPE:-standalone}"
+  local identity_scope_id="${CODEX_FLOW_ATTEMPT_SCOPE_ID:-none}"
 
   attempt_store_require_phase "$phase" || return 1
   attempt_store_require_round "$round" || return 1
@@ -120,6 +158,7 @@ attempt_store_create() {
   attempt_store_require_scalar 'attempt reasoning' "$reasoning" || return 1
   attempt_store_require_scalar 'prompt path' "$prompt_file" || return 1
   attempt_store_require_scalar 'compatibility output path' "$compatibility_output" || return 1
+  attempt_store_require_identity "$identity_run_id" "$identity_scope" "$identity_scope_id" || return 1
   case "$stderr_policy" in
     combined|stdout) ;;
     *) attempt_store_error "Invalid stderr policy: ${stderr_policy}"; return 1 ;;
@@ -146,6 +185,9 @@ attempt_store_create() {
   if ! attempt_store_atomic_write "$input_file" \
     $'schema_version\t'"${CODEX_FLOW_ATTEMPT_STORE_SCHEMA_VERSION}" \
     $'attempt_id\t'"${attempt_id}" \
+    $'run_id\t'"${identity_run_id}" \
+    $'scope\t'"${identity_scope}" \
+    $'scope_id\t'"${identity_scope_id}" \
     $'phase\t'"${phase}" \
     $'round\t'"${round}" \
     $'mode\t'"${mode}" \
@@ -177,4 +219,3 @@ attempt_store_signal_from_status() {
     printf 'none\n'
   fi
 }
-

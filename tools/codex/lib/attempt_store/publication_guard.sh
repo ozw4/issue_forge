@@ -68,8 +68,46 @@ attempt_store_finalize() {
 }
 
 run_logged_attempt() {
+  local attempt_dir_name="$1"
+  local attempt_log_name="$2"
   local attempts_root="$3"
+  local phase="$4"
+  local resolved_root="$attempts_root"
+  local batch_context=0
+  local CODEX_FLOW_ATTEMPT_RUN_ID="${CODEX_FLOW_ATTEMPT_RUN_ID:-none}"
+  local CODEX_FLOW_ATTEMPT_SCOPE="${CODEX_FLOW_ATTEMPT_SCOPE:-standalone}"
+  local CODEX_FLOW_ATTEMPT_SCOPE_ID="${CODEX_FLOW_ATTEMPT_SCOPE_ID:-none}"
+  shift 4
 
-  attempt_store_reconcile_publications "$attempts_root" || return 1
-  issue_forge_run_logged_attempt_original "$@"
+  case "$phase" in
+    batch-checks|batch-review|fix-from-batch-checks|fix-from-batch-review)
+      if [[ -n "${run_id:-}${run_state_dir:-}${current_batch_id:-}" \
+         || "$attempts_root" == */queue/batches/*/attempts ]]; then
+        batch_context=1
+      fi
+      ;;
+  esac
+
+  if [[ "$batch_context" -eq 1 ]]; then
+    if [[ -z "${run_id:-}" || -z "${run_state_dir:-}" || -z "${current_batch_id:-}" ]]; then
+      attempt_store_error 'Batch attempt store requires run and batch identity'
+      return 1
+    fi
+    if [[ "${run_state_dir##*/}" != "$run_id" \
+       || "$(basename "$(dirname "$attempts_root")")" != "$current_batch_id" ]]; then
+      attempt_store_error 'Batch attempt store identity does not match its queue context'
+      return 1
+    fi
+    resolved_root="${run_state_dir}/batches/${current_batch_id}/attempts"
+    CODEX_FLOW_ATTEMPT_RUN_ID="$run_id"
+    CODEX_FLOW_ATTEMPT_SCOPE='batch'
+    CODEX_FLOW_ATTEMPT_SCOPE_ID="$current_batch_id"
+  elif [[ -n "${issue_number:-}" ]]; then
+    CODEX_FLOW_ATTEMPT_SCOPE='issue'
+    CODEX_FLOW_ATTEMPT_SCOPE_ID="$issue_number"
+  fi
+
+  attempt_store_reconcile_publications "$resolved_root" || return 1
+  issue_forge_run_logged_attempt_original \
+    "$attempt_dir_name" "$attempt_log_name" "$resolved_root" "$phase" "$@"
 }
