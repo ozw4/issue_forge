@@ -892,9 +892,26 @@ if [[ "\$#" -ge 2 && "\$1" == "auth" && "\$2" == "status" ]]; then
   exit 0
 fi
 
+if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" && " \$* " == *" --state all "* ]]; then
+  if [[ ! -f "${state_dir}/batch-pr-url.txt" ]]; then exit 0; fi
+  read -r batch_pr_head_branch < "${state_dir}/batch-pr-head-branch.txt"
+  read -r batch_pr_head_sha < "${state_dir}/batch-pr-head-sha.txt"
+  requested_head="\$(flag_value '--head' "\$@" || true)"
+  if [[ "\$requested_head" != "\$batch_pr_head_branch" ]]; then exit 0; fi
+  if [[ -f "${state_dir}/batch-pr-merge.txt" ]]; then
+    printf '400\\thttps://example.test/pr/400\\tMERGED\\t2026-08-08T00:00:00Z\\t%s\\tmain\\t%s\\n' "\$batch_pr_head_branch" "\$batch_pr_head_sha"
+  else
+    printf '400\\thttps://example.test/pr/400\\tOPEN\\tnone\\t%s\\tmain\\t%s\\n' "\$batch_pr_head_branch" "\$batch_pr_head_sha"
+  fi
+  exit 0
+fi
+
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "list" ]]; then
   head_value="\$(flag_value '--head' "\$@" || true)"
   if [[ "\$head_value" == batch/* ]]; then
+    printf '%s\n' "\$head_value" > "${state_dir}/batch-pr-head-branch.txt"
+    git rev-parse "\$head_value" > "${state_dir}/batch-pr-head-sha.txt"
+    rm -f "${state_dir}/batch-pr-merge.txt"
     if [[ -f "${state_dir}/batch-pr-url.txt" ]]; then
       printf '400\t'
       cat "${state_dir}/batch-pr-url.txt"
@@ -946,6 +963,17 @@ fi
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "view" ]]; then
   if [[ "\$3" == "https://example.test/pr/400" && " \$* " == *" --json number "* ]]; then
     printf '400\n'
+    exit 0
+  fi
+
+  if [[ "\$3" == "400" && " \$* " == *" --json state,mergedAt,headRefName,baseRefName,headRefOid "* ]]; then
+    read -r batch_pr_head_branch < "${state_dir}/batch-pr-head-branch.txt"
+    read -r batch_pr_head_sha < "${state_dir}/batch-pr-head-sha.txt"
+    if [[ -f "${state_dir}/batch-pr-merge.txt" ]]; then
+      printf 'MERGED\\t2026-08-08T00:00:00Z\\t%s\\tmain\\t%s\\n' "\$batch_pr_head_branch" "\$batch_pr_head_sha"
+    else
+      printf 'OPEN\\t\\t%s\\tmain\\t%s\\n' "\$batch_pr_head_branch" "\$batch_pr_head_sha"
+    fi
     exit 0
   fi
 
@@ -3882,6 +3910,8 @@ run_queue_entity_integrity_smoke() {
   first_archive="$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "${repo_dir}/.work/queue/runs/${run}/batches/batch-82-82/issues/82.state")"
   "${REAL_GIT}" -C "$repo_dir" switch --detach origin/main >/dev/null; "${REAL_GIT}" -C "$repo_dir" branch -D batch/82-82 >/dev/null
   "${REAL_GIT}" -C "$repo_dir" push origin --delete batch/82-82 >/dev/null
+  rm -f "${state_dir}/batch-pr-url.txt" "${state_dir}/batch-pr-head-branch.txt" \
+    "${state_dir}/batch-pr-head-sha.txt" "${state_dir}/batch-pr-merge.txt"
   reset_flow_counters
   if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue") > "${state_dir}/queue-repeat-two.log" 2>&1; then cat "${state_dir}/queue-repeat-two.log" >&2; fail 'second repeated-range run failed'; fi
   second_run="$(grep -l $'^issues\t82$' "${repo_dir}"/.work/queue/runs/*/manifest.state | tail -n 1)"; second_run="$(basename "$(dirname "$second_run")")"
@@ -3893,7 +3923,7 @@ run_queue_entity_integrity_smoke() {
   run_dir="${repo_dir}/.work/queue/runs/${run}"; state_file="${run_dir}/batches/batch-83-83/issues/83.state"; state_backup="${state_dir}/queue-nondirect-base.issue"; cp "$state_file" "$state_backup"
   base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"; grandparent="$(${REAL_GIT} -C "$repo_dir" rev-parse "${base}^")"
   sed -i "s/^base_commit.*/base_commit$(printf '\t')${grandparent}/" "$state_file"
-  queue_resume_failure "$run" 'does not equal saved base' "${state_dir}/queue-nondirect-base.resume.log"
+  queue_resume_failure "$run" 'does not start from expected frontier' "${state_dir}/queue-nondirect-base.resume.log"
   cp "$state_backup" "$state_file"
   queue_resume_success "$run" "${state_dir}/queue-nondirect-base.repaired.log"
 
@@ -3903,7 +3933,7 @@ run_queue_entity_integrity_smoke() {
   state_backup="${state_dir}/queue-ack-validation.issue"; cp "$state_file" "$state_backup"
   base="$(awk -F '\t' '$1 == "base_commit" { print $2 }' "$state_file")"; grandparent="$(${REAL_GIT} -C "$repo_dir" rev-parse "${base}^")"
   sed -i "s/^base_commit.*/base_commit$(printf '\t')${grandparent}/" "$state_file"
-  queue_resume_failure "$run" 'does not equal saved base' "${state_dir}/queue-ack-wrong-base.log"; cp "$state_backup" "$state_file"
+  queue_resume_failure "$run" 'does not equal expected frontier' "${state_dir}/queue-ack-wrong-base.log"; cp "$state_backup" "$state_file"
   commit="$(awk -F '\t' '$1 == "commit_sha" { print $2 }' "$state_file")"
   sed -i "s/^commit_sha.*/commit_sha$(printf '\t')${base}/" "$state_file"
   queue_resume_failure "$run" 'archive identity does not match' "${state_dir}/queue-ack-wrong-commit.log"; cp "$state_backup" "$state_file"

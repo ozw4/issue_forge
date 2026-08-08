@@ -1222,12 +1222,12 @@ wait_for_batch_pr_merge() {
 
 auto_merge_batch_pr() {
   local pr_number="$1"
-  local head_sha
+  local head_sha="$2"
 
-  head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
   log_info "enabling auto-merge for batch PR #${pr_number}"
   gh pr merge "$pr_number" --auto --squash --delete-branch --match-head-commit "$head_sha"
   wait_for_batch_pr_merge "$pr_number"
+  queue_failpoint after_batch_merge_visible
   git fetch origin "$CODEX_FLOW_BASE_BRANCH"
 }
 
@@ -1343,6 +1343,17 @@ process_batch_body() {
   queue_state_publish_plain_singleton "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id" || \
     fail 'Cannot publish current_batch singleton'
 
+  if [[ "$batch_state" == publishing ]]; then
+    batch_head_commit="$(queue_state_read_field "$batch_state_file" batch accepted_head)"
+    queue_reconcile_batch_pr_state "$publish_state_file" "$batch_state_file" "$run_id" "$batch_id" \
+      "$batch_branch" "$batch_head_commit" published_state batch_pr_number _batch_pr_url
+    if [[ "$published_state" == merged ]]; then
+      queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
+      assert_queue_lease_owned || fail 'Queue lease lost after merged batch reconciliation'
+      return 0
+    fi
+  fi
+
   if [[ "$batch_state" == planned || "$batch_state" == base_resolved ]]; then
     queue_set_active_phase batch_branch_preparation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_branch_preparation before
     prepare_batch_branch "$batch_branch" "$batch_id" "$batch_state_file" "$batch_state"
@@ -1410,16 +1421,9 @@ process_batch_body() {
   validate_batch_branch_ref "$batch_branch" "$batch_head_commit" 'publication input'
   queue_set_active_phase batch_publish; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish before
   queue_failpoint fail_batch_publish
-  if [[ -f "$publish_state_file" ]]; then
-    queue_state_validate_file "$publish_state_file" publish
-    batch_pr_number="$(queue_state_read_field "$publish_state_file" publish pr_number)"
-    _batch_pr_url="$(queue_state_read_field "$publish_state_file" publish pr_url)"
-    publish_line="$(gh pr view "$batch_pr_number" --json state,mergedAt,headRefName,baseRefName,headRefOid --jq '[.state, (.mergedAt // ""), .headRefName, .baseRefName, .headRefOid] | @tsv')"
-    IFS=$'\t' read -r published_state published_merged published_head published_base published_sha <<< "$publish_line"
-    [[ "$published_state" == OPEN || "$published_state" == MERGED ]] || fail "Published PR #${batch_pr_number} has unexpected state ${published_state}"
-    [[ "$published_head" == "$batch_branch" && "$published_base" == "$CODEX_FLOW_BASE_BRANCH" && "$published_sha" == "$(queue_state_read_field "$publish_state_file" publish head_sha)" ]] || \
-      fail "Published PR #${batch_pr_number} does not match expected head/base/SHA for ${batch_id}"
-  else
+  queue_reconcile_batch_pr_state "$publish_state_file" "$batch_state_file" "$run_id" "$batch_id" \
+    "$batch_branch" "$batch_head_commit" published_state batch_pr_number _batch_pr_url
+  if [[ "$published_state" == none ]]; then
     publish_batch_results \
     "$first_issue" \
     "$last_issue" \
@@ -1431,15 +1435,24 @@ process_batch_body() {
     queue_failpoint after_batch_publish
     queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
       "$CODEX_FLOW_BASE_BRANCH" "$batch_head_commit" open
+    queue_reconcile_batch_pr_state "$publish_state_file" "$batch_state_file" "$run_id" "$batch_id" \
+      "$batch_branch" "$batch_head_commit" published_state batch_pr_number _batch_pr_url
   fi
   queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_publish after
 
-  if [[ "$auto_merge" -eq 1 && -z "${published_merged:-}" ]]; then
+  if [[ "$published_state" == merged ]]; then
+    queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
+    assert_queue_lease_owned || fail 'Queue lease lost after merged batch reconciliation'
+    return 0
+  fi
+
+  if [[ "$auto_merge" -eq 1 ]]; then
     queue_set_active_phase auto_merge; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge before
-    auto_merge_batch_pr "$batch_pr_number"
+    auto_merge_batch_pr "$batch_pr_number" "$batch_head_commit"
+    queue_reconcile_batch_pr_state "$publish_state_file" "$batch_state_file" "$run_id" "$batch_id" \
+      "$batch_branch" "$batch_head_commit" published_state batch_pr_number _batch_pr_url
+    [[ "$published_state" == merged ]] || fail "Batch PR #${batch_pr_number} was not merged after auto-merge completed"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" auto_merge after
-    queue_state_record_publish "$publish_state_file" "$run_id" "$batch_id" "$batch_pr_number" "$_batch_pr_url" "$batch_branch" \
-      "$CODEX_FLOW_BASE_BRANCH" "$batch_head_commit" merged
   fi
   queue_state_transition "$batch_state_file" batch "$batch_id" publishing completed
   assert_queue_lease_owned || fail 'Queue lease lost after batch phase'

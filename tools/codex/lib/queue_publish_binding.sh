@@ -129,6 +129,125 @@ queue_validate_publish_state_binding_from_scope() {
     "$expected_branch"
 }
 
+queue_pr_reconciliation_error() {
+  printf '[queue] PR reconciliation failed: %s\n' "$1" >&2
+  return 1
+}
+
+queue_reconcile_batch_pr_state() {
+  local publish_file="$1" batch_file="$2" expected_run="$3" expected_batch="$4"
+  local expected_branch="$5" expected_head="$6" state_output="$7" number_output="$8" url_output="$9"
+  local existing=0 lines='' line pr_number pr_url pr_state merged_at head base sha extra resolved_state
+  local stored_number='' stored_url='' stored_state=''
+  local -a records=()
+
+  if [[ -e "$publish_file" ]]; then
+    existing=1
+    queue_validate_publish_state_binding "$publish_file" "${run_state_dir}/manifest.state" "$batch_file" \
+      "$expected_run" "$expected_batch" "$expected_branch" || return 1
+    stored_number="$(queue_state_read_field "$publish_file" publish pr_number)" || return 1
+    stored_url="$(queue_state_read_field "$publish_file" publish pr_url)" || return 1
+    stored_state="$(queue_state_read_field "$publish_file" publish state)" || return 1
+    if ! line="$(command gh pr view "$stored_number" \
+      --json state,mergedAt,headRefName,baseRefName,headRefOid \
+      --jq '[.state, (.mergedAt // ""), .headRefName, .baseRefName, .headRefOid] | @tsv')"; then
+      queue_pr_reconciliation_error "cannot read recorded PR #${stored_number}"
+      return 1
+    fi
+    line="$(printf '%s\n' "$line" | awk -F '\t' 'BEGIN { OFS = "\t" } { if ($2 == "") $2 = "none"; print }')"
+    line="${stored_number}"$'\t'"${stored_url}"$'\t'"${line}"
+  else
+    if ! lines="$(command gh pr list \
+      --head "$expected_branch" \
+      --base "$CODEX_FLOW_BASE_BRANCH" \
+      --state all \
+      --json number,url,state,mergedAt,headRefName,baseRefName,headRefOid \
+      --jq '.[] | [.number, .url, .state, (.mergedAt // "none"), .headRefName, .baseRefName, .headRefOid] | @tsv')"; then
+      queue_pr_reconciliation_error "cannot query PRs for ${expected_branch}"
+      return 1
+    fi
+    if [[ -z "$lines" ]]; then
+      printf -v "$state_output" '%s' none
+      printf -v "$number_output" '%s' ''
+      printf -v "$url_output" '%s' ''
+      return 0
+    fi
+    mapfile -t records <<< "$lines"
+    line=''
+    local candidate candidate_number candidate_url candidate_state candidate_merged candidate_head candidate_base candidate_sha candidate_extra
+    for candidate in "${records[@]}"; do
+      IFS=$'\t' read -r candidate_number candidate_url candidate_state candidate_merged candidate_head candidate_base candidate_sha candidate_extra <<< "$candidate"
+      [[ -n "$candidate_number" && "$candidate_number" =~ ^[0-9]+$ && -n "$candidate_url" && -z "${candidate_extra:-}" ]] \
+        || queue_pr_reconciliation_error "malformed PR identity: ${candidate}" \
+        || return 1
+      [[ "$candidate_head" == "$expected_branch" && "$candidate_base" == "$CODEX_FLOW_BASE_BRANCH" ]] \
+        || queue_pr_reconciliation_error "PR #${candidate_number} does not match expected head/base ${expected_branch}/${CODEX_FLOW_BASE_BRANCH}" \
+        || return 1
+      if [[ "$candidate_sha" == "$expected_head" ]]; then
+        [[ -z "$line" ]] \
+          || queue_pr_reconciliation_error "ambiguous PR lookup for ${expected_branch}" \
+          || return 1
+        line="$candidate"
+      elif [[ "$candidate_state" == OPEN ]]; then
+        queue_pr_reconciliation_error "open PR #${candidate_number} head ${candidate_sha} does not match accepted head ${expected_head}"
+        return 1
+      fi
+    done
+    if [[ -z "$line" ]]; then
+      printf -v "$state_output" '%s' none
+      printf -v "$number_output" '%s' ''
+      printf -v "$url_output" '%s' ''
+      return 0
+    fi
+  fi
+
+  IFS=$'\t' read -r pr_number pr_url pr_state merged_at head base sha extra <<< "$line"
+  [[ -n "$pr_number" && "$pr_number" =~ ^[0-9]+$ && -n "$pr_url" && -z "${extra:-}" ]] \
+    || queue_pr_reconciliation_error "malformed PR identity: ${line}" \
+    || return 1
+  [[ "$head" == "$expected_branch" && "$base" == "$CODEX_FLOW_BASE_BRANCH" ]] \
+    || queue_pr_reconciliation_error "PR #${pr_number} does not match expected head/base ${expected_branch}/${CODEX_FLOW_BASE_BRANCH}" \
+    || return 1
+  [[ "$sha" == "$expected_head" ]] \
+    || queue_pr_reconciliation_error "PR #${pr_number} head ${sha} does not match accepted head ${expected_head}" \
+    || return 1
+
+  if [[ "$pr_state" == MERGED || ( -n "$merged_at" && "$merged_at" != none ) ]]; then
+    resolved_state=merged
+  elif [[ "$pr_state" == OPEN && ( -z "$merged_at" || "$merged_at" == none ) ]]; then
+    resolved_state=open
+  elif [[ "$pr_state" == CLOSED && ( -z "$merged_at" || "$merged_at" == none ) ]]; then
+    queue_pr_reconciliation_error "PR #${pr_number} is closed without merging"
+    return 1
+  else
+    queue_pr_reconciliation_error "PR #${pr_number} has unsupported state ${pr_state}/${merged_at}"
+    return 1
+  fi
+
+  if [[ "$existing" -eq 1 ]]; then
+    [[ "$pr_number" == "$stored_number" && "$pr_url" == "$stored_url" ]] \
+      || queue_pr_reconciliation_error "recorded PR identity changed for ${expected_batch}" \
+      || return 1
+    case "${stored_state}:${resolved_state}" in
+      open:open|merged:merged) ;;
+      open:merged)
+        queue_state_record_publish "$publish_file" "$expected_run" "$expected_batch" "$pr_number" "$pr_url" \
+          "$expected_branch" "$CODEX_FLOW_BASE_BRANCH" "$expected_head" merged || return 1
+        ;;
+      *)
+        queue_pr_reconciliation_error "recorded PR state ${stored_state} contradicts GitHub state ${resolved_state} for #${pr_number}"
+        return 1
+        ;;
+    esac
+  else
+    queue_state_record_publish "$publish_file" "$expected_run" "$expected_batch" "$pr_number" "$pr_url" \
+      "$expected_branch" "$CODEX_FLOW_BASE_BRANCH" "$expected_head" "$resolved_state" || return 1
+  fi
+
+  printf -v "$state_output" '%s' "$resolved_state"
+  printf -v "$number_output" '%s' "$pr_number"
+  printf -v "$url_output" '%s' "$pr_url"
+}
 queue_validate_publish_state_for_batch_file() {
   local batch_file="$1" publish_file
   local -A batch_fields=()
