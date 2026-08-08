@@ -65,7 +65,7 @@ attempt_store_atomic_copy() {
   temporary_path="$(mktemp "${target_dir}/.attempt-store.tmp.XXXXXX")" || return 1
 
   if cp -- "$source_path" "$temporary_path" \
-    && chmod --reference="$source_path" "$temporary_path" \
+    && chmod 0644 "$temporary_path" \
     && mv -T -f -- "$temporary_path" "$target_path"; then
     status=0
   fi
