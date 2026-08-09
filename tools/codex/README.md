@@ -34,10 +34,11 @@ Covered behavior includes:
 Manual run:
 
 ```bash
+./tools/codex/smoke_attempt_store.sh
 ./tools/codex/smoke_harness.sh
 ```
 
-The harness first runs the focused attempt-store contract smoke and then the existing full consumer/queue smoke suite. It does not call external GitHub or Codex services.
+The focused attempt-store contract smoke and the existing full consumer/queue smoke suite are separate scripts. The repository checks and pytest run both. Neither calls external GitHub or Codex services.
 
 ## Single-Issue Reasoning
 

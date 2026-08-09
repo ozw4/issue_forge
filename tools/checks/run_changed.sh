@@ -76,6 +76,8 @@ run_smoke_harness_if_needed() {
     return
   fi
 
+  printf 'smoke_attempt_store: ./tools/codex/smoke_attempt_store.sh\n'
+  ./tools/codex/smoke_attempt_store.sh
   printf 'smoke_harness: ./tools/codex/smoke_harness.sh\n'
   ./tools/codex/smoke_harness.sh
 }
