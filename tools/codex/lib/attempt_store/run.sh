@@ -49,8 +49,11 @@ run_logged_attempt() {
   esac
   operation_status="$command_status"
 
-  if [[ "$command_status" -eq 0 && ( "$phase" == review || "$phase" == batch-review ) ]]; then
-    if declare -F extract_structured_review_output_file >/dev/null 2>&1; then
+  if [[ "$phase" == review || "$phase" == batch-review ]]; then
+    if [[ "$command_status" -ne 0 ]]; then
+      result_status=failed
+      publish_attempt=0
+    elif declare -F extract_structured_review_output_file >/dev/null 2>&1; then
       parsed_temp="$(mktemp)" || return 1
       if [[ "$compatibility_output" != *.raw.txt ]]; then
         attempt_store_error "Review compatibility output must end with .raw.txt: ${compatibility_output}"
@@ -95,4 +98,3 @@ run_logged_attempt() {
   fi
   return "$operation_status"
 }
-
