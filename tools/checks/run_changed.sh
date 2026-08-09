@@ -65,7 +65,7 @@ run_shellcheck_if_needed() {
 
   require_command shellcheck
   printf 'shellcheck: %s target(s)\n' "${#shell_targets[@]}"
-  shellcheck -x "${shell_targets[@]}"
+  shellcheck -x -s bash "${shell_targets[@]}"
 }
 
 run_smoke_harness_if_needed() {
