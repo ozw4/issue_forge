@@ -42,15 +42,11 @@ The compatibility view and `attempts/latest/<phase>.state` are published only fr
 
 Compatibility files remain writable because existing prompts, history publication, and PR generation consume those paths. Read-only mode applies to authoritative attempt files, not the compatibility copies.
 
-## Review publication and retry
+## Review publication
 
-For `review` and `batch-review`, process exit `0` is not sufficient for success. The raw output must parse and pass the existing review schema and semantic validation before the attempt is published.
+For `review` and `batch-review`, process exit `0` is not sufficient for success. The raw output must parse and pass the existing review schema and semantic validation, and the consumer worktree state outside managed internal paths must be unchanged before and after the reviewer command.
 
-The engine fingerprints `HEAD`, the index diff, the tracked worktree diff, and the path, executable bit, and content hash of untracked files immediately before and after each reviewer command. Managed internal paths such as `.work` and the vendored engine remain excluded by the normal worktree pathspecs.
-
-If the fingerprint changes, that attempt is recorded as `invalid` and is not published. Review material is regenerated from the new repository state and the reviewer is run again. The default limit is three retries per logical review round and can be overridden with `CODEX_FLOW_REVIEW_RETRY_LIMIT`. If the repository keeps changing after the limit, the flow fails without advancing the compatibility review or `latest` pointer.
-
-A successful review advances the raw compatibility file, parsed compatibility file, and `latest` pointer from the same attempt. A parser failure records an `invalid` attempt with `parser_status=failed`, does not create `parsed-review.txt`, and leaves the previously published raw/parsed generation and `latest` pointer unchanged.
+A successful review advances the raw compatibility file, parsed compatibility file, and `latest` pointer from the same attempt. A parser failure records an `invalid` attempt with `parser_status=failed`, does not create `parsed-review.txt`, and leaves the previously published raw/parsed generation and `latest` pointer unchanged. A reviewer that changes repository files is also recorded as `invalid`; its output remains in the immutable attempt, but it is not parsed or published and the previous compatibility generation remains current.
 
 ## Token usage paths
 

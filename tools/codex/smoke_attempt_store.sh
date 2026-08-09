@@ -64,66 +64,6 @@ archived_log="$(awk -F '\t' 'NR == 2 { print $6 }' "${issue_archive}/token-usage
 [[ -f "${issue_archive}/${archived_log#./}" ]] \
   || fail 'token usage log path did not survive archive relocation'
 
-retry_repo="${temp_root}/retry-repo"
-mkdir -p "$retry_repo"
-(
-  cd "$retry_repo"
-  git init -q
-  git config user.name smoke
-  git config user.email smoke@example.com
-  printf 'base\n' > code.txt
-  git add code.txt
-  git commit -qm base
-  printf 'implementation\n' > code.txt
-  mkdir -p .work/history
-  CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(':(exclude).work')
-  CODEX_FLOW_REVIEW_RETRY_LIMIT=2
-  review_diff=.work/review.diff
-  review_untracked=.work/review.untracked.txt
-  review_summary=.work/review.summary.txt
-  review_prompt=.work/review.prompt.md
-  review_raw_output=.work/review.raw.txt
-  review_output=.work/review.txt
-  history_dir=.work/history
-  printf 'review\n' > "$review_prompt"
-  generate_review_material() {
-    git diff --binary > "$review_diff"
-    : > "$review_untracked"
-    printf 'summary\n' > "$review_summary"
-  }
-  archive_round_file() { :; }
-  status_outside_work() {
-    git status --porcelain --untracked-files=all -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
-  }
-  reviewer=.work/reviewer.sh
-  counter=.work/reviewer-count
-  cat > "$reviewer" <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-counter="$1"
-count=0
-[[ ! -f "$counter" ]] || count="$(cat "$counter")"
-count=$((count + 1))
-printf '%s\n' "$count" > "$counter"
-if [[ "$count" == 1 ]]; then printf 'reviewer change\n' >> code.txt; fi
-printf 'valid review\n'
-SCRIPT
-  chmod +x "$reviewer"
-  generate_review_material
-  before_status="$(status_outside_work)"
-  retry_attempt=''
-  retry_log=''
-  run_logged_attempt retry_attempt retry_log .work/attempts review 1 read medium \
-    "$review_prompt" "$review_raw_output" combined -- "$reviewer" "$counter"
-  [[ "$(cat "$counter")" == 2 ]] || fail 'review was not rerun after repository change'
-  [[ "$before_status" == "$(status_outside_work)" ]] \
-    || fail 'outer review status baseline was not refreshed'
-  [[ "$(find .work/attempts -maxdepth 1 -type d -name 'review.*' | wc -l)" == 2 ]] \
-    || fail 'review retry did not preserve both attempts'
-  grep -R -l $'status\tinvalid' .work/attempts/review.*/result.state >/dev/null \
-    || fail 'changed review attempt was not recorded as invalid'
-)
-
 queue_root="${temp_root}/.work/queue"
 compatibility_attempts="${queue_root}/batches/batch-10-12/attempts"
 compatibility_log="${queue_root}/batches/batch-10-12/checks.log"
