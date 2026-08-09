@@ -7,6 +7,8 @@ fi
 ATTEMPT_STORE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/attempt_store"
 # shellcheck source=tools/codex/lib/attempt_store/core.sh
 source "${ATTEMPT_STORE_LIB_DIR}/core.sh"
+# shellcheck source=tools/codex/lib/attempt_store/review_retry.sh
+source "${ATTEMPT_STORE_LIB_DIR}/review_retry.sh"
 # shellcheck source=tools/codex/lib/attempt_store/publication.sh
 source "${ATTEMPT_STORE_LIB_DIR}/publication.sh"
 # shellcheck source=tools/codex/lib/attempt_store/run.sh
