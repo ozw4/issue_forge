@@ -44,9 +44,9 @@ Compatibility files remain writable because existing prompts, history publicatio
 
 ## Review publication
 
-For `review` and `batch-review`, process exit `0` is not sufficient for success. The raw output must parse and pass the existing review schema and semantic validation before the attempt is published.
+For `review` and `batch-review`, process exit `0` is not sufficient for success. The raw output must parse and pass the existing review schema and semantic validation, and the consumer worktree state outside managed internal paths must be unchanged before and after the reviewer command.
 
-A successful review advances the raw compatibility file, parsed compatibility file, and `latest` pointer from the same attempt. A parser failure records an `invalid` attempt with `parser_status=failed`, does not create `parsed-review.txt`, and leaves the previously published raw/parsed generation and `latest` pointer unchanged.
+A successful review advances the raw compatibility file, parsed compatibility file, and `latest` pointer from the same attempt. A parser failure records an `invalid` attempt with `parser_status=failed`, does not create `parsed-review.txt`, and leaves the previously published raw/parsed generation and `latest` pointer unchanged. A reviewer that changes repository files is also recorded as `invalid`; its output remains in the immutable attempt, but it is not parsed or published and the previous compatibility generation remains current.
 
 ## Token usage paths
 

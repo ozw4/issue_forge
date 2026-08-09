@@ -23,6 +23,10 @@ run_logged_attempt() {
   local parsed_temp=''
   local parsed_artifact='none'
   local parsed_compatibility='none'
+  local review_status_check=0
+  local review_status_before=''
+  local review_status_after=''
+  local review_worktree_valid=1
 
   if [[ "${1:-}" != -- ]]; then
     attempt_store_error 'Attempt command separator is missing'
@@ -30,6 +34,15 @@ run_logged_attempt() {
   fi
   shift
   [[ "$#" -gt 0 ]] || { attempt_store_error 'Attempt command is empty'; return 1; }
+
+  if [[ "$phase" == review || "$phase" == batch-review ]] \
+    && declare -F status_outside_work >/dev/null 2>&1; then
+    if ! review_status_before="$(status_outside_work)"; then
+      attempt_store_error "Cannot capture worktree state before ${phase} round ${round}"
+      return 1
+    fi
+    review_status_check=1
+  fi
 
   attempt_store_create attempt_path "$attempts_root" "$phase" "$round" "$mode" "$reasoning" \
     "$prompt_file" "$compatibility_output" "$stderr_policy" "$@" || return 1
@@ -49,10 +62,24 @@ run_logged_attempt() {
   esac
   operation_status="$command_status"
 
+  if [[ "$review_status_check" -eq 1 ]]; then
+    if ! review_status_after="$(status_outside_work)"; then
+      attempt_store_error "Cannot capture worktree state after ${phase} round ${round}"
+      review_worktree_valid=0
+    elif [[ "$review_status_before" != "$review_status_after" ]]; then
+      attempt_store_error "Review phase modified repository files: ${phase} round ${round}"
+      review_worktree_valid=0
+    fi
+  fi
+
   if [[ "$phase" == review || "$phase" == batch-review ]]; then
     if [[ "$command_status" -ne 0 ]]; then
       result_status=failed
       publish_attempt=0
+    elif [[ "$review_worktree_valid" -ne 1 ]]; then
+      result_status=invalid
+      publish_attempt=0
+      operation_status=1
     elif declare -F extract_structured_review_output_file >/dev/null 2>&1; then
       parsed_temp="$(mktemp)" || return 1
       if [[ "$compatibility_output" != *.raw.txt ]]; then
