@@ -48,6 +48,7 @@ run_codex_with_attempt() {
   local legacy_stderr_policy="${6:-combined}"
   local attempts_root="${CODEX_FLOW_AGENT_ATTEMPTS_ROOT:-}"
   local operation_dir attempt_id running_dir terminal_dir result_tmp
+  local stdout_tmp stderr_tmp legacy_source_file=""
   local codex_status terminal_status
 
   case "$legacy_stderr_policy" in
@@ -95,11 +96,17 @@ run_codex_with_attempt() {
     return 1
   fi
 
+  stdout_tmp="${running_dir}/.agent.stdout.tmp"
+  stderr_tmp="${running_dir}/.agent.stderr.tmp"
   if "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "${running_dir}/prompt.md" \
-    > "${running_dir}/agent.log" 2>&1; then
+    > "$stdout_tmp" 2> "$stderr_tmp"; then
     codex_status=0
   else
     codex_status=$?
+  fi
+  if ! cat -- "$stdout_tmp" "$stderr_tmp" > "${running_dir}/agent.log"; then
+    printf 'Failed to write Agent attempt log: %s\n' "$running_dir" >&2
+    return 1
   fi
 
   case "$codex_status" in
@@ -125,12 +132,40 @@ run_codex_with_attempt() {
     printf 'Failed to publish Agent attempt result state: %s\n' "$running_dir" >&2
     return 1
   fi
+
+  if [[ "$legacy_stderr_policy" == stdout ]]; then
+    legacy_source_file="$(mktemp "$(dirname "$legacy_log_file")/.agent-stdout.tmp.XXXXXX")" || {
+      printf 'Failed to create Agent attempt legacy stdout log: %s\n' "$legacy_log_file" >&2
+      return 1
+    }
+    if ! cp -- "$stdout_tmp" "$legacy_source_file"; then
+      rm -f -- "$legacy_source_file" || true
+      printf 'Failed to prepare Agent attempt legacy stdout log: %s\n' "$legacy_log_file" >&2
+      return 1
+    fi
+  fi
+  if ! rm -f -- "$stdout_tmp" "$stderr_tmp"; then
+    [[ -z "$legacy_source_file" ]] || rm -f -- "$legacy_source_file" || true
+    printf 'Failed to remove Agent attempt temporary logs: %s\n' "$running_dir" >&2
+    return 1
+  fi
   if ! mv -T -- "$running_dir" "$terminal_dir"; then
+    [[ -z "$legacy_source_file" ]] || rm -f -- "$legacy_source_file" || true
     printf 'Failed to finalize Agent attempt directory: %s\n' "$running_dir" >&2
     return 1
   fi
-  if ! publish_agent_attempt_legacy_log "${terminal_dir}/agent.log" "$legacy_log_file"; then
+  if [[ "$legacy_stderr_policy" == combined ]]; then
+    legacy_source_file="${terminal_dir}/agent.log"
+  fi
+  if ! publish_agent_attempt_legacy_log "$legacy_source_file" "$legacy_log_file"; then
+    if [[ "$legacy_stderr_policy" == stdout ]]; then
+      rm -f -- "$legacy_source_file" || true
+    fi
     printf 'Failed to publish Agent attempt legacy log: %s\n' "$legacy_log_file" >&2
+    return 1
+  fi
+  if [[ "$legacy_stderr_policy" == stdout ]] && ! rm -f -- "$legacy_source_file"; then
+    printf 'Failed to remove Agent attempt legacy stdout temporary log: %s\n' "$legacy_source_file" >&2
     return 1
   fi
 

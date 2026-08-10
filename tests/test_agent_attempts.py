@@ -168,3 +168,20 @@ def test_unset_attempt_root_can_preserve_stdout_only_legacy_log(tmp_path: Path) 
     assert "stdout mode=read prompt=test prompt" in legacy_log.read_text(encoding="utf-8")
     assert "stderr status=0" not in legacy_log.read_text(encoding="utf-8")
     assert "stderr status=0" in completed.stderr
+
+
+def test_enabled_attempt_preserves_stdout_only_legacy_policy(tmp_path: Path) -> None:
+    completed, attempts_root, _prompt, legacy_log = run_helper(
+        tmp_path,
+        legacy_stderr_policy="stdout",
+    )
+    attempt = attempts_root / "review" / "attempt-0001"
+    attempt_log = (attempt / "agent.log").read_text(encoding="utf-8")
+    legacy_text = legacy_log.read_text(encoding="utf-8")
+
+    assert completed.returncode == 0
+    assert "stdout mode=read prompt=test prompt" in attempt_log
+    assert "stderr status=0" in attempt_log
+    assert "stdout mode=read prompt=test prompt" in legacy_text
+    assert "stderr status=0" not in legacy_text
+    assert read_state(attempt / "result.state")["status"] == "completed"
