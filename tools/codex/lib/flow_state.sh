@@ -99,6 +99,8 @@ validate_queue_issue_frontier() {
 
   [[ -n "${run_state_dir:-}" && -n "${current_batch_id:-}" ]] || return 0
   declare -F queue_state_read_field >/dev/null 2>&1 || return 0
+  # issue_numbers is a caller-owned global array checked dynamically here.
+  # shellcheck disable=SC2154
   declare -p issue_numbers >/dev/null 2>&1 || return 0
 
   batch_state_file="${run_state_dir}/batches/${current_batch_id}/batch.state"

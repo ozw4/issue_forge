@@ -174,9 +174,9 @@ queue_reconcile_batch_pr_state() {
     fi
     mapfile -t records <<< "$lines"
     line=''
-    local candidate candidate_number candidate_url candidate_state candidate_merged candidate_head candidate_base candidate_sha candidate_extra
+    local candidate candidate_number candidate_url candidate_state _candidate_merged candidate_head candidate_base candidate_sha candidate_extra
     for candidate in "${records[@]}"; do
-      IFS=$'\t' read -r candidate_number candidate_url candidate_state candidate_merged candidate_head candidate_base candidate_sha candidate_extra <<< "$candidate"
+      IFS=$'\t' read -r candidate_number candidate_url candidate_state _candidate_merged candidate_head candidate_base candidate_sha candidate_extra <<< "$candidate"
       [[ -n "$candidate_number" && "$candidate_number" =~ ^[0-9]+$ && -n "$candidate_url" && -z "${candidate_extra:-}" ]] \
         || queue_pr_reconciliation_error "malformed PR identity: ${candidate}" \
         || return 1

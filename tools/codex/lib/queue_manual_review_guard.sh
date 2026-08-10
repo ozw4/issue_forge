@@ -95,7 +95,11 @@ queue_manual_review_inspect_state() {
   run="$(queue_state_read_field "$state_file" run run_id)" || return 2
   report_path="$(dirname "$state_file")/manual-review.txt"
   queue_manual_review_validate_report "$report_path" "$run" report_phase || return 2
+  # The nameref assignment intentionally writes to the caller variable.
+  # shellcheck disable=SC2034
   report_result="$report_path"
+  # The nameref assignment intentionally writes to the caller variable.
+  # shellcheck disable=SC2034
   phase_result="$report_phase"
 }
 
@@ -149,7 +153,7 @@ queue_install_manual_review_guard() {
         [[ "$inspect_status" -eq 2 ]] && return 1
       fi
     fi
-    issue_forge_status_outside_work_original "$@"
+    issue_forge_status_outside_work_original
   }
 
   queue_state_transition() {

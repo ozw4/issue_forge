@@ -1324,7 +1324,7 @@ process_batch_body() {
   local index
   local -a batch_issues=()
   local batch_state_file batch_state
-  local publish_state_file publish_line published_state published_merged published_head published_base published_sha
+  local publish_state_file published_state
 
   assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
