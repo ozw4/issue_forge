@@ -9,6 +9,8 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "${SCRIPT_DIR}/lib/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/agent_attempts.sh
+source "${SCRIPT_DIR}/lib/agent_attempts.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
@@ -30,31 +32,21 @@ log_fail_with_path() {
 }
 
 run_codex_phase() {
-  local mode="$1"
-  local prompt_file="$2"
-  local output_file="$3"
-  local reasoning_effort="$4"
-  local stderr_policy="${5:-combined}"
+  local operation="$1"
+  local round="$2"
+  local mode="$3"
+  local prompt_file="$4"
+  local output_file="$5"
+  local reasoning_effort="$6"
+  local legacy_stderr_policy="${7:-combined}"
 
-  case "$stderr_policy" in
-    combined)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file" 2>&1
-      ;;
-    stdout)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file"
-      ;;
-    *)
-      printf 'Invalid Codex phase stderr policy: %s\n' "$stderr_policy" >&2
-      exit 1
-      ;;
-  esac
+  CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+    run_codex_with_attempt "$operation" "$round" "$mode" "$prompt_file" "$output_file" "$legacy_stderr_policy"
 }
 
 run_implementation_phase() {
   log_info 'codex implementation'
-  run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
+  run_codex_phase implementation 0 write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
   ensure_issue_token_usage_tsv 'implementation' "$issue_number" 0 "$CODEX_FLOW_IMPLEMENTATION_REASONING" "$implementation_log"
 

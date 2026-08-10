@@ -4,6 +4,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/agent_attempts.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent_attempts.sh"
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -46,21 +48,25 @@ write_batch_changed_files() {
 }
 
 run_codex_batch_write() {
-  local prompt_file="$1"
-  local output_log="$2"
-  local reasoning_effort="$3"
+  local operation="$1"
+  local round="$2"
+  local prompt_file="$3"
+  local output_log="$4"
+  local reasoning_effort="$5"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" write "$prompt_file" > "$output_log" 2>&1
+    run_codex_with_attempt "$operation" "$round" write "$prompt_file" "$output_log"
 }
 
 run_codex_batch_read() {
-  local prompt_file="$1"
-  local output_log="$2"
-  local reasoning_effort="$3"
+  local operation="$1"
+  local round="$2"
+  local prompt_file="$3"
+  local output_log="$4"
+  local reasoning_effort="$5"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" read "$prompt_file" > "$output_log"
+    run_codex_with_attempt "$operation" "$round" read "$prompt_file" "$output_log" stdout
 }
 
 run_batch_checks_once() {
@@ -112,7 +118,7 @@ ensure_batch_checks_pass() {
     write_fix_from_batch_checks_prompt_file "$issues_file" "$checks_log" "$fix_checks_prompt"
     ensure_clean_worktree 'Working tree must be clean before batch checks fix.'
     log_info "codex fix from batch checks (round ${fix_round})"
-    run_codex_batch_write "$fix_checks_prompt" "$fix_checks_log" "$check_fix_effort"
+    run_codex_batch_write batch-fix-from-checks "$fix_round" "$fix_checks_prompt" "$fix_checks_log" "$check_fix_effort"
     archive_round_file "$fix_checks_log" 'fix-from-batch-checks' "$fix_round" '.log'
     ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-checks' "$issues_label" "$fix_round" "$check_fix_effort" "$fix_checks_log"
 
@@ -169,7 +175,7 @@ run_batch_review_once() {
 
   before_status="$(status_outside_work)"
   log_info "codex batch review (round ${review_round})"
-  run_codex_batch_read "$batch_review_prompt" "$batch_review_raw" "$review_effort"
+  run_codex_batch_read batch-review "$review_round" "$batch_review_prompt" "$batch_review_raw" "$review_effort"
   archive_round_file "$batch_review_raw" 'batch-review-raw' "$review_round" '.txt'
   ensure_batch_token_usage_tsv "$batch_dir" 'batch-review' "$issues_label" "$review_round" "$review_effort" "$batch_review_raw"
   after_status="$(status_outside_work)"
@@ -220,7 +226,7 @@ ensure_batch_review_accepted() {
     write_fix_from_batch_review_prompt_file "$issues_file" "$batch_review_output" "$fix_review_prompt"
     ensure_clean_worktree 'Working tree must be clean before batch review fix.'
     log_info "codex fix from batch review (round ${review_fix_round})"
-    run_codex_batch_write "$fix_review_prompt" "$fix_review_log" "$review_fix_effort"
+    run_codex_batch_write batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" "$review_fix_effort"
     archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
     ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
 

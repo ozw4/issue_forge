@@ -1143,6 +1143,7 @@ process_issue_on_batch_branch() {
       log_info "running issue flow for issue ${issue_number}"
       if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then issue_light_review=1; fi
       CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
+        CODEX_FLOW_AGENT_ATTEMPTS_ROOT="${run_state_dir}/batches/${current_batch_id}/attempts/issue-${issue_number}" \
         "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
       queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow after
       commit_sha="$(git rev-parse HEAD)"
@@ -1325,12 +1326,14 @@ process_batch_body() {
   local -a batch_issues=()
   local batch_state_file batch_state
   local publish_state_file published_state
+  local CODEX_FLOW_AGENT_ATTEMPTS_ROOT
 
   assert_queue_lease_owned || fail 'Queue lease lost before batch phase'
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
   batch_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
   current_batch_id="$batch_id"
+  CODEX_FLOW_AGENT_ATTEMPTS_ROOT="${run_state_dir}/batches/${batch_id}/attempts/batch"
   batch_state_file="${run_state_dir}/batches/${batch_id}/batch.state"
   publish_state_file="${run_state_dir}/batches/${batch_id}/publish.state"
   batch_state="$(queue_state_read_field "$batch_state_file" batch state)"

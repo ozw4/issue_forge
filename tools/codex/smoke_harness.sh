@@ -4004,6 +4004,7 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/history/batch-review-raw.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review-raw.round-02.txt"
   assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md"
+  assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.log"
   assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md"
   assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${QUEUE_ISSUE_NUMBER}"
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/codex/implementation.prompt.md" "issue #${ISSUE_NUMBER}"
@@ -4042,6 +4043,10 @@ run_issue_queue_smoke() {
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/publish.state" "head_branch$(printf '\t')batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/request.state"
+  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/agent.log"
+  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/batch/batch-review/attempt-0001/result.state"
+  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/batch/batch-review/attempt-0001/agent.log"
   assert_path_not_exists "${repo_dir}/.work/queue/current"
 
   if ! (

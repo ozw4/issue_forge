@@ -65,7 +65,7 @@ run_fix_from_checks_round() {
 
   fix_checks_round=$((fix_checks_round + 1))
   log_info "codex fix from checks (round ${fix_round})"
-  run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
+  run_codex_phase fix-from-checks "$fix_checks_round" write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" "$CODEX_FLOW_CHECK_FIX_REASONING" "$fix_checks_log"
 }
@@ -146,6 +146,15 @@ sanitize_codex_runtime_logs() {
   local raw_output_file="$1"
 
   awk '
+    /^\[codex\] starting attempt [1-9][0-9]*$/ {
+      next
+    }
+    /^\[codex\] transient Codex failure detected; retrying attempt [1-9][0-9]*\/[1-9][0-9]* after [0-9]+ seconds$/ {
+      next
+    }
+    /^\[codex\] transient Codex failure persisted after [1-9][0-9]* attempts; giving up$/ {
+      next
+    }
     /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:/ {
       next
     }
@@ -327,7 +336,7 @@ run_review_round() {
   archive_round_file "$review_summary" "review-summary" "$review_run_round" ".txt"
   before_status="$(status_outside_work)"
   log_info "codex review"
-  run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
+  run_codex_phase review "$review_run_round" read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" "$CODEX_FLOW_REVIEW_REASONING" "$review_raw_output"
   after_status="$(status_outside_work)"
@@ -471,7 +480,7 @@ run_fix_from_review_round() {
 
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
+  run_codex_phase fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
 }

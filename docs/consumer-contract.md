@@ -258,6 +258,8 @@ CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_fo
 
 After each issue, `.work/codex` is archived authoritatively under `.work/queue/runs/<run_id>/archives/batch-<first>-<last>/issues/<issue>/<commit>/`. The archive contains `codex/` plus an ownership/content manifest with the exact run, batch, Issue, commit, and sorted SHA-256 hashes. `.work/queue/batches/batch-<first>-<last>/issues/<issue>/codex/` is only a non-authoritative compatibility copy. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`. `issues.txt` is rebuilt atomically in immutable manifest order from hashed run-owned Issue contexts; it is never trusted as incrementally appended state.
 
+Every queue-owned Codex invocation also records an immutable Agent attempt below `.work/queue/runs/<run_id>/batches/<batch_id>/attempts/`. Issue operations use `issue-<issue_number>/<operation>/attempt-NNNN/`; batch operations use `batch/<operation>/attempt-NNNN/`. Each terminal attempt contains `request.state`, the exact `prompt.md`, the combined `agent.log`, and `result.state`. A process that stops before terminal finalization may leave `attempt-NNNN.running/`; later invocations preserve it and allocate a new attempt ID. Terminal attempt directories are never overwritten. Existing `.work/codex` and batch legacy log paths remain available and receive the terminal attempt log for compatibility. A standalone `run_issue_flow.sh` invocation does not enable the attempt store by default.
+
 Every accepted queue invocation creates a collision-resistant, filesystem-safe run ID and authoritative state at `.work/queue/runs/<run_id>/` before branch creation or Issue fetching. Existing `.work/queue/batches/batch-<first>-<last>/` paths remain non-authoritative artifact paths, so repeated Issue ranges have distinct authoritative state.
 
 Queue state schema version `3` uses strict `key<TAB>value` data files that are never sourced. Versions `1` and `2` are unsupported and fail explicitly rather than being guessed or migrated:
@@ -419,7 +421,7 @@ minor:
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed
-- raw Codex review logs remain byte-for-byte debugging artifacts; before extracting and validating `.work/codex/review.txt` or batch review output, only known Codex runtime/session log lines matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:` are ignored
+- raw Codex review logs remain byte-for-byte debugging artifacts; before extracting and validating `.work/codex/review.txt` or batch review output, only the exact known `[codex]` launcher progress lines and Codex runtime/session log lines matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:` are ignored
 - pure review output must still start with `accept: yes` or `accept: no`; for recognizable `codex exec` transcript output, the engine extracts the last valid structured review block and drops transcript headers, prompt text, tool calls, token summaries, duplicated review blocks, and runtime session logs
 - arbitrary non-review text before or after a pure structured review remains malformed output
 

@@ -93,3 +93,15 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 ```
 
 Queue mode passes `CODEX_FLOW_LIGHT_ISSUE_REVIEW=0` in that case, so a parent `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1` environment value cannot force light per-issue reviews. Batch review still uses `batch-review.prompt.md.tmpl` and remains strict.
+
+## Queue Agent Attempts
+
+Queue runs preserve each Codex invocation below the authoritative run directory:
+
+```text
+.work/queue/runs/<run_id>/batches/<batch_id>/attempts/
+├── issue-<issue_number>/<operation>/attempt-NNNN/
+└── batch/<operation>/attempt-NNNN/
+```
+
+Each terminal attempt contains `request.state`, the exact `prompt.md`, one combined `agent.log`, and `result.state`. An `attempt-NNNN.running/` directory means the process stopped before terminal finalization. Later executions do not overwrite terminal or `.running` attempts and use the next sequence number. The existing `.work/codex` and batch log filenames remain compatibility views of the latest terminal attempt. Standalone `run_issue_flow.sh` executions do not enable this attempt store by default.
