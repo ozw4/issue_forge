@@ -15,6 +15,8 @@ source "${SCRIPT_DIR}/lib/agent_attempts.sh"
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
+# shellcheck source=tools/codex/lib/review_snapshots.sh
+source "${SCRIPT_DIR}/lib/review_snapshots.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh
 source "${SCRIPT_DIR}/lib/issue_bootstrap.sh"
 # shellcheck source=tools/codex/lib/publish_helpers.sh
@@ -39,9 +41,11 @@ run_codex_phase() {
   local output_file="$5"
   local reasoning_effort="$6"
   local legacy_stderr_policy="${7:-combined}"
+  local snapshot_file="${8:-}"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    run_codex_with_attempt "$operation" "$round" "$mode" "$prompt_file" "$output_file" "$legacy_stderr_policy"
+    run_codex_with_attempt \
+      "$operation" "$round" "$mode" "$prompt_file" "$output_file" "$legacy_stderr_policy" "$snapshot_file"
 }
 
 run_implementation_phase() {
@@ -118,6 +122,7 @@ review_untracked="${CODEX_FLOW_CODEX_DIR}/review.untracked.txt"
 review_summary="${CODEX_FLOW_CODEX_DIR}/review.summary.txt"
 review_raw_output="${CODEX_FLOW_CODEX_DIR}/review.raw.txt"
 review_output="${CODEX_FLOW_CODEX_DIR}/review.txt"
+review_snapshot="${CODEX_FLOW_CODEX_DIR}/review.snapshot.state"
 fix_review_log="${CODEX_FLOW_CODEX_DIR}/fix-from-review.log"
 history_dir="$CODEX_FLOW_CODEX_HISTORY_DIR"
 

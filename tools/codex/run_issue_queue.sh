@@ -45,6 +45,8 @@ source "${SCRIPT_DIR}/lib/history_helpers.sh"
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
+# shellcheck source=tools/codex/lib/review_snapshots.sh
+source "${SCRIPT_DIR}/lib/review_snapshots.sh"
 # shellcheck source=tools/codex/lib/queue_state.sh
 source "${SCRIPT_DIR}/lib/queue_state.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh

@@ -46,6 +46,7 @@ run_codex_with_attempt() {
   local prompt_file="$4"
   local legacy_log_file="$5"
   local legacy_stderr_policy="${6:-combined}"
+  local snapshot_file="${7:-}"
   local attempts_root="${CODEX_FLOW_AGENT_ATTEMPTS_ROOT:-}"
   local operation_dir attempt_id running_dir terminal_dir result_tmp
   local stdout_tmp stderr_tmp legacy_source_file=""
@@ -93,6 +94,10 @@ run_codex_with_attempt() {
   fi
   if ! cp -- "$prompt_file" "${running_dir}/prompt.md"; then
     printf 'Failed to copy Agent attempt prompt: %s\n' "$running_dir" >&2
+    return 1
+  fi
+  if [[ -n "$snapshot_file" ]] && ! cp -- "$snapshot_file" "${running_dir}/snapshot.state"; then
+    printf 'Failed to copy Agent attempt review snapshot: %s\n' "$running_dir" >&2
     return 1
   fi
 

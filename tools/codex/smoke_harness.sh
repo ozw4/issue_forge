@@ -3948,6 +3948,7 @@ run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue.log"
   local run_dir
+  local attempts_dir
 
   log 'running issue queue smoke'
   clear_command_logs
@@ -4036,6 +4037,7 @@ run_issue_queue_smoke() {
   assert_commit_excludes_internal_paths HEAD
   run_dir="$(grep -l $'^issues\t41,40$' "${repo_dir}"/.work/queue/runs/*/manifest.state | head -n 1)"
   run_dir="${run_dir%/manifest.state}"
+  attempts_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts"
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
   assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
   assert_file_contains "${run_dir}/manifest.state" $'batch_review_reasoning\tqueue_review'
@@ -4043,10 +4045,35 @@ run_issue_queue_smoke() {
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/publish.state" "head_branch$(printf '\t')batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
-  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/request.state"
-  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/agent.log"
-  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/batch/batch-review/attempt-0001/result.state"
-  assert_file_exists "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts/batch/batch-review/attempt-0001/agent.log"
+  assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/request.state"
+  assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/agent.log"
+  assert_path_not_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/snapshot.state"
+  assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/review/attempt-0001/snapshot.state"
+  assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/fix-from-review/attempt-0001/snapshot.state"
+  assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/review/attempt-0002/snapshot.state"
+  assert_files_equal \
+    "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/review/attempt-0001/snapshot.state" \
+    "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/fix-from-review/attempt-0001/snapshot.state" \
+    'Issue review and fix snapshot'
+  if cmp -s \
+    "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/review/attempt-0001/snapshot.state" \
+    "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/review/attempt-0002/snapshot.state"; then
+    fail 'expected the next Issue review round to capture a new snapshot'
+  fi
+  assert_file_exists "${attempts_dir}/batch/batch-review/attempt-0001/result.state"
+  assert_file_exists "${attempts_dir}/batch/batch-review/attempt-0001/agent.log"
+  assert_file_exists "${attempts_dir}/batch/batch-review/attempt-0001/snapshot.state"
+  assert_file_exists "${attempts_dir}/batch/batch-fix-from-review/attempt-0001/snapshot.state"
+  assert_file_exists "${attempts_dir}/batch/batch-review/attempt-0002/snapshot.state"
+  assert_files_equal \
+    "${attempts_dir}/batch/batch-review/attempt-0001/snapshot.state" \
+    "${attempts_dir}/batch/batch-fix-from-review/attempt-0001/snapshot.state" \
+    'batch review and fix snapshot'
+  if cmp -s \
+    "${attempts_dir}/batch/batch-review/attempt-0001/snapshot.state" \
+    "${attempts_dir}/batch/batch-review/attempt-0002/snapshot.state"; then
+    fail 'expected the next batch review round to capture a new snapshot'
+  fi
   assert_path_not_exists "${repo_dir}/.work/queue/current"
 
   if ! (

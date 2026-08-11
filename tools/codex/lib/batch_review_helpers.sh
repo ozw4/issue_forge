@@ -53,9 +53,10 @@ run_codex_batch_write() {
   local prompt_file="$3"
   local output_log="$4"
   local reasoning_effort="$5"
+  local snapshot_file="${6:-}"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    run_codex_with_attempt "$operation" "$round" write "$prompt_file" "$output_log"
+    run_codex_with_attempt "$operation" "$round" write "$prompt_file" "$output_log" combined "$snapshot_file"
 }
 
 run_codex_batch_read() {
@@ -64,9 +65,10 @@ run_codex_batch_read() {
   local prompt_file="$3"
   local output_log="$4"
   local reasoning_effort="$5"
+  local snapshot_file="${6:-}"
 
   CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-    run_codex_with_attempt "$operation" "$round" read "$prompt_file" "$output_log" stdout
+    run_codex_with_attempt "$operation" "$round" read "$prompt_file" "$output_log" stdout "$snapshot_file"
 }
 
 run_batch_checks_once() {
@@ -162,8 +164,7 @@ run_batch_review_once() {
   local batch_review_prompt="${batch_dir}/batch-review.prompt.md"
   local batch_review_raw="${batch_dir}/batch-review.raw.txt"
   local batch_review_output="${batch_dir}/batch-review.txt"
-  local before_status
-  local after_status
+  local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
@@ -173,18 +174,14 @@ run_batch_review_once() {
   archive_round_file "$batch_summary" 'batch-summary' "$review_round" '.txt'
   write_batch_review_prompt_file "$issues_file" "$batch_diff" "$batch_untracked" "$batch_summary" "$batch_review_prompt"
 
-  before_status="$(status_outside_work)"
+  capture_review_snapshot "$batch_review_snapshot"
   log_info "codex batch review (round ${review_round})"
-  run_codex_batch_read batch-review "$review_round" "$batch_review_prompt" "$batch_review_raw" "$review_effort"
+  run_codex_batch_read \
+    batch-review "$review_round" "$batch_review_prompt" "$batch_review_raw" \
+    "$review_effort" "$batch_review_snapshot"
+  assert_review_snapshot_matches "$batch_review_snapshot" "after batch review"
   archive_round_file "$batch_review_raw" 'batch-review-raw' "$review_round" '.txt'
   ensure_batch_token_usage_tsv "$batch_dir" 'batch-review' "$issues_label" "$review_round" "$review_effort" "$batch_review_raw"
-  after_status="$(status_outside_work)"
-
-  if [[ "$before_status" != "$after_status" ]]; then
-    printf 'Batch review session modified repository files.\n' >&2
-    printf 'Batch review raw log: %s\n' "$batch_review_raw" >&2
-    exit 1
-  fi
 
   if ! extract_structured_review_output_file "$batch_review_raw" "$batch_review_output"; then
     printf 'Failed to extract structured batch review output.\n' >&2
@@ -208,6 +205,7 @@ ensure_batch_review_accepted() {
   local batch_review_output="${batch_dir}/batch-review.txt"
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
+  local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
   local review_fix_round=0
   local review_round=1
   local history_dir="${batch_dir}/history"
@@ -224,9 +222,12 @@ ensure_batch_review_accepted() {
 
     review_fix_round=$((review_fix_round + 1))
     write_fix_from_batch_review_prompt_file "$issues_file" "$batch_review_output" "$fix_review_prompt"
+    assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
     ensure_clean_worktree 'Working tree must be clean before batch review fix.'
     log_info "codex fix from batch review (round ${review_fix_round})"
-    run_codex_batch_write batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" "$review_fix_effort"
+    run_codex_batch_write \
+      batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
+      "$review_fix_effort" "$batch_review_snapshot"
     archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
     ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
 

@@ -326,26 +326,19 @@ extract_review_output() {
 }
 
 run_review_round() {
-  local before_status
-  local after_status
-
   review_run_round=$((review_run_round + 1))
   generate_review_material
   archive_round_file "$review_diff" "review-diff" "$review_run_round" ".txt"
   archive_round_file "$review_untracked" "review-untracked" "$review_run_round" ".txt"
   archive_round_file "$review_summary" "review-summary" "$review_run_round" ".txt"
-  before_status="$(status_outside_work)"
+  capture_review_snapshot "$review_snapshot"
   log_info "codex review"
-  run_codex_phase review "$review_run_round" read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
+  run_codex_phase \
+    review "$review_run_round" read "$review_prompt" "$review_raw_output" \
+    "$CODEX_FLOW_REVIEW_REASONING" stdout "$review_snapshot"
+  assert_review_snapshot_matches "$review_snapshot" "after issue review"
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" "$CODEX_FLOW_REVIEW_REASONING" "$review_raw_output"
-  after_status="$(status_outside_work)"
-
-  if [[ "$before_status" != "$after_status" ]]; then
-    printf 'Review session modified repository files.\n' >&2
-    printf 'Review raw log: %s\n' "$review_raw_output" >&2
-    exit 1
-  fi
 
   if ! extract_review_output; then
     printf 'Failed to extract structured review output.\n' >&2
@@ -480,7 +473,10 @@ run_fix_from_review_round() {
 
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  run_codex_phase fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
+  assert_review_snapshot_matches "$review_snapshot" "before issue review fix"
+  run_codex_phase \
+    fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
+    "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$review_snapshot"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
 }

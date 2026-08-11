@@ -35,6 +35,7 @@ def run_helper(
     operation: str = "review",
     round_number: int = 2,
     legacy_stderr_policy: str | None = None,
+    snapshot_contents: bytes | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     engine_dir = tmp_path / "engine" / "tools" / "codex"
     write_fake_launcher(engine_dir)
@@ -42,12 +43,19 @@ def run_helper(
     prompt.write_text("test prompt\n", encoding="utf-8")
     legacy_log = tmp_path / "legacy.log"
     attempts_root = tmp_path / "attempts"
-    policy_argument = "" if legacy_stderr_policy is None else f" {shlex.quote(legacy_stderr_policy)}"
+    optional_arguments = ""
+    if legacy_stderr_policy is not None or snapshot_contents is not None:
+        policy = legacy_stderr_policy or "combined"
+        optional_arguments = f" {shlex.quote(policy)}"
+    if snapshot_contents is not None:
+        snapshot_file = tmp_path / "review.snapshot.state"
+        snapshot_file.write_bytes(snapshot_contents)
+        optional_arguments += f" {shlex.quote(str(snapshot_file))}"
     script = f"""
 set -uo pipefail
 ISSUE_FORGE_ENGINE_CODEX_DIR={shlex.quote(str(engine_dir))}
 source {shlex.quote(str(HELPER))}
-run_codex_with_attempt {shlex.quote(operation)} {round_number} read {shlex.quote(str(prompt))} {shlex.quote(str(legacy_log))}{policy_argument}
+run_codex_with_attempt {shlex.quote(operation)} {round_number} read {shlex.quote(str(prompt))} {shlex.quote(str(legacy_log))}{optional_arguments}
 """
     env = os.environ.copy()
     env["FAKE_CODEX_STATUS"] = str(status)
@@ -185,3 +193,29 @@ def test_enabled_attempt_preserves_stdout_only_legacy_policy(tmp_path: Path) -> 
     assert "stdout mode=read prompt=test prompt" in legacy_text
     assert "stderr status=0" not in legacy_text
     assert read_state(attempt / "result.state")["status"] == "completed"
+
+
+def test_attempt_copies_review_snapshot_byte_for_byte(tmp_path: Path) -> None:
+    snapshot_contents = b"schema_version\t1\nhead_commit\t0123\nworktree_tree\t4567\n"
+
+    completed, attempts_root, _prompt, _legacy_log = run_helper(
+        tmp_path,
+        snapshot_contents=snapshot_contents,
+    )
+
+    assert completed.returncode == 0
+    assert (
+        attempts_root / "review" / "attempt-0001" / "snapshot.state"
+    ).read_bytes() == snapshot_contents
+
+
+def test_attempt_without_snapshot_does_not_create_snapshot_state(tmp_path: Path) -> None:
+    completed, attempts_root, _prompt, _legacy_log = run_helper(
+        tmp_path,
+        operation="implementation",
+    )
+
+    assert completed.returncode == 0
+    assert not (
+        attempts_root / "implementation" / "attempt-0001" / "snapshot.state"
+    ).exists()
