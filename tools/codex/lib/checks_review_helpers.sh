@@ -8,6 +8,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/finding_ledger.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_ledger.sh"
 
 generate_review_material() {
   local has_material=0
@@ -443,6 +445,9 @@ ensure_valid_review_output() {
     log_fail_with_path "review output is inconsistent with acceptance" "$review_raw_output"
     exit 1
   fi
+
+  update_finding_ledger "$review_output" "$review_findings_ledger" "$review_run_round"
+  archive_round_file "$review_findings_ledger" "findings" "$review_run_round" ".tsv"
 }
 
 review_output_accepted() {

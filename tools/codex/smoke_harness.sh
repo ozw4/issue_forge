@@ -519,6 +519,8 @@ run_review_validation_command() {
     # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/config.sh
     # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/history_helpers.sh
+    # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
     # shellcheck disable=SC2317
     log_fail_with_path() {
@@ -529,6 +531,13 @@ run_review_validation_command() {
     review_output="${review_output_path}"
     # shellcheck disable=SC2034
     review_raw_output="${review_raw_path}"
+    # shellcheck disable=SC2034
+    review_findings_ledger="${review_output_path}.findings.tsv"
+    # shellcheck disable=SC2034
+    review_run_round=1
+    # shellcheck disable=SC2034
+    history_dir="$(dirname "${review_output_path}")/history"
+    mkdir -p "$history_dir"
 
     ensure_valid_review_output
 
@@ -561,6 +570,8 @@ run_review_extraction_validation_command() {
     # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/config.sh
     # shellcheck disable=SC1091
+    source vendor/issue_forge/tools/codex/lib/history_helpers.sh
+    # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
     # shellcheck disable=SC2317
     log_fail_with_path() {
@@ -571,6 +582,13 @@ run_review_extraction_validation_command() {
     review_output="${review_output_path}"
     # shellcheck disable=SC2034
     review_raw_output="${review_raw_path}"
+    # shellcheck disable=SC2034
+    review_findings_ledger="${review_output_path}.findings.tsv"
+    # shellcheck disable=SC2034
+    review_run_round=1
+    # shellcheck disable=SC2034
+    history_dir="$(dirname "${review_output_path}")/history"
+    mkdir -p "$history_dir"
 
     extract_structured_review_output_file "$review_raw_output" "$review_output"
     ensure_valid_review_output
@@ -2284,6 +2302,7 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review.summary.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.raw.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
+  assert_file_exists "${repo_dir}/.work/codex/findings.tsv"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.log"
   assert_file_exists "${repo_dir}/.work/codex/token-usage.tsv"
 
@@ -2301,8 +2320,10 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-01.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-02.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review.round-01.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/findings.round-01.tsv"
   assert_file_exists "${repo_dir}/.work/codex/history/fix-from-review.round-01.log"
   assert_file_exists "${repo_dir}/.work/codex/history/review.round-02.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/findings.round-02.tsv"
 
   assert_files_equal "${expected_prompt_dir}/implementation.prompt.md" "${repo_dir}/.work/codex/implementation.prompt.md" 'implementation prompt'
   assert_files_equal "${expected_prompt_dir}/fix-from-checks.prompt.md" "${repo_dir}/.work/codex/fix-from-checks.prompt.md" 'fix-from-checks prompt'
@@ -2315,6 +2336,9 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/.work/codex/history/review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-01.txt" 'accept: no'
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-02.txt" 'accept: yes'
+  assert_file_contains "${repo_dir}/.work/codex/history/findings.round-01.tsv" $'F0001\tmajor\t1\t1\tpresent\tsmoke harness forces one review fix round'
+  assert_file_contains "${repo_dir}/.work/codex/history/findings.round-02.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tsmoke harness forces one review fix round'
+  assert_file_contains "${repo_dir}/.work/codex/findings.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tsmoke harness forces one review fix round'
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/review.summary.txt'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'queue smoke review'
@@ -3996,10 +4020,13 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/batch-review.prompt.md"
   assert_file_exists "${batch_dir}/batch-review.raw.txt"
   assert_file_exists "${batch_dir}/batch-review.txt"
+  assert_file_exists "${batch_dir}/findings.tsv"
   assert_file_exists "${batch_dir}/fix-from-batch-review.prompt.md"
   assert_file_exists "${batch_dir}/fix-from-batch-review.log"
   assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
+  assert_file_exists "${batch_dir}/history/findings.round-01.tsv"
+  assert_file_exists "${batch_dir}/history/findings.round-02.tsv"
   assert_file_exists "${batch_dir}/history/batch-summary.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-summary.round-02.txt"
   assert_file_exists "${batch_dir}/history/batch-review-raw.round-01.txt"
@@ -4021,6 +4048,9 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/history/batch-review-raw.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.txt" 'accept: yes'
+  assert_file_contains "${batch_dir}/history/findings.round-01.tsv" $'F0001\tmajor\t1\t1\tpresent\t[cross-issue] smoke harness forces one batch review fix round'
+  assert_file_contains "${batch_dir}/history/findings.round-02.tsv" $'F0001\tmajor\t1\t1\tnot_observed\t[cross-issue] smoke harness forces one batch review fix round'
+  assert_file_contains "${batch_dir}/findings.tsv" $'F0001\tmajor\t1\t1\tnot_observed\t[cross-issue] smoke harness forces one batch review fix round'
   assert_file_not_contains "${batch_dir}/history/batch-review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "${batch_dir}/history/batch-review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "${batch_dir}/batch-review.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"

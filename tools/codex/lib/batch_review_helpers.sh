@@ -190,6 +190,8 @@ run_batch_review_once() {
   fi
   archive_round_file "$batch_review_output" 'batch-review' "$review_round" '.txt'
   ensure_valid_batch_review_output "$batch_review_raw" "$batch_review_output"
+  update_finding_ledger "$batch_review_output" "${batch_dir}/findings.tsv" "$review_round"
+  archive_round_file "${batch_dir}/findings.tsv" 'findings' "$review_round" '.tsv'
 }
 
 ensure_batch_review_accepted() {

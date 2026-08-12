@@ -420,6 +420,10 @@ minor:
 - ...
 ```
 
+- validated Issue reviews publish `.work/codex/findings.tsv`, and validated batch reviews publish `.work/queue/batches/<batch>/findings.tsv`; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `text`
+- finding IDs are ledger-local `FNNNN` sequences; an ID is reused only when normalized finding text matches exactly across rounds, where normalization removes the leading bullet marker, removes a trailing CR, and replaces each literal tab with one space
+- findings absent from the current round remain in the ledger as `not_observed`; this does not mean `resolved`, and current review acceptance does not consult the ledger
+- each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed
