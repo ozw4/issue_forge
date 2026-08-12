@@ -96,6 +96,7 @@ bootstrap_issue_branch() {
   write_issue_context_file "$issue_number"
 
   git switch --create "$branch_name" --track "$CODEX_FLOW_BASE_REF"
+  rm -rf -- "$CODEX_FLOW_CODEX_DIR"
   base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
   write_current_issue_branch_state "$issue_number" "$branch_name" "$base_commit"
 

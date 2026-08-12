@@ -110,6 +110,10 @@ Issue and batch review rounds capture a review snapshot as the consumer reposito
 
 ## Finding Ledgers
 
-Validated Issue reviews update `.work/codex/findings.tsv`; validated batch reviews update `.work/queue/batches/<batch>/findings.tsv`. Both use the TSV columns `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, and `text`. IDs are ledger-local sequences starting at `F0001` and are reused only for exact normalized-text matches. Normalization removes the leading review bullet marker and a trailing CR, and replaces each literal tab with one space; category tags remain part of batch finding text.
+Starting a new standalone Issue through `start_from_issue.sh` removes the previous `.work/codex` only after the new Issue branch is created successfully. The Issue ledger is therefore scoped to that Issue at `.work/codex/findings.tsv`.
 
-A finding observed in the current round has status `present`. A prior finding absent from the current round is retained as `not_observed`, which does not mean resolved. Current acceptance still uses only the current structured review output and does not consult the ledger. After each round, the current ledger is copied to the corresponding `history/findings.round-NN.tsv` path.
+Validated batch reviews use `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` as the source of truth. A resume continues the same run-owned ledger; another run over the same batch range starts a separate ledger. After each round, the engine copies the current ledger and that round's history to `.work/queue/batches/<batch>/findings.tsv` and `.work/queue/batches/<batch>/history/findings.round-NN.tsv` for compatibility, but never reads those copies as finding state.
+
+Both ledger types use the TSV columns `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, and `text`. IDs are ledger-local sequences starting at `F0001` and are reused only for exact normalized-text matches. Normalization removes the leading review bullet marker and a trailing CR, and replaces each literal tab with one space; category tags remain part of batch finding text.
+
+A finding observed in the current round has status `present`. A prior finding absent from the current round is retained as `not_observed`, which does not mean resolved. Current acceptance still uses only the current structured review output and does not consult the ledger. After each round, the current ledger is copied to its corresponding `history/findings.round-NN.tsv` path.

@@ -1428,6 +1428,14 @@ EOF
 run_start_from_issue_smoke() {
   log 'running start_from_issue.sh smoke'
 
+  mkdir -p "${repo_dir}/.work/codex/history"
+  printf '%s\n' \
+    $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\ttext' \
+    $'F0099\tmajor\t1\t1\tpresent\tprevious Issue finding' \
+    > "${repo_dir}/.work/codex/findings.tsv"
+  printf 'previous Issue checks\n' > "${repo_dir}/.work/codex/checks.log"
+  cp "${repo_dir}/.work/codex/findings.tsv" "${repo_dir}/.work/codex/history/findings.round-01.tsv"
+
   (
     cd "${repo_dir}"
     PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_ISSUE_PATH}/start_from_issue.sh" "${ISSUE_NUMBER}"
@@ -1442,6 +1450,7 @@ run_start_from_issue_smoke() {
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "# Issue #${ISSUE_NUMBER}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "Title: ${ISSUE_TITLE}"
   assert_file_contains "${repo_dir}/.work/issues/${ISSUE_NUMBER}.md" "URL: ${ISSUE_URL}"
+  assert_path_not_exists "${repo_dir}/.work/codex"
   bootstrap_base_commit="$(< "${repo_dir}/.work/base_commit")"
   assert_equals "$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)" "${bootstrap_base_commit}" 'bootstrap base commit'
 
@@ -2339,6 +2348,7 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/.work/codex/history/findings.round-01.tsv" $'F0001\tmajor\t1\t1\tpresent\tsmoke harness forces one review fix round'
   assert_file_contains "${repo_dir}/.work/codex/history/findings.round-02.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tsmoke harness forces one review fix round'
   assert_file_contains "${repo_dir}/.work/codex/findings.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tsmoke harness forces one review fix round'
+  assert_file_not_contains "${repo_dir}/.work/codex/findings.tsv" 'previous Issue finding'
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/review.summary.txt'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'queue smoke review'
@@ -3818,7 +3828,7 @@ queue_resume_failure() {
 
 run_queue_entity_integrity_smoke() {
   local issue run run_dir batch state_file base commit archive manifest_hash accepted issues_file second_run second_dir first_archive second_archive
-  local log_file state_backup manifest_backup missing_file grandparent
+  local log_file state_backup manifest_backup missing_file grandparent ledger ledger_backup second_ledger compatibility_ledger
   log 'running queue manifest/entity/commit/archive integrity smoke'
 
   clear_command_logs; reset_flow_counters
@@ -3887,12 +3897,16 @@ run_queue_entity_integrity_smoke() {
   clear_command_logs; reset_flow_counters
   issue=77; run="$(queue_run_to_failpoint "$issue" after_batch_acceptance "${state_dir}/queue-accepted-head.log")"
   run_dir="${repo_dir}/.work/queue/runs/${run}"; batch="batch-${issue}-${issue}"; state_file="${run_dir}/batches/${batch}/batch.state"
+  ledger="${run_dir}/batches/${batch}/findings.tsv"; ledger_backup="${state_dir}/queue-resume-findings.tsv"
+  assert_file_contains "$ledger" $'F0001\tmajor\t1\t1\tnot_observed\t[cross-issue] smoke harness forces one batch review fix round'
+  cp "$ledger" "$ledger_backup"
   accepted="$(awk -F '\t' '$1 == "accepted_head" { print $2 }' "$state_file")"
   printf 'accepted head drift\n' >> "${repo_dir}/smoke-target.txt"; "${REAL_GIT}" -C "$repo_dir" add smoke-target.txt
   "${REAL_GIT}" -C "$repo_dir" commit -m 'unexpected accepted head drift' >/dev/null
   queue_resume_failure "$run" 'does not match saved accepted head SHA' "${state_dir}/queue-accepted-head.resume.log"
   "${REAL_GIT}" -C "$repo_dir" reset --hard "$accepted" >/dev/null
   queue_resume_success "$run" "${state_dir}/queue-accepted-head.repaired.log"
+  assert_files_equal "$ledger_backup" "$ledger" 'resumed run should preserve its run-owned finding ledger'
 
   clear_command_logs; reset_flow_counters
   issue=78; run="$(queue_run_to_failpoint "$issue" fail_batch_checks "${state_dir}/queue-issues-rebuild.log")"
@@ -3932,6 +3946,14 @@ run_queue_entity_integrity_smoke() {
   if ! (cd "$repo_dir"; PATH="${stub_dir}:$PATH" "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "$issue") > "${state_dir}/queue-repeat-one.log" 2>&1; then fail 'first repeated-range run failed'; fi
   run="$(grep -l $'^issues\t82$' "${repo_dir}"/.work/queue/runs/*/manifest.state | tail -n 1)"; run="$(basename "$(dirname "$run")")"
   first_archive="$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "${repo_dir}/.work/queue/runs/${run}/batches/batch-82-82/issues/82.state")"
+  ledger="${repo_dir}/.work/queue/runs/${run}/batches/batch-82-82/findings.tsv"
+  compatibility_ledger="${repo_dir}/.work/queue/batches/batch-82-82/findings.tsv"
+  printf '%s\n' \
+    $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\ttext' \
+    $'F0001\tmajor\t1\t1\tpresent\trun A finding' \
+    > "$ledger"
+  cp "$ledger" "$compatibility_ledger"
+  ledger_backup="${state_dir}/queue-repeat-run-a-findings.tsv"; cp "$ledger" "$ledger_backup"
   "${REAL_GIT}" -C "$repo_dir" switch --detach origin/main >/dev/null; "${REAL_GIT}" -C "$repo_dir" branch -D batch/82-82 >/dev/null
   "${REAL_GIT}" -C "$repo_dir" push origin --delete batch/82-82 >/dev/null
   rm -f "${state_dir}/batch-pr-url.txt" "${state_dir}/batch-pr-head-branch.txt" \
@@ -3941,6 +3963,11 @@ run_queue_entity_integrity_smoke() {
   second_run="$(grep -l $'^issues\t82$' "${repo_dir}"/.work/queue/runs/*/manifest.state | tail -n 1)"; second_run="$(basename "$(dirname "$second_run")")"
   second_archive="$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "${repo_dir}/.work/queue/runs/${second_run}/batches/batch-82-82/issues/82.state")"
   [[ "$run" != "$second_run" && "$first_archive" != "$second_archive" ]] || fail 'identical Issue ranges shared authoritative archive identity'
+  second_ledger="${repo_dir}/.work/queue/runs/${second_run}/batches/batch-82-82/findings.tsv"
+  assert_file_contains "$second_ledger" $'F0001\tmajor\t1\t1\tnot_observed\t[cross-issue] smoke harness forces one batch review fix round'
+  assert_file_not_contains "$second_ledger" 'run A finding'
+  assert_files_equal "$ledger_backup" "$ledger" 'later run should not change the previous run finding ledger'
+  assert_files_equal "$second_ledger" "$compatibility_ledger" 'latest run finding ledger compatibility copy'
 
   clear_command_logs; reset_flow_counters
   issue=83; run="$(queue_run_to_failpoint "$issue" after_issue_flow_commit "${state_dir}/queue-nondirect-base.log")"
@@ -3972,6 +3999,7 @@ run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue.log"
   local run_dir
+  local run_batch_dir
   local attempts_dir
 
   log 'running issue queue smoke'
@@ -4067,6 +4095,7 @@ run_issue_queue_smoke() {
   assert_commit_excludes_internal_paths HEAD
   run_dir="$(grep -l $'^issues\t41,40$' "${repo_dir}"/.work/queue/runs/*/manifest.state | head -n 1)"
   run_dir="${run_dir%/manifest.state}"
+  run_batch_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   attempts_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts"
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
   assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
@@ -4075,6 +4104,11 @@ run_issue_queue_smoke() {
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/publish.state" "head_branch$(printf '\t')batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  assert_file_exists "${run_batch_dir}/findings.tsv"
+  assert_file_exists "${run_batch_dir}/history/findings.round-01.tsv"
+  assert_file_exists "${run_batch_dir}/history/findings.round-02.tsv"
+  assert_files_equal "${run_batch_dir}/findings.tsv" "${batch_dir}/findings.tsv" 'batch finding ledger compatibility copy'
+  assert_files_equal "${run_batch_dir}/history/findings.round-01.tsv" "${batch_dir}/history/findings.round-01.tsv" 'batch finding history compatibility copy'
   assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/request.state"
   assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/agent.log"
   assert_path_not_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/snapshot.state"

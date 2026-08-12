@@ -20,7 +20,7 @@ External consumer-facing entrypoints are:
 | --- | --- | --- |
 | `vendor/issue_forge/tools/consumer/init.sh` | `[--scaffold-checks\|--scaffold-run] [consumer-root]` | First-time consumer setup: update `.gitignore`, create `.issue_forge/project.sh` if missing, warn about missing consumer-owned checks/README files by default, and optionally scaffold a starter checks hook or local run convenience files |
 | `vendor/issue_forge/tools/issue/create_from_zip.sh` | `[options] <issues.zip>` | Create GitHub issues from markdown files inside a zip archive; title comes from the first `# ...` heading or the markdown filename |
-| `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
+| `vendor/issue_forge/tools/issue/start_from_issue.sh` | `<issue_number>` | Bootstrap issue context, create branch, initialize `.work/codex` for the new Issue, and write `.work/base_commit`, `.work/current_issue`, `.work/current_branch`, `.work/issues/<issue>.md` |
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
 | `vendor/issue_forge/tools/codex/run_issue_queue.sh` | `[options] <issue_number> [issue_number...]` | Local-only sequential issue queue: process issues linearly on batch branches, run strict batch review, create one batch PR per batch, and optionally request auto-merge |
@@ -248,7 +248,7 @@ Options:
 
 The queue processes issues strictly in the input order. It creates one deterministic batch branch per batch, named `${CODEX_FLOW_BATCH_BRANCH_PREFIX}<first_issue>-<last_issue>`; with defaults this is `batch/<first_issue>-<last_issue>`. After fetching `origin/${CODEX_FLOW_BASE_BRANCH}`, it resolves `CODEX_FLOW_BASE_REF` to an exact commit and persists that intended base before branch creation. The branch is created only from the saved SHA. A resumed branch-ready boundary accepts an existing branch only when its HEAD equals that SHA; unexplained commits and local/remote disagreement fail closed.
 
-The queue never calls `tools/issue/start_from_issue.sh`. For each issue, it fetches issue context with the existing issue bootstrap helper, writes `.work/current_issue`, `.work/current_branch`, and `.work/base_commit`, records the current batch branch as `.work/current_branch`, records the current `HEAD` before that issue as `.work/base_commit`, and then runs:
+The queue never calls `tools/issue/start_from_issue.sh`. In standalone use, that entrypoint removes the prior `.work/codex` only after the new Issue branch has been created successfully, so review, check, log, and finding artifacts start at the new Issue boundary. For each queued issue, the queue fetches issue context with the existing issue bootstrap helper, writes `.work/current_issue`, `.work/current_branch`, and `.work/base_commit`, records the current batch branch as `.work/current_branch`, records the current `HEAD` before that issue as `.work/base_commit`, and then runs:
 
 ```bash
 CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_forge/tools/codex/run_issue_flow.sh <issue_number>
@@ -420,10 +420,11 @@ minor:
 - ...
 ```
 
-- validated Issue reviews publish `.work/codex/findings.tsv`, and validated batch reviews publish `.work/queue/batches/<batch>/findings.tsv`; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `text`
+- validated Issue reviews publish the current Issue ledger at `.work/codex/findings.tsv`; validated batch reviews publish their source-of-truth ledger at `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` and copy it to `.work/queue/batches/<batch>/findings.tsv` for compatibility; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `text`
 - finding IDs are ledger-local `FNNNN` sequences; an ID is reused only when normalized finding text matches exactly across rounds, where normalization removes the leading bullet marker, removes a trailing CR, and replaces each literal tab with one space
 - findings absent from the current round remain in the ledger as `not_observed`; this does not mean `resolved`, and current review acceptance does not consult the ledger
-- each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule
+- each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule; batch source history is run-owned and is then copied to the compatibility history path
+- resuming a queue run continues that run's ledger, while a different run over the same batch range starts a separate ledger and never reads the compatibility copy as finding state
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed

@@ -158,6 +158,7 @@ run_batch_review_once() {
   local issues_label="$4"
   local review_effort="$5"
   local review_round="$6"
+  local batch_state_dir="$7"
   local batch_diff="${batch_dir}/batch.diff"
   local batch_untracked="${batch_dir}/batch.untracked.txt"
   local batch_summary="${batch_dir}/batch.summary.txt"
@@ -166,8 +167,10 @@ run_batch_review_once() {
   local batch_review_output="${batch_dir}/batch-review.txt"
   local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
   local history_dir="${batch_dir}/history"
+  local batch_findings_ledger="${batch_state_dir}/findings.tsv"
+  local batch_findings_history_dir="${batch_state_dir}/history"
 
-  mkdir -p "$history_dir"
+  mkdir -p "$history_dir" "$batch_findings_history_dir"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
   archive_round_file "$batch_diff" 'batch-diff' "$review_round" '.txt'
   archive_round_file "$batch_untracked" 'batch-untracked' "$review_round" '.txt'
@@ -190,8 +193,11 @@ run_batch_review_once() {
   fi
   archive_round_file "$batch_review_output" 'batch-review' "$review_round" '.txt'
   ensure_valid_batch_review_output "$batch_review_raw" "$batch_review_output"
-  update_finding_ledger "$batch_review_output" "${batch_dir}/findings.tsv" "$review_round"
-  archive_round_file "${batch_dir}/findings.tsv" 'findings' "$review_round" '.tsv'
+  update_finding_ledger "$batch_review_output" "$batch_findings_ledger" "$review_round"
+  history_dir="$batch_findings_history_dir"
+  archive_round_file "$batch_findings_ledger" 'findings' "$review_round" '.tsv'
+  cp -- "$batch_findings_ledger" "${batch_dir}/findings.tsv"
+  cp -- "$(history_round_path 'findings' "$review_round" '.tsv')" "${batch_dir}/history/"
 }
 
 ensure_batch_review_accepted() {
@@ -204,6 +210,7 @@ ensure_batch_review_accepted() {
   local review_effort="$7"
   local review_fix_effort="$8"
   local check_fix_effort="$9"
+  local batch_state_dir="${10}"
   local batch_review_output="${batch_dir}/batch-review.txt"
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
@@ -213,7 +220,7 @@ ensure_batch_review_accepted() {
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
-  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
+  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
 
   while ! review_output_accepted "$batch_review_output"; do
     if [[ "$review_fix_round" -ge "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" ]]; then
@@ -242,6 +249,6 @@ ensure_batch_review_accepted() {
     commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
     ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
     review_round=$((review_round + 1))
-    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
+    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
   done
 }

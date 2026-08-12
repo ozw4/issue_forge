@@ -1409,7 +1409,8 @@ process_batch_body() {
     "$batch_issues_label" \
     "$batch_review_effort" \
     "$batch_review_fix_effort" \
-    "$batch_check_fix_effort"
+    "$batch_check_fix_effort" \
+    "${run_state_dir}/batches/${batch_id}"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review after
     batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
     queue_state_mark_batch_accepted "$batch_state_file" "$batch_id" "$batch_head_commit"; batch_state=accepted
