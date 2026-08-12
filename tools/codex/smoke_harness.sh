@@ -4200,6 +4200,7 @@ run_issue_queue_smoke() {
   assert_file_exists "${run_batch_dir}/pending-findings.tsv"
   assert_file_exists "${run_batch_dir}/fix-resolution.tsv"
   assert_file_exists "${run_batch_dir}/review-verification.tsv"
+  assert_file_exists "${run_batch_dir}/review-lifecycle.state"
   assert_file_exists "${run_batch_dir}/history/findings.round-01.tsv"
   assert_file_exists "${run_batch_dir}/history/findings.round-02.tsv"
   assert_file_exists "${run_batch_dir}/history/fix-resolution.round-01.tsv"
@@ -4208,6 +4209,11 @@ run_issue_queue_smoke() {
   assert_files_equal "${run_batch_dir}/pending-findings.tsv" "${batch_dir}/pending-findings.tsv" 'batch pending finding compatibility copy'
   assert_files_equal "${run_batch_dir}/fix-resolution.tsv" "${batch_dir}/fix-resolution.tsv" 'batch fix resolution compatibility copy'
   assert_files_equal "${run_batch_dir}/history/fix-resolution.round-01.tsv" "${batch_dir}/history/fix-resolution.round-01.tsv" 'batch fix resolution history compatibility copy'
+  assert_file_contains "${run_batch_dir}/review-lifecycle.state" $'schema_version\t1'
+  assert_file_contains "${run_batch_dir}/review-lifecycle.state" $'review_round\t2'
+  assert_file_contains "${run_batch_dir}/review-lifecycle.state" $'fix_round\t1'
+  assert_file_contains "${run_batch_dir}/review-lifecycle.state" $'next_action\tcomplete'
+  assert_path_not_exists "${batch_dir}/review-lifecycle.state"
   assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/request.state"
   assert_file_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/agent.log"
   assert_path_not_exists "${attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/implementation/attempt-0001/snapshot.state"

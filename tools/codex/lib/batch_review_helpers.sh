@@ -151,6 +151,99 @@ ensure_valid_batch_review_output() {
   fi
 }
 
+write_batch_review_lifecycle() {
+  local state_file="$1"
+  local review_round="$2"
+  local fix_round="$3"
+  local next_action="$4"
+  local temporary_file
+
+  if [[ ! "$review_round" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Batch review lifecycle review round is invalid: %s\n' "$review_round" >&2
+    return 1
+  fi
+  if [[ ! "$fix_round" =~ ^[0-9]+$ ]]; then
+    printf 'Batch review lifecycle fix round is invalid: %s\n' "$fix_round" >&2
+    return 1
+  fi
+  if [[ "$next_action" != review && "$next_action" != fix && "$next_action" != complete ]]; then
+    printf 'Batch review lifecycle next action is invalid: %s\n' "$next_action" >&2
+    return 1
+  fi
+
+  temporary_file="$(mktemp "${state_file}.tmp.XXXXXX")" || {
+    printf 'Failed to create temporary batch review lifecycle state: %s\n' "$state_file" >&2
+    return 1
+  }
+  if ! printf '%s\t%s\n' \
+    schema_version 1 \
+    review_round "$review_round" \
+    fix_round "$fix_round" \
+    next_action "$next_action" \
+    updated_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    > "$temporary_file"; then
+    rm -f -- "$temporary_file"
+    printf 'Failed to write batch review lifecycle state: %s\n' "$state_file" >&2
+    return 1
+  fi
+  if ! mv -T -f -- "$temporary_file" "$state_file"; then
+    rm -f -- "$temporary_file"
+    printf 'Failed to publish batch review lifecycle state: %s\n' "$state_file" >&2
+    return 1
+  fi
+}
+
+initialize_batch_review_lifecycle() {
+  local state_file="$1"
+
+  if [[ -e "$state_file" ]]; then
+    if [[ ! -f "$state_file" ]]; then
+      printf 'Batch review lifecycle state is not a regular file: %s\n' "$state_file" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$state_file")"
+  write_batch_review_lifecycle "$state_file" 1 0 review
+}
+
+read_batch_review_lifecycle() {
+  local state_file="$1"
+  local values
+
+  if [[ ! -f "$state_file" ]]; then
+    printf 'Batch review lifecycle state does not exist: %s\n' "$state_file" >&2
+    return 1
+  fi
+
+  if ! values="$(awk -F '\t' '
+    NF != 2 { exit 1 }
+    NR == 1 && ($1 != "schema_version" || $2 != "1") { exit 1 }
+    NR == 2 && ($1 != "review_round" || $2 !~ /^[0-9]+$/ || $2 == 0) { exit 1 }
+    NR == 3 && ($1 != "fix_round" || $2 !~ /^[0-9]+$/) { exit 1 }
+    NR == 4 && ($1 != "next_action" || ($2 != "review" && $2 != "fix" && $2 != "complete")) { exit 1 }
+    NR == 5 && ($1 != "updated_at" || $2 == "") { exit 1 }
+    NR > 5 { exit 1 }
+    NR == 2 { review_round = $2 }
+    NR == 3 { fix_round = $2 }
+    NR == 4 { next_action = $2 }
+    END {
+      if (NR != 5) exit 1
+      print review_round "\t" fix_round "\t" next_action
+    }
+  ' "$state_file")"; then
+    printf 'Batch review lifecycle state is invalid: %s\n' "$state_file" >&2
+    return 1
+  fi
+
+  IFS=$'\t' read -r \
+    BATCH_REVIEW_LIFECYCLE_REVIEW_ROUND \
+    BATCH_REVIEW_LIFECYCLE_FIX_ROUND \
+    BATCH_REVIEW_LIFECYCLE_NEXT_ACTION \
+    <<< "$values"
+}
+
 run_batch_review_once() {
   local batch_dir="$1"
   local issues_file="$2"
@@ -238,57 +331,88 @@ ensure_batch_review_accepted() {
   local batch_pending_findings="${batch_state_dir}/pending-findings.tsv"
   local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
   local batch_state_history_dir="${batch_state_dir}/history"
-  local review_fix_round=0
-  local review_round=1
+  local lifecycle_state="${batch_state_dir}/review-lifecycle.state"
+  local review_fix_round
+  local review_round
+  local next_action
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
-  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
+  initialize_batch_review_lifecycle "$lifecycle_state"
 
-  while ! review_output_accepted "$batch_review_output"; do
-    if [[ "$review_fix_round" -ge "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" ]]; then
-      printf '[queue] batch review did not reach acceptance after %s fix rounds\n' "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" >&2
-      printf '[queue] see review: %s\n' "$batch_review_output" >&2
-      exit 1
-    fi
+  while true; do
+    read_batch_review_lifecycle "$lifecycle_state"
+    review_round="$BATCH_REVIEW_LIFECYCLE_REVIEW_ROUND"
+    review_fix_round="$BATCH_REVIEW_LIFECYCLE_FIX_ROUND"
+    next_action="$BATCH_REVIEW_LIFECYCLE_NEXT_ACTION"
 
-    review_fix_round=$((review_fix_round + 1))
-    write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
-    cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
-    write_fix_from_batch_review_prompt_file \
-      "$issues_file" \
-      "$batch_review_output" \
-      "$fix_review_prompt" \
-      "$batch_pending_findings" \
-      "$batch_review_snapshot"
-    assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
-    ensure_clean_worktree 'Working tree must be clean before batch review fix.'
-    log_info "codex fix from batch review (round ${review_fix_round})"
-    run_codex_batch_write \
-      batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
-      "$review_fix_effort" "$batch_review_snapshot"
-    archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
-    ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
-    extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
-    history_dir="$batch_state_history_dir"
-    archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
-    cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"
-    cp -- "$(history_round_path 'fix-resolution' "$review_fix_round" '.tsv')" "${batch_dir}/history/"
-    history_dir="${batch_dir}/history"
+    case "$next_action" in
+      review)
+        run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
+        if review_output_accepted "$batch_review_output"; then
+          write_batch_review_lifecycle "$lifecycle_state" "$review_round" "$review_fix_round" complete
+          if declare -F queue_failpoint >/dev/null 2>&1; then
+            queue_failpoint after_batch_review_lifecycle_complete
+          fi
+        else
+          review_fix_round="$review_round"
+          write_batch_review_lifecycle "$lifecycle_state" "$review_round" "$review_fix_round" fix
+          if declare -F queue_failpoint >/dev/null 2>&1; then
+            queue_failpoint after_batch_review_lifecycle_fix
+          fi
+        fi
+        ;;
+      fix)
+        if [[ "$review_fix_round" -gt "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" ]]; then
+          printf '[queue] batch review did not reach acceptance after %s fix rounds\n' "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" >&2
+          printf '[queue] see review: %s\n' "$batch_review_output" >&2
+          exit 1
+        fi
 
-    if [[ -z "$(status_outside_work)" ]]; then
-      if awk -F '\t' '$2 == "fixed" { found = 1 } END { exit !found }' "$batch_fix_resolution"; then
-        printf 'Batch review fix reported fixed findings but produced no repository changes.\n' >&2
-        printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
-        exit 1
-      fi
-      log_info 'batch review fix reported no code changes; skipping commit and checks'
-    else
-      commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
-      ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
-    fi
+        write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
+        cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
+        write_fix_from_batch_review_prompt_file \
+          "$issues_file" \
+          "$batch_review_output" \
+          "$fix_review_prompt" \
+          "$batch_pending_findings" \
+          "$batch_review_snapshot"
+        assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
+        ensure_clean_worktree 'Working tree must be clean before batch review fix.'
+        log_info "codex fix from batch review (round ${review_fix_round})"
+        run_codex_batch_write \
+          batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
+          "$review_fix_effort" "$batch_review_snapshot"
+        archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
+        ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
+        extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
+        history_dir="$batch_state_history_dir"
+        archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
+        cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"
+        cp -- "$(history_round_path 'fix-resolution' "$review_fix_round" '.tsv')" "${batch_dir}/history/"
+        history_dir="${batch_dir}/history"
 
-    review_round=$((review_round + 1))
-    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
+        if [[ -z "$(status_outside_work)" ]]; then
+          if awk -F '\t' '$2 == "fixed" { found = 1 } END { exit !found }' "$batch_fix_resolution"; then
+            printf 'Batch review fix reported fixed findings but produced no repository changes.\n' >&2
+            printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
+            exit 1
+          fi
+          log_info 'batch review fix reported no code changes; skipping commit and checks'
+        else
+          commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
+          ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
+        fi
+
+        review_round=$((review_round + 1))
+        write_batch_review_lifecycle "$lifecycle_state" "$review_round" "$review_fix_round" review
+        if declare -F queue_failpoint >/dev/null 2>&1; then
+          queue_failpoint after_batch_review_lifecycle_review
+        fi
+        ;;
+      complete)
+        return 0
+        ;;
+    esac
   done
 }

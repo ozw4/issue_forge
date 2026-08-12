@@ -432,6 +432,8 @@ verification:
 - each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule; batch source history is run-owned and is then copied to the compatibility history path
 - Issue lifecycle artifacts are `.work/codex/pending-findings.tsv`, `.work/codex/fix-resolution.tsv`, `.work/codex/history/fix-resolution.round-NN.tsv`, and `.work/codex/review-verification.tsv`; batch source artifacts use the corresponding names below `.work/queue/runs/<run_id>/batches/<batch>/`, with compatibility copies below `.work/queue/batches/<batch>/`
 - resuming a queue run continues that run's ledger, while a different run over the same batch range starts a separate ledger and never reads the compatibility copy as finding state
+- each run-owned Batch directory has a fixed version-1 `review-lifecycle.state` TSV containing `review_round`, `fix_round`, `next_action` (`review`, `fix`, or `complete`), and `updated_at`; resume continues that saved action and logical round, and `complete` prevents Reviewer or Fixer reruns before the outer `batch_review after` checkpoint
+- `review-lifecycle.state` is the Batch review/fix loop's commit-point control state after successful artifacts and checks; it is separate from Agent attempts and the finding ledger, has no compatibility copy, and does not change queue state schema version 3
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` remains allowed; acceptance still uses the current review finding sections rather than scanning the full ledger

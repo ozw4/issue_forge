@@ -366,3 +366,223 @@ def test_batch_no_change_fixed_report_is_hard_error(tmp_path: Path) -> None:
     assert "reported fixed findings but produced no repository changes" in completed.stderr
     events = (tmp_path / "batch" / "events").read_text(encoding="utf-8").splitlines()
     assert "review-2" not in events
+
+
+def run_batch_lifecycle(
+    batch_dir: Path,
+    batch_state_dir: Path,
+    *,
+    stop_after: str = "",
+    accepted_round: int = 2,
+    max_fix_rounds: int = 3,
+) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPER))}
+source {shlex.quote(str(REVIEW_HELPER))}
+source {shlex.quote(str(BATCH_HELPER))}
+
+batch_dir="$1"
+batch_state_dir="$2"
+stop_after="$3"
+accepted_round="$4"
+CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS="$5"
+mkdir -p "$batch_dir/history" "$batch_state_dir/history"
+if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
+  printf '%s\n' \
+    $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
+    $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
+    > "$batch_state_dir/findings.tsv"
+fi
+: > "$batch_dir/batch-review.snapshot.state"
+
+run_batch_review_once() {{
+  local round="$6"
+  printf 'review:%s\n' "$round" >> "$batch_dir/events"
+  if [[ "$round" -ge "$accepted_round" ]]; then
+    printf '%s\n' 'accept: yes' > "$batch_dir/batch-review.txt"
+  else
+    printf '%s\n' 'accept: no' > "$batch_dir/batch-review.txt"
+  fi
+}}
+write_fix_from_batch_review_prompt_file() {{ : > "$3"; }}
+assert_review_snapshot_matches() {{ :; }}
+ensure_clean_worktree() {{ :; }}
+log_info() {{ :; }}
+run_codex_batch_write() {{
+  printf 'fix:%s\n' "$2" >> "$batch_dir/events"
+  printf 'resolution:\n- F0001 | false_positive | reviewed claim\n' > "$4"
+}}
+ensure_batch_token_usage_tsv() {{ :; }}
+status_outside_work() {{ :; }}
+commit_issue_changes() {{ :; }}
+ensure_batch_checks_pass() {{ :; }}
+queue_failpoint() {{
+  if [[ -n "$stop_after" && "$stop_after" == "$1" ]]; then
+    printf 'stop:%s\n' "$1" >> "$batch_dir/events"
+    exit 86
+  fi
+}}
+
+ensure_batch_review_accepted \
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir"
+"""
+    return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
+        [
+            "bash",
+            "-c",
+            script,
+            "batch-lifecycle-test",
+            str(batch_dir),
+            str(batch_state_dir),
+            stop_after,
+            str(accepted_round),
+            str(max_fix_rounds),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
+def read_lifecycle_state(batch_state_dir: Path) -> dict[str, str]:
+    state_file = batch_state_dir / "review-lifecycle.state"
+    return dict(
+        line.split("\t", maxsplit=1)
+        for line in state_file.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_batch_resume_after_rejected_review_starts_with_fix(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        stop_after="after_batch_review_lifecycle_fix",
+    )
+    assert stopped.returncode == 86
+    assert read_lifecycle_state(state_dir) | {"updated_at": "ignored"} == {
+        "schema_version": "1",
+        "review_round": "1",
+        "fix_round": "1",
+        "next_action": "fix",
+        "updated_at": "ignored",
+    }
+
+    resumed = run_batch_lifecycle(batch_dir, state_dir)
+    assert resumed.returncode == 0, resumed.stderr
+    events = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    assert events.count("review:1") == 1
+    assert events.count("fix:1") == 1
+    assert events.count("review:2") == 1
+
+
+def test_batch_resume_after_fix_starts_with_next_review(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        stop_after="after_batch_review_lifecycle_review",
+    )
+    assert stopped.returncode == 86
+    state = read_lifecycle_state(state_dir)
+    assert (state["review_round"], state["fix_round"], state["next_action"]) == (
+        "2",
+        "1",
+        "review",
+    )
+
+    resumed = run_batch_lifecycle(batch_dir, state_dir)
+    assert resumed.returncode == 0, resumed.stderr
+    events = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    assert events.count("review:1") == 1
+    assert events.count("fix:1") == 1
+    assert events.count("review:2") == 1
+
+
+def test_batch_resume_after_complete_runs_no_agents(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        stop_after="after_batch_review_lifecycle_complete",
+        accepted_round=1,
+    )
+    assert stopped.returncode == 86
+    before_resume = (batch_dir / "events").read_bytes()
+    assert read_lifecycle_state(state_dir)["next_action"] == "complete"
+
+    resumed = run_batch_lifecycle(batch_dir, state_dir, accepted_round=1)
+    assert resumed.returncode == 0, resumed.stderr
+    assert (batch_dir / "events").read_bytes() == before_resume
+
+
+def test_batch_fix_limit_survives_resume(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        stop_after="after_batch_review_lifecycle_review",
+        accepted_round=99,
+        max_fix_rounds=1,
+    )
+    assert stopped.returncode == 86
+
+    limited = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        accepted_round=99,
+        max_fix_rounds=1,
+    )
+    assert limited.returncode != 0
+    assert "did not reach acceptance after 1 fix rounds" in limited.stderr
+    events_before_retry = (batch_dir / "events").read_bytes()
+    state = read_lifecycle_state(state_dir)
+    assert (state["review_round"], state["fix_round"], state["next_action"]) == (
+        "2",
+        "2",
+        "fix",
+    )
+
+    limited_again = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        accepted_round=99,
+        max_fix_rounds=1,
+    )
+    assert limited_again.returncode != 0
+    assert (batch_dir / "events").read_bytes() == events_before_retry
+
+
+def test_batch_lifecycle_state_is_run_owned(tmp_path: Path) -> None:
+    run_a = tmp_path / "runs" / "run-a" / "batches" / "batch-1"
+    run_b = tmp_path / "runs" / "run-b" / "batches" / "batch-1"
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(BATCH_HELPER))}
+initialize_batch_review_lifecycle "$1/review-lifecycle.state"
+write_batch_review_lifecycle "$1/review-lifecycle.state" 3 2 complete
+initialize_batch_review_lifecycle "$2/review-lifecycle.state"
+"""
+    completed = subprocess.run(  # noqa: S603 - exercises trusted repo-local shell helper
+        ["bash", "-c", script, "batch-lifecycle-scope-test", str(run_a), str(run_b)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert read_lifecycle_state(run_a)["review_round"] == "3"
+    assert read_lifecycle_state(run_a)["next_action"] == "complete"
+    assert read_lifecycle_state(run_b)["review_round"] == "1"
+    assert read_lifecycle_state(run_b)["next_action"] == "review"
