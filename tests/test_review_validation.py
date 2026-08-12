@@ -11,22 +11,44 @@ HISTORY_HELPERS = REPO_ROOT / "tools" / "codex" / "lib" / "history_helpers.sh"
 LEDGER_HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext\n"
 
 
-def write_review(path: Path, *, valid: bool = True) -> None:
+def write_review(
+    path: Path,
+    *,
+    valid: bool = True,
+    accept: str = "no",
+    blocker: tuple[str, ...] = ("none",),
+    major: tuple[str, ...] = ("focused finding",),
+    minor: tuple[str, ...] = ("none",),
+    verification: tuple[str, ...] = ("none",),
+) -> None:
     if not valid:
         path.write_text("invalid review output\n", encoding="utf-8")
         return
 
     path.write_text(
-        "accept: no\n\n"
-        "blocker:\n- none\n\n"
-        "major:\n- focused finding\n\n"
-        "minor:\n- none\n\n"
-        "verification:\n- none\n",
+        "\n".join(
+            [
+                f"accept: {accept}",
+                "",
+                "blocker:",
+                *(f"- {item}" for item in blocker),
+                "",
+                "major:",
+                *(f"- {item}" for item in major),
+                "",
+                "minor:",
+                *(f"- {item}" for item in minor),
+                "",
+                "verification:",
+                *(f"- {item}" for item in verification),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
 
 
-def run_bash(script: str, *args: Path) -> subprocess.CompletedProcess[str]:
+def run_bash(script: str, *args: Path | str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - invokes trusted repo-local shell helpers
         ["bash", "-c", script, "review-validation-test", *(str(arg) for arg in args)],
         cwd=REPO_ROOT,
@@ -36,7 +58,12 @@ def run_bash(script: str, *args: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_review_round(review_fixture: Path, work_dir: Path) -> subprocess.CompletedProcess[str]:
+def run_review_round(
+    review_fixture: Path,
+    work_dir: Path,
+    *,
+    full_flow: bool = False,
+) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -uo pipefail
 source {shlex.quote(str(HISTORY_HELPERS))}
@@ -75,7 +102,14 @@ generate_review_material() {{
   printf 'generate\n' >> "$events"
 }}
 capture_review_snapshot() {{ : > "$1"; }}
-run_codex_phase() {{ printf 'reviewer\n' >> "$events"; : > "$5"; }}
+run_codex_phase() {{
+  if [[ "$1" == fix-from-review ]]; then
+    printf 'fixer\n' >> "$events"
+  else
+    printf 'reviewer\n' >> "$events"
+  fi
+  : > "$5"
+}}
 assert_review_snapshot_matches() {{ printf 'snapshot-match\n' >> "$events"; }}
 ensure_issue_token_usage_tsv() {{ :; }}
 extract_review_output() {{
@@ -100,9 +134,30 @@ update_finding_ledger() {{
   update_finding_ledger_impl "$@"
 }}
 
-run_review_round
+if [[ "$3" == flow ]]; then
+  ensure_review_accepted
+else
+  run_review_round
+fi
 """
-    return run_bash(script, review_fixture, work_dir)
+    return run_bash(script, review_fixture, work_dir, "flow" if full_flow else "round")
+
+
+def run_review_validator(review: Path, validator: str) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -uo pipefail
+source {shlex.quote(str(REVIEW_HELPERS))}
+source {shlex.quote(str(REPO_ROOT / 'tools/codex/lib/batch_review_helpers.sh'))}
+log_fail_with_path() {{ printf '%s: %s\n' "$1" "$2" >&2; }}
+review_output="$1"
+review_raw_output="$1"
+if [[ "$2" == issue ]]; then
+  ensure_valid_review_output
+else
+  ensure_valid_batch_review_output "$1" "$1"
+fi
+"""
+    return run_bash(script, review, validator)
 
 
 def test_validator_has_no_ledger_or_history_side_effects(tmp_path: Path) -> None:
@@ -147,6 +202,80 @@ ensure_valid_review_output
 
     assert completed.returncode != 0
     assert "review output format is invalid" in completed.stderr
+
+
+def test_reject_without_current_findings_stops_before_ledger_or_fixer(tmp_path: Path) -> None:
+    review = tmp_path / "review.txt"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    write_review(review, major=("none",))
+    ledger = work_dir / "findings.tsv"
+    original = LEDGER_HEADER + "F0001\tmajor\t1\t1\tpresent\tunresolved\texisting finding\n"
+    ledger.write_text(original, encoding="utf-8")
+
+    completed = run_review_round(review, work_dir, full_flow=True)
+
+    assert completed.returncode != 0
+    assert "review output is inconsistent with acceptance" in completed.stderr
+    assert ledger.read_text(encoding="utf-8") == original
+    assert not (work_dir / "history" / "findings.round-01.tsv").exists()
+    assert not (work_dir / "pending-findings.tsv").exists()
+    assert not (work_dir / "fix-resolution.tsv").exists()
+    assert not (work_dir / "review-verification.tsv").exists()
+    events = (work_dir / "events.log").read_text(encoding="utf-8").splitlines()
+    assert "validate-semantics" in events
+    assert "update" not in events
+    assert "fixer" not in events
+
+
+def test_review_semantics_acceptance_finding_matrix(tmp_path: Path) -> None:
+    cases = [
+        ("reject-empty", "no", ("none",), ("none",), ("none",), ("none",), False),
+        ("reject-minor", "no", ("none",), ("none",), ("minor finding",), ("none",), True),
+        ("reject-major", "no", ("none",), ("major finding",), ("none",), ("none",), True),
+        (
+            "reject-verification-only",
+            "no",
+            ("none",),
+            ("none",),
+            ("none",),
+            ("F0001 | resolved | Fixed.",),
+            False,
+        ),
+        ("accept-major", "yes", ("none",), ("major finding",), ("none",), ("none",), False),
+        ("accept-minor", "yes", ("none",), ("none",), ("minor finding",), ("none",), True),
+    ]
+    script = f"""
+set -uo pipefail
+source {shlex.quote(str(REVIEW_HELPERS))}
+validate_review_output "$1" && validate_review_output_semantics "$1"
+"""
+
+    for name, accept, blocker, major, minor, verification, expected_valid in cases:
+        review = tmp_path / f"{name}.txt"
+        write_review(
+            review,
+            accept=accept,
+            blocker=blocker,
+            major=major,
+            minor=minor,
+            verification=verification,
+        )
+        completed = run_bash(script, review)
+        assert (completed.returncode == 0) is expected_valid, name
+
+
+def test_issue_and_batch_validators_share_empty_reject_rule(tmp_path: Path) -> None:
+    review = tmp_path / "review.txt"
+    write_review(review, major=("none",))
+
+    issue = run_review_validator(review, "issue")
+    batch = run_review_validator(review, "batch")
+
+    assert issue.returncode != 0
+    assert "review output is inconsistent with acceptance" in issue.stderr
+    assert batch.returncode != 0
+    assert "batch review output is inconsistent with acceptance" in batch.stderr
 
 
 def test_invalid_issue_round_does_not_change_ledger(tmp_path: Path) -> None:

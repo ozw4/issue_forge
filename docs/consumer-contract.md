@@ -436,6 +436,7 @@ verification:
 - `review-lifecycle.state` is the Batch review/fix loop's commit-point control state after successful artifacts and checks; it is separate from Agent attempts and the finding ledger, has no compatibility copy, and does not change queue state schema version 3
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
+- `accept: no` must have at least one current finding in `blocker:`, `major:`, or `minor:`; verification records do not count as current findings or rejection reasons
 - `accept: no` remains allowed; acceptance still uses the current review finding sections rather than scanning the full ledger
 - raw Codex review logs remain byte-for-byte debugging artifacts; before extracting and validating `.work/codex/review.txt` or batch review output, only the exact known `[codex]` launcher progress lines and Codex runtime/session log lines matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:` are ignored
 - pure review output must still start with `accept: yes` or `accept: no`; for recognizable `codex exec` transcript output, the engine extracts the last valid structured review block and drops transcript headers, prompt text, tool calls, token summaries, duplicated review blocks, and runtime session logs

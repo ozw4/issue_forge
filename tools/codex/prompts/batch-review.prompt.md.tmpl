@@ -38,6 +38,7 @@ Rules:
 - Accept changes that remain consistent with docs even if issue wording is slightly broader.
 - Use normal strict acceptance.
 - accept: yes is allowed only when blocker and major contain no real findings.
+- If `accept: no`, at least one real finding must appear in blocker, major, or minor.
 - minor findings may remain, but they must be concrete and useful.
 - Focus on correctness, regressions, cross-issue interaction, issue scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security or GitHub CLI merge risk.
 - Prefix each finding with one of these tags: [correctness], [regression], [cross-issue], [scope], [tests], [architecture], [docs-contract], [shell-safety], [security-ops].

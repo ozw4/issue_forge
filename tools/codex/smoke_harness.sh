@@ -1954,6 +1954,9 @@ run_review_output_validation_smoke() {
   local invalid_yes_major_output="${state_dir}/review-invalid-yes-major.txt"
   local invalid_yes_major_raw="${state_dir}/review-invalid-yes-major.raw.txt"
   local invalid_yes_major_log="${state_dir}/review-invalid-yes-major.log"
+  local invalid_no_empty_output="${state_dir}/review-invalid-no-empty.txt"
+  local invalid_no_empty_raw="${state_dir}/review-invalid-no-empty.raw.txt"
+  local invalid_no_empty_log="${state_dir}/review-invalid-no-empty.log"
   local valid_no_output="${state_dir}/review-valid-no.txt"
   local valid_no_raw="${state_dir}/review-valid-no.raw.txt"
   local runtime_before_output="${state_dir}/review-runtime-before.txt"
@@ -2005,6 +2008,13 @@ run_review_output_validation_smoke() {
     fail 'accept: yes with major findings should fail validation'
   fi
   assert_file_contains "$invalid_yes_major_log" 'review output is inconsistent with acceptance'
+
+  write_review_output_fixture "$invalid_no_empty_output" 'no' '' '' ''
+  cp "$invalid_no_empty_output" "$invalid_no_empty_raw"
+  if run_review_validation_command "$invalid_no_empty_output" "$invalid_no_empty_raw" 'no' > "$invalid_no_empty_log" 2>&1; then
+    fail 'accept: no without findings should fail validation'
+  fi
+  assert_file_contains "$invalid_no_empty_log" 'review output is inconsistent with acceptance'
 
   write_review_output_fixture "$valid_no_output" 'no' '- blocker remains' '- major remains' '- minor remains'
   cp "$valid_no_output" "$valid_no_raw"
@@ -2283,6 +2293,7 @@ Rules:
 - Accept changes that remain consistent with docs even if the issue wording is slightly broader.
 - Focus on correctness, scope, regressions, repository rules, and doc consistency.
 - If there is any real blocker or major finding, set \`accept: no\`.
+- If \`accept: no\`, at least one real finding must appear in blocker, major, or minor.
 - If there are only minor findings, \`accept: yes\` is allowed.
 - If \`accept: yes\`, then \`blocker:\` and \`major:\` must contain only \`- none\`.
 - Use the exact lowercase placeholder \`none\` for any empty section.

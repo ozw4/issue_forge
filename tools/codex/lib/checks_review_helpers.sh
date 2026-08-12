@@ -476,11 +476,23 @@ validate_review_output() {
 validate_review_output_semantics() {
   local file="$1"
   local accept_line
+  local count_numbers
+  local blocker_count
+  local major_count
+  local minor_count
 
   if ! IFS= read -r accept_line < "$file"; then
     return 1
   fi
-  if [[ "$accept_line" == 'accept: yes' ]] && review_has_blocker_or_major_findings "$file"; then
+  count_numbers="$(review_finding_count_numbers "$file")"
+  read -r blocker_count major_count minor_count <<< "$count_numbers"
+
+  if [[ "$accept_line" == 'accept: yes' ]] \
+    && [[ "$blocker_count" -gt 0 || "$major_count" -gt 0 ]]; then
+    return 1
+  fi
+  if [[ "$accept_line" == 'accept: no' ]] \
+    && [[ $((blocker_count + major_count + minor_count)) -eq 0 ]]; then
     return 1
   fi
 }
