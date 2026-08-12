@@ -519,8 +519,6 @@ run_review_validation_command() {
     # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/config.sh
     # shellcheck disable=SC1091
-    source vendor/issue_forge/tools/codex/lib/history_helpers.sh
-    # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
     # shellcheck disable=SC2317
     log_fail_with_path() {
@@ -531,15 +529,13 @@ run_review_validation_command() {
     review_output="${review_output_path}"
     # shellcheck disable=SC2034
     review_raw_output="${review_raw_path}"
-    # shellcheck disable=SC2034
-    review_findings_ledger="${review_output_path}.findings.tsv"
-    # shellcheck disable=SC2034
-    review_run_round=1
-    # shellcheck disable=SC2034
-    history_dir="$(dirname "${review_output_path}")/history"
-    mkdir -p "$history_dir"
 
     ensure_valid_review_output
+
+    if [[ -e "${review_output_path}.findings.tsv" ]]; then
+      printf 'Review validation unexpectedly created a finding ledger: %s\n' "${review_output_path}.findings.tsv" >&2
+      exit 1
+    fi
 
     case "${expected_accept_state}" in
       yes)
@@ -570,8 +566,6 @@ run_review_extraction_validation_command() {
     # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/config.sh
     # shellcheck disable=SC1091
-    source vendor/issue_forge/tools/codex/lib/history_helpers.sh
-    # shellcheck disable=SC1091
     source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
     # shellcheck disable=SC2317
     log_fail_with_path() {
@@ -582,16 +576,14 @@ run_review_extraction_validation_command() {
     review_output="${review_output_path}"
     # shellcheck disable=SC2034
     review_raw_output="${review_raw_path}"
-    # shellcheck disable=SC2034
-    review_findings_ledger="${review_output_path}.findings.tsv"
-    # shellcheck disable=SC2034
-    review_run_round=1
-    # shellcheck disable=SC2034
-    history_dir="$(dirname "${review_output_path}")/history"
-    mkdir -p "$history_dir"
 
     extract_structured_review_output_file "$review_raw_output" "$review_output"
     ensure_valid_review_output
+
+    if [[ -e "${review_output_path}.findings.tsv" ]]; then
+      printf 'Review validation unexpectedly created a finding ledger: %s\n' "${review_output_path}.findings.tsv" >&2
+      exit 1
+    fi
 
     case "${expected_accept_state}" in
       yes)

@@ -347,6 +347,9 @@ run_review_round() {
     printf 'Review raw log: %s\n' "$review_raw_output" >&2
     exit 1
   fi
+
+  ensure_valid_review_output
+  record_issue_review_findings
 }
 
 validate_review_output() {
@@ -445,7 +448,9 @@ ensure_valid_review_output() {
     log_fail_with_path "review output is inconsistent with acceptance" "$review_raw_output"
     exit 1
   fi
+}
 
+record_issue_review_findings() {
   update_finding_ledger "$review_output" "$review_findings_ledger" "$review_run_round"
   archive_round_file "$review_findings_ledger" "findings" "$review_run_round" ".tsv"
 }
@@ -490,7 +495,6 @@ ensure_review_accepted() {
   local review_fix_round=0
 
   run_review_round
-  ensure_valid_review_output
 
   while ! review_accepted; do
     if [[ "$review_fix_round" -ge "$CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS" ]]; then
@@ -502,6 +506,5 @@ ensure_review_accepted() {
     run_fix_from_review_round "$review_fix_round"
     ensure_checks_pass
     run_review_round
-    ensure_valid_review_output
   done
 }
