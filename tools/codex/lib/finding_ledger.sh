@@ -123,6 +123,7 @@ extract_fix_resolution_report() {
         if (trailing_blank) exit 1
         if (line !~ /^- /) exit 1
         body = substr(line, 3)
+        # A note cannot contain the literal delimiter, so exactly three parts are required.
         part_count = split(body, parts, / \| /)
         if (part_count != 3) exit 1
         id = parts[1]
@@ -225,6 +226,7 @@ extract_review_verification() {
         none_count += 1
         next
       }
+      # A note cannot contain the literal delimiter, so exactly three parts are required.
       part_count = split(body, parts, / \| /)
       if (part_count != 3) exit 1
       id = parts[1]

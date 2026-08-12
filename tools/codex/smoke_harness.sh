@@ -2301,7 +2301,7 @@ Rules:
 - Do not add any prose before or after the required format.
 - Every real finding must be a single \`- \` bullet in the correct section.
 - If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
-- Return \`resolved\`, \`invalid\`, or \`unresolved\` for each verified ID, with a one-line note.
+- Return \`resolved\`, \`invalid\`, or \`unresolved\` for each verified ID, with a one-line note without literal tabs or the literal delimiter \` | \`.
 - For \`unresolved\`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For \`resolved\` or \`invalid\`, do not repeat that text there.
 - Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist, output only \`- none\` under \`verification:\`.
 
@@ -2359,7 +2359,7 @@ Rules:
 - Address only findings listed in \`.work/codex/pending-findings.tsv\`, using the ledger-assigned ID for each one. Do not generate finding IDs.
 - Return one resolution line for every pending ID, whether or not code changes were needed. Do not omit or duplicate IDs and do not include IDs absent from the pending file.
 - Use \`fixed\` only after making the necessary change, \`false_positive\` only after confirming the finding is wrong or already satisfied, and \`cannot_fix\` rather than hiding a constraint with an unsafe fallback.
-- Use a one-line note without literal tabs.
+- Use a one-line note without literal tabs or the literal delimiter \` | \`.
 
 Return only this section and no other prose:
 

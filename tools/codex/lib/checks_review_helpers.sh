@@ -458,6 +458,10 @@ validate_review_output() {
       if ($0 !~ /^- F[0-9][0-9][0-9][0-9][0-9]* \| (resolved|invalid|unresolved) \| .+$/ || $0 ~ /\t/) {
         exit 1
       }
+      verification_body = substr($0, 3)
+      if (split(verification_body, verification_parts, / \| /) != 3) {
+        exit 1
+      }
       verification_records += 1
       verification_items += 1
       next

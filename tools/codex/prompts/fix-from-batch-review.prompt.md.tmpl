@@ -39,7 +39,7 @@ Rules:
 - Address only findings listed in `{{PENDING_FINDINGS}}`, using the ledger-assigned ID for each one. Do not generate finding IDs.
 - Return one resolution line for every pending ID, whether or not code changes were needed. Do not omit or duplicate IDs and do not include IDs absent from the pending file.
 - Use `fixed` only after making the necessary change, `false_positive` only after confirming the finding is wrong or already satisfied, and `cannot_fix` rather than hiding a constraint with an unsafe fallback.
-- Use a one-line note without literal tabs.
+- Use a one-line note without literal tabs or the literal delimiter ` | `.
 
 Make the required batch-review fixes, then stop.
 

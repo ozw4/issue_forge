@@ -31,7 +31,7 @@ Rules:
 - Do not add any prose before or after the required format.
 - Every real finding must be a single `- ` bullet in the correct section.
 - If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
-- Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note.
+- Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note without literal tabs or the literal delimiter ` | `.
 - For `unresolved`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For `resolved` or `invalid`, do not repeat that text there.
 - Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist, output only `- none` under `verification:`.
 

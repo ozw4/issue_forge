@@ -30,6 +30,21 @@ source {shlex.quote(str(HELPER))}
     )
 
 
+def run_review_format_validation(review: Path) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -uo pipefail
+source {shlex.quote(str(REVIEW_HELPER))}
+validate_review_output "$1"
+"""
+    return subprocess.run(  # noqa: S603 - invokes trusted repo-local shell helper
+        ["bash", "-c", script, "review-format-test", str(review)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
 def write_review(
     path: Path,
     *,
@@ -217,6 +232,74 @@ def test_invalid_fixer_reports_are_rejected_atomically(
 
     assert completed.returncode != 0
     assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("note", "expected_valid"),
+    [
+        ("Replaced the pipeline with one awk command.", True),
+        ("Replaced grep | awk with one command.", False),
+        ("Replaced grep\tawk with one command.", False),
+    ],
+)
+def test_fix_resolution_note_contract_is_atomic(
+    tmp_path: Path, note: str, expected_valid: bool
+) -> None:
+    _, ledger = initialize_finding(tmp_path)
+    pending = tmp_path / "pending.tsv"
+    assert_ok(run_helper("write_pending_findings", ledger, pending))
+    fix_log = tmp_path / "fix.log"
+    fix_log.write_text(f"resolution:\n- F0001 | fixed | {note}\n", encoding="utf-8")
+    output = tmp_path / "fix-resolution.tsv"
+    original = b"existing report\n"
+    output.write_bytes(original)
+
+    completed = run_helper("extract_fix_resolution_report", fix_log, pending, output)
+
+    assert (completed.returncode == 0) is expected_valid
+    if expected_valid:
+        assert read_tsv(output) == [
+            {"finding_id": "F0001", "action": "fixed", "note": note}
+        ]
+    else:
+        assert "Fix resolution report is invalid" in completed.stderr
+        assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("note", "expected_valid"),
+    [
+        ("Replaced the pipeline with one awk command.", True),
+        ("Replaced grep | awk with one command.", False),
+        ("Replaced grep\tawk with one command.", False),
+    ],
+)
+def test_review_verification_note_contract_matches_format_validation(
+    tmp_path: Path, note: str, expected_valid: bool
+) -> None:
+    review, ledger = initialize_finding(tmp_path)
+    _, report = make_fix_report(tmp_path, ledger, "F0001 | fixed | fixer claim")
+    write_review(review, verification=(f"F0001 | resolved | {note}",))
+    original_ledger = ledger.read_bytes()
+    output = tmp_path / "verification.tsv"
+    original_output = b"existing verification\n"
+    output.write_bytes(original_output)
+
+    format_result = run_review_format_validation(review)
+    extraction_result = run_helper(
+        "extract_review_verification", review, ledger, report, output
+    )
+
+    assert (format_result.returncode == 0) is expected_valid
+    assert (extraction_result.returncode == 0) is expected_valid
+    assert ledger.read_bytes() == original_ledger
+    if expected_valid:
+        assert read_tsv(output) == [
+            {"finding_id": "F0001", "resolution": "resolved", "note": note}
+        ]
+    else:
+        assert "Review verification is invalid" in extraction_result.stderr
+        assert output.read_bytes() == original_output
 
 
 @pytest.mark.parametrize(
