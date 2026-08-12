@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVIEW_HELPERS = REPO_ROOT / "tools" / "codex" / "lib" / "checks_review_helpers.sh"
 HISTORY_HELPERS = REPO_ROOT / "tools" / "codex" / "lib" / "history_helpers.sh"
-LEDGER_HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\ttext\n"
+LEDGER_HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext\n"
 
 
 def write_review(path: Path, *, valid: bool = True) -> None:
@@ -20,7 +20,8 @@ def write_review(path: Path, *, valid: bool = True) -> None:
         "accept: no\n\n"
         "blocker:\n- none\n\n"
         "major:\n- focused finding\n\n"
-        "minor:\n- none\n",
+        "minor:\n- none\n\n"
+        "verification:\n- none\n",
         encoding="utf-8",
     )
 
@@ -59,6 +60,8 @@ review_prompt="${{work_dir}}/review.prompt.md"
 review_raw_output="${{work_dir}}/review.raw.txt"
 review_output="${{work_dir}}/review.txt"
 review_findings_ledger="${{work_dir}}/findings.tsv"
+fix_resolution_report="${{work_dir}}/fix-resolution.tsv"
+review_verification="${{work_dir}}/review-verification.tsv"
 review_run_round=0
 issue_number=1
 CODEX_FLOW_REVIEW_REASONING=medium
@@ -123,13 +126,36 @@ ensure_valid_review_output
     assert not (tmp_path / "history").exists()
 
 
+def test_validator_rejects_review_without_verification_section(tmp_path: Path) -> None:
+    review = tmp_path / "review.txt"
+    raw = tmp_path / "review.raw.txt"
+    review.write_text(
+        "accept: yes\n\nblocker:\n- none\n\nmajor:\n- none\n\nminor:\n- none\n",
+        encoding="utf-8",
+    )
+    raw.write_bytes(review.read_bytes())
+    script = f"""
+set -uo pipefail
+source {shlex.quote(str(REVIEW_HELPERS))}
+log_fail_with_path() {{ printf '%s: %s\n' "$1" "$2" >&2; }}
+review_output="$1"
+review_raw_output="$2"
+ensure_valid_review_output
+"""
+
+    completed = run_bash(script, review, raw)
+
+    assert completed.returncode != 0
+    assert "review output format is invalid" in completed.stderr
+
+
 def test_invalid_issue_round_does_not_change_ledger(tmp_path: Path) -> None:
     review = tmp_path / "invalid-review.txt"
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     write_review(review, valid=False)
     ledger = work_dir / "findings.tsv"
-    original = LEDGER_HEADER + "F0001\tmajor\t1\t1\tpresent\texisting finding\n"
+    original = LEDGER_HEADER + "F0001\tmajor\t1\t1\tpresent\tunresolved\texisting finding\n"
     ledger.write_text(original, encoding="utf-8")
 
     completed = run_review_round(review, work_dir)
@@ -155,7 +181,7 @@ def test_valid_issue_round_records_findings_once_after_validation(tmp_path: Path
     assert completed.returncode == 0, completed.stderr
     ledger = work_dir / "findings.tsv"
     assert ledger.read_text(encoding="utf-8") == (
-        LEDGER_HEADER + "F0001\tmajor\t1\t1\tpresent\tfocused finding\n"
+        LEDGER_HEADER + "F0001\tmajor\t1\t1\tpresent\tunresolved\tfocused finding\n"
     )
     finding_histories = list((work_dir / "history").glob("findings.round-*.tsv"))
     assert [path.name for path in finding_histories] == ["findings.round-01.tsv"]

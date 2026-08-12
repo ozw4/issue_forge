@@ -291,6 +291,26 @@ extract_review_candidate_from_line() {
       next
     }
     state == "minor" {
+      if ($0 == "") {
+        print
+        state = "verification-header"
+        next
+      }
+      if ($0 ~ /^- /) {
+        print
+        next
+      }
+      exit 1
+    }
+    state == "verification-header" {
+      if ($0 != "verification:") {
+        exit 1
+      }
+      print
+      state = "verification"
+      next
+    }
+    state == "verification" {
       if ($0 == "" || $0 ~ /^- /) {
         print
         next
@@ -301,7 +321,7 @@ extract_review_candidate_from_line() {
       exit 1
     }
     END {
-      if (state != "minor") {
+      if (state != "verification") {
         exit 1
       }
     }
@@ -410,16 +430,43 @@ validate_review_output() {
       next
     }
     state == "minor" {
-      if ($0 != "" && $0 !~ /^- /) {
+      if ($0 == "") {
+        state = "minor-gap"
+        next
+      }
+      if ($0 !~ /^- /) {
         exit 1
       }
+      next
+    }
+    state == "minor-gap" {
+      if ($0 != "verification:") {
+        exit 1
+      }
+      state = "verification"
+      next
+    }
+    state == "verification" {
+      if ($0 == "") {
+        next
+      }
+      if ($0 == "- none") {
+        verification_none += 1
+        verification_items += 1
+        next
+      }
+      if ($0 !~ /^- F[0-9][0-9][0-9][0-9][0-9]* \| (resolved|invalid|unresolved) \| .+$/ || $0 ~ /\t/) {
+        exit 1
+      }
+      verification_records += 1
+      verification_items += 1
       next
     }
     {
       exit 1
     }
     END {
-      if (state != "minor") {
+      if (state != "verification" || verification_items == 0 || (verification_none > 0 && verification_records > 0)) {
         exit 1
       }
     }
@@ -451,7 +498,21 @@ ensure_valid_review_output() {
 }
 
 record_issue_review_findings() {
-  update_finding_ledger "$review_output" "$review_findings_ledger" "$review_run_round"
+  local fix_resolution_input=''
+
+  if [[ -f "$fix_resolution_report" ]]; then
+    fix_resolution_input="$fix_resolution_report"
+  fi
+  extract_review_verification \
+    "$review_output" \
+    "$review_findings_ledger" \
+    "$fix_resolution_input" \
+    "$review_verification"
+  update_finding_ledger \
+    "$review_output" \
+    "$review_findings_ledger" \
+    "$review_run_round" \
+    "$review_verification"
   archive_round_file "$review_findings_ledger" "findings" "$review_run_round" ".tsv"
 }
 
@@ -481,6 +542,7 @@ review_accepted() {
 run_fix_from_review_round() {
   local review_fix_round="$1"
 
+  write_pending_findings "$review_findings_ledger" "$pending_findings"
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
   assert_review_snapshot_matches "$review_snapshot" "before issue review fix"
@@ -489,6 +551,8 @@ run_fix_from_review_round() {
     "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$review_snapshot"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
+  extract_fix_resolution_report "$fix_review_log" "$pending_findings" "$fix_resolution_report"
+  archive_round_file "$fix_resolution_report" "fix-resolution" "$fix_review_round" ".tsv"
 }
 
 ensure_review_accepted() {

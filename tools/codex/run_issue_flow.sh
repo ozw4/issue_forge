@@ -123,6 +123,9 @@ review_summary="${CODEX_FLOW_CODEX_DIR}/review.summary.txt"
 review_raw_output="${CODEX_FLOW_CODEX_DIR}/review.raw.txt"
 review_output="${CODEX_FLOW_CODEX_DIR}/review.txt"
 review_findings_ledger="${CODEX_FLOW_CODEX_DIR}/findings.tsv"
+pending_findings="${CODEX_FLOW_CODEX_DIR}/pending-findings.tsv"
+fix_resolution_report="${CODEX_FLOW_CODEX_DIR}/fix-resolution.tsv"
+review_verification="${CODEX_FLOW_CODEX_DIR}/review-verification.tsv"
 review_snapshot="${CODEX_FLOW_CODEX_DIR}/review.snapshot.state"
 fix_review_log="${CODEX_FLOW_CODEX_DIR}/fix-from-review.log"
 history_dir="$CODEX_FLOW_CODEX_HISTORY_DIR"
@@ -143,7 +146,11 @@ write_issue_flow_prompt_files \
   "$review_diff" \
   "$review_untracked" \
   "$review_summary" \
-  "$review_output"
+  "$review_output" \
+  "$pending_findings" \
+  "$review_findings_ledger" \
+  "$fix_resolution_report" \
+  "$review_snapshot"
 
 run_implementation_phase
 ensure_checks_pass

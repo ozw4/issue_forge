@@ -169,13 +169,22 @@ run_batch_review_once() {
   local history_dir="${batch_dir}/history"
   local batch_findings_ledger="${batch_state_dir}/findings.tsv"
   local batch_findings_history_dir="${batch_state_dir}/history"
+  local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
+  local batch_review_verification="${batch_state_dir}/review-verification.tsv"
 
   mkdir -p "$history_dir" "$batch_findings_history_dir"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
   archive_round_file "$batch_diff" 'batch-diff' "$review_round" '.txt'
   archive_round_file "$batch_untracked" 'batch-untracked' "$review_round" '.txt'
   archive_round_file "$batch_summary" 'batch-summary' "$review_round" '.txt'
-  write_batch_review_prompt_file "$issues_file" "$batch_diff" "$batch_untracked" "$batch_summary" "$batch_review_prompt"
+  write_batch_review_prompt_file \
+    "$issues_file" \
+    "$batch_diff" \
+    "$batch_untracked" \
+    "$batch_summary" \
+    "$batch_review_prompt" \
+    "$batch_findings_ledger" \
+    "$batch_fix_resolution"
 
   capture_review_snapshot "$batch_review_snapshot"
   log_info "codex batch review (round ${review_round})"
@@ -193,11 +202,21 @@ run_batch_review_once() {
   fi
   archive_round_file "$batch_review_output" 'batch-review' "$review_round" '.txt'
   ensure_valid_batch_review_output "$batch_review_raw" "$batch_review_output"
-  update_finding_ledger "$batch_review_output" "$batch_findings_ledger" "$review_round"
+  extract_review_verification \
+    "$batch_review_output" \
+    "$batch_findings_ledger" \
+    "$batch_fix_resolution" \
+    "$batch_review_verification"
+  update_finding_ledger \
+    "$batch_review_output" \
+    "$batch_findings_ledger" \
+    "$review_round" \
+    "$batch_review_verification"
   history_dir="$batch_findings_history_dir"
   archive_round_file "$batch_findings_ledger" 'findings' "$review_round" '.tsv'
   cp -- "$batch_findings_ledger" "${batch_dir}/findings.tsv"
   cp -- "$(history_round_path 'findings' "$review_round" '.tsv')" "${batch_dir}/history/"
+  cp -- "$batch_review_verification" "${batch_dir}/review-verification.tsv"
 }
 
 ensure_batch_review_accepted() {
@@ -215,6 +234,10 @@ ensure_batch_review_accepted() {
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
   local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
+  local batch_findings_ledger="${batch_state_dir}/findings.tsv"
+  local batch_pending_findings="${batch_state_dir}/pending-findings.tsv"
+  local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
+  local batch_state_history_dir="${batch_state_dir}/history"
   local review_fix_round=0
   local review_round=1
   local history_dir="${batch_dir}/history"
@@ -230,7 +253,14 @@ ensure_batch_review_accepted() {
     fi
 
     review_fix_round=$((review_fix_round + 1))
-    write_fix_from_batch_review_prompt_file "$issues_file" "$batch_review_output" "$fix_review_prompt"
+    write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
+    cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
+    write_fix_from_batch_review_prompt_file \
+      "$issues_file" \
+      "$batch_review_output" \
+      "$fix_review_prompt" \
+      "$batch_pending_findings" \
+      "$batch_review_snapshot"
     assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
     ensure_clean_worktree 'Working tree must be clean before batch review fix.'
     log_info "codex fix from batch review (round ${review_fix_round})"
@@ -239,15 +269,25 @@ ensure_batch_review_accepted() {
       "$review_fix_effort" "$batch_review_snapshot"
     archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
     ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
+    extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
+    history_dir="$batch_state_history_dir"
+    archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
+    cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"
+    cp -- "$(history_round_path 'fix-resolution' "$review_fix_round" '.tsv')" "${batch_dir}/history/"
+    history_dir="${batch_dir}/history"
 
     if [[ -z "$(status_outside_work)" ]]; then
-      printf 'Batch review fix produced no repository changes.\n' >&2
-      printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
-      exit 1
+      if awk -F '\t' '$2 == "fixed" { found = 1 } END { exit !found }' "$batch_fix_resolution"; then
+        printf 'Batch review fix reported fixed findings but produced no repository changes.\n' >&2
+        printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
+        exit 1
+      fi
+      log_info 'batch review fix reported no code changes; skipping commit and checks'
+    else
+      commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
+      ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
     fi
 
-    commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
-    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
     review_round=$((review_round + 1))
     run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
   done

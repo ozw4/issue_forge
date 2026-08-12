@@ -8,7 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "finding_ledger.sh"
-HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\ttext\n"
+HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext\n"
 
 
 def write_review(
@@ -24,6 +24,7 @@ def write_review(
     lines.extend(f"- {text}" for text in major)
     lines.extend(["", "minor:"])
     lines.extend(f"- {text}" for text in minor)
+    lines.extend(["", "verification:", "- none"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -60,9 +61,9 @@ def test_initial_ledger_creation(tmp_path: Path) -> None:
     assert_update(review, ledger, 1)
 
     assert read_ledger(ledger) == [
-        {"finding_id": "F0001", "severity": "blocker", "first_round": "1", "last_seen_round": "1", "status": "present", "text": "blocker A"},
-        {"finding_id": "F0002", "severity": "major", "first_round": "1", "last_seen_round": "1", "status": "present", "text": "major B"},
-        {"finding_id": "F0003", "severity": "minor", "first_round": "1", "last_seen_round": "1", "status": "present", "text": "minor C"},
+        {"finding_id": "F0001", "severity": "blocker", "first_round": "1", "last_seen_round": "1", "status": "present", "resolution": "unresolved", "text": "blocker A"},
+        {"finding_id": "F0002", "severity": "major", "first_round": "1", "last_seen_round": "1", "status": "present", "resolution": "unresolved", "text": "major B"},
+        {"finding_id": "F0003", "severity": "minor", "first_round": "1", "last_seen_round": "1", "status": "present", "resolution": "unresolved", "text": "minor C"},
     ]
 
 
@@ -76,7 +77,7 @@ def test_same_finding_keeps_id_and_first_round(tmp_path: Path) -> None:
     assert_update(review, ledger, 2)
 
     assert read_ledger(ledger) == [
-        {"finding_id": "F0001", "severity": "major", "first_round": "1", "last_seen_round": "2", "status": "present", "text": "finding A"}
+        {"finding_id": "F0001", "severity": "major", "first_round": "1", "last_seen_round": "2", "status": "present", "resolution": "unresolved", "text": "finding A"}
     ]
 
 
@@ -90,7 +91,7 @@ def test_severity_change_keeps_id(tmp_path: Path) -> None:
     assert_update(review, ledger, 2)
 
     assert read_ledger(ledger)[0] == {
-        "finding_id": "F0001", "severity": "blocker", "first_round": "1", "last_seen_round": "2", "status": "present", "text": "finding A"
+        "finding_id": "F0001", "severity": "blocker", "first_round": "1", "last_seen_round": "2", "status": "present", "resolution": "unresolved", "text": "finding A"
     }
 
 
@@ -104,7 +105,7 @@ def test_disappeared_finding_is_not_observed_and_not_deleted(tmp_path: Path) -> 
     assert_update(review, ledger, 2)
 
     assert read_ledger(ledger)[0] == {
-        "finding_id": "F0001", "severity": "major", "first_round": "1", "last_seen_round": "1", "status": "not_observed", "text": "finding A"
+        "finding_id": "F0001", "severity": "major", "first_round": "1", "last_seen_round": "1", "status": "not_observed", "resolution": "unresolved", "text": "finding A"
     }
 
 
@@ -113,8 +114,8 @@ def test_new_finding_uses_next_id_after_existing_maximum(tmp_path: Path) -> None
     ledger = tmp_path / "findings.tsv"
     ledger.write_text(
         HEADER
-        + "F0001\tminor\t1\t1\tpresent\told A\n"
-        + "F0004\tmajor\t1\t1\tpresent\told B\n",
+        + "F0001\tminor\t1\t1\tpresent\tunresolved\told A\n"
+        + "F0004\tmajor\t1\t1\tpresent\tunresolved\told B\n",
         encoding="utf-8",
     )
     write_review(review, minor=("new C",))
@@ -192,4 +193,4 @@ def test_literal_tab_is_normalized_to_one_space(tmp_path: Path) -> None:
     rows = read_ledger(ledger)
     assert len(rows) == 1
     assert rows[0]["text"] == "path message"
-    assert len(ledger.read_text(encoding="utf-8").splitlines()[1].split("\t")) == 6
+    assert len(ledger.read_text(encoding="utf-8").splitlines()[1].split("\t")) == 7

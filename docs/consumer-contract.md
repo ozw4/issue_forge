@@ -418,16 +418,23 @@ major:
 
 minor:
 - ...
+
+verification:
+- none
 ```
 
-- validated Issue reviews publish the current Issue ledger at `.work/codex/findings.tsv`; validated batch reviews publish their source-of-truth ledger at `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` and copy it to `.work/queue/batches/<batch>/findings.tsv` for compatibility; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `text`
+- validated Issue reviews publish the current Issue ledger at `.work/codex/findings.tsv`; validated batch reviews publish their source-of-truth ledger at `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` and copy it to `.work/queue/batches/<batch>/findings.tsv` for compatibility; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `resolution`, `text`
 - finding IDs are ledger-local `FNNNN` sequences; an ID is reused only when normalized finding text matches exactly across rounds, where normalization removes the leading bullet marker, removes a trailing CR, and replaces each literal tab with one space
-- findings absent from the current round remain in the ledger as `not_observed`; this does not mean `resolved`, and current review acceptance does not consult the ledger
+- `status` records observation (`present` or `not_observed`), while `resolution` records lifecycle state (`unresolved`, `resolved`, or `invalid`); new and reappearing findings are `unresolved`
+- before a fix, current `present` and `unresolved` findings are written to `pending-findings.tsv`; the Fixer must report one `fixed`, `false_positive`, or `cannot_fix` action per pending ID in `fix-resolution.tsv`
+- a Fixer action is only a claim and never closes a finding; the next Reviewer must return one `resolved`, `invalid`, or `unresolved` verification per reported ID, and an unresolved verification must repeat the exact ledger text in the current finding sections
+- findings absent from the current round remain as `not_observed`; resolved or invalid findings that reappear with the same normalized text retain their ID and return to `unresolved`
 - each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule; batch source history is run-owned and is then copied to the compatibility history path
+- Issue lifecycle artifacts are `.work/codex/pending-findings.tsv`, `.work/codex/fix-resolution.tsv`, `.work/codex/history/fix-resolution.round-NN.tsv`, and `.work/codex/review-verification.tsv`; batch source artifacts use the corresponding names below `.work/queue/runs/<run_id>/batches/<batch>/`, with compatibility copies below `.work/queue/batches/<batch>/`
 - resuming a queue run continues that run's ledger, while a different run over the same batch range starts a separate ledger and never reads the compatibility copy as finding state
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
-- `accept: no` remains allowed
+- `accept: no` remains allowed; acceptance still uses the current review finding sections rather than scanning the full ledger
 - raw Codex review logs remain byte-for-byte debugging artifacts; before extracting and validating `.work/codex/review.txt` or batch review output, only the exact known `[codex]` launcher progress lines and Codex runtime/session log lines matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:` are ignored
 - pure review output must still start with `accept: yes` or `accept: no`; for recognizable `codex exec` transcript output, the engine extracts the last valid structured review block and drops transcript headers, prompt text, tool calls, token summaries, duplicated review blocks, and runtime session logs
 - arbitrary non-review text before or after a pure structured review remains malformed output
