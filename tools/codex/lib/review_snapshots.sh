@@ -39,8 +39,8 @@ _review_snapshot_current_state() {
   fi
   if ! {
     GIT_INDEX_FILE="$temporary_index" \
-      git ls-files -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
-    git ls-files -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
+      git ls-files -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" &&
+    git ls-files -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" &&
     git ls-files --others --exclude-standard -z -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}"
   } > "$pathspec_file"; then
     _review_snapshot_cleanup_temporary_index "$temporary_directory" "$temporary_index" || true
