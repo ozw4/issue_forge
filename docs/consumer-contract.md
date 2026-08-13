@@ -186,6 +186,18 @@ Checks behavior:
 - the checks hook must be non-interactive and validation-only
 - `tools/consumer/init.sh --scaffold-checks` can create a minimal consumer-owned starter at that default path; the starter runs `shellcheck -x` for changed shell files and `pytest -q` for Python-related changes only
 
+Each checks invocation is authoritative as an immutable, snapshot-bound attempt. A standalone Issue flow stores attempts below `.work/codex/check-attempts/issue-checks/` and rows in `.work/codex/checks.manifest.tsv`. An attempt is created as `attempt-NNNN.running/`, captures the existing review-snapshot schema immediately before execution, and is renamed once to `attempt-NNNN/` only after `request.state`, `snapshot.state`, ordered `argv.tsv`, `combined.log`, `result.state`, and `artifacts.sha256` are complete. Existing terminal and `.running` directories are never overwritten; later execution uses the next ID.
+
+`request.state` schema version 1 binds `check_id`, Issue or Batch scope and identity, `issue-checks` or `batch-checks` operation, round, attempt ID, `consumer-hook` kind, `consumer-check-hook` requirement, fixed base commit, a SHA-256 fingerprint of the excluded-path-aware porcelain status, and start timestamp. The status fingerprint supplements rather than replaces the existing review snapshot and detects staging-only changes whose worktree tree is unchanged. `argv.tsv` records the configured checks executable as argv index 0 and the base commit as argv index 1 without parsing a command string. Literal tabs, CR, and LF are rejected. `result.state` schema version 1 records `passed`, `failed`, `interrupted`, or `invalid`, process exit status and signal classification, start/finish/duration, snapshot match, and the combined-log SHA-256. Only exit 0 with an unchanged snapshot and status fingerprint is `passed`; 130 and 143 are `interrupted`; any tracked, staged, or untracked repository change outside the standard exclusions is `invalid` even when the command exits 0. The engine does not revert a mutating check.
+
+The strict checks manifest columns are:
+
+```text
+check_id\tscope\tscope_id\toperation\tround\tattempt_id\tkind\trequirement_id\tbase_commit\tsnapshot_head\tsnapshot_tree\tstatus\texit_status\tsignal\tstarted_at\tfinished_at\tduration_ms\tlog_path\tlog_sha256
+```
+
+Manifest publication uses a sibling temporary file and atomic rename. Readers reject malformed headers, column counts, enums, timestamps, hashes, non-normalized repository-relative paths, duplicate check/attempt identities, missing terminal directories, mismatched request/result/snapshot fields, and log or artifact hash drift. `.running` attempts are not manifest rows. `.work/codex/checks.log` remains a compatibility and PR-summary view, atomically copied only from a terminal `combined.log`; check round history is copied from that same immutable log. Neither legacy file is the source of truth for pass/fail or provenance.
+
 ## 8. PR Publish Behavior
 
 PR publishing uses one shared engine helper for full flow publishing and `make_pr_only.sh`.
@@ -256,7 +268,7 @@ CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_fo
 
 `CODEX_FLOW_SKIP_PUBLISH=1` keeps the normal issue implementation, checks, review, fix loops, and commit behavior, but skips the issue branch push and issue PR creation. Queue mode derives `CODEX_FLOW_LIGHT_ISSUE_REVIEW` from `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` for each per-issue flow: non-zero sets `1`, so `.work/codex/review.prompt.md` is rendered from `review-light.prompt.md.tmpl`; `0` sets `0`, so full strict per-issue review is used even if the parent environment already has `CODEX_FLOW_LIGHT_ISSUE_REVIEW=1`. Single-issue flow remains strict unless the caller explicitly sets `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for that invocation.
 
-After each issue, `.work/codex` is archived authoritatively under `.work/queue/runs/<run_id>/archives/batch-<first>-<last>/issues/<issue>/<commit>/`. The archive contains `codex/` plus an ownership/content manifest with the exact run, batch, Issue, commit, and sorted SHA-256 hashes. `.work/queue/batches/batch-<first>-<last>/issues/<issue>/codex/` is only a non-authoritative compatibility copy. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`. `issues.txt` is rebuilt atomically in immutable manifest order from hashed run-owned Issue contexts; it is never trusted as incrementally appended state.
+After each issue, `.work/codex` is archived authoritatively under `.work/queue/runs/<run_id>/archives/batch-<first>-<last>/issues/<issue>/<commit>/`. The archive contains `codex/` plus an ownership/content manifest with the exact run, batch, Issue, commit, and sorted SHA-256 hashes. Run-owned Issue check provenance remains below `batches/<batch>/check-attempts/issue-<issue>/` and `batches/<batch>/checks/issue-<issue>.manifest.tsv`; a validated copy of its attempts and manifest is included below the authoritative Issue archive's `codex/`. `.work/queue/batches/batch-<first>-<last>/issues/<issue>/codex/` is only a non-authoritative compatibility copy. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`. Authoritative Batch check provenance lives below the run-owned Batch state as `check-attempts/batch/` and `checks/batch.manifest.tsv`, not only in the compatibility Batch directory. `issues.txt` is rebuilt atomically in immutable manifest order from hashed run-owned Issue contexts; it is never trusted as incrementally appended state.
 
 Every queue-owned Codex invocation also records an immutable Agent attempt below `.work/queue/runs/<run_id>/batches/<batch_id>/attempts/`. Issue operations use `issue-<issue_number>/<operation>/attempt-NNNN/`; batch operations use `batch/<operation>/attempt-NNNN/`. Each terminal attempt contains `request.state`, the exact `prompt.md`, the combined stdout/stderr `agent.log`, and `result.state`. A process that stops before terminal finalization may leave `attempt-NNNN.running/`; later invocations preserve it and allocate a new attempt ID. Terminal attempt directories are never overwritten. Existing `.work/codex` and batch legacy log paths remain available as compatibility views: logs using the `combined` policy receive `agent.log`, while Issue and batch raw review logs using the `stdout` policy receive stdout only. A standalone `run_issue_flow.sh` invocation does not enable the attempt store by default.
 
@@ -317,6 +329,8 @@ Every externally visible queue phase records `before` and `after` checkpoints. I
 When batch review accepts, the exact branch head is saved as `accepted_head`. Accepted, publishing, and completed paths require both the local branch and publication input to remain at that SHA; resume never replaces it with current `HEAD`.
 
 Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
+
+Issue and Batch checks use the same check-attempt helper and schema. Queue resume preserves run-owned `.running` attempts and allocates the next ID. Issue archive publication validates the copied checks manifest and every terminal artifact in addition to hashing them in `archive.manifest`. Completed-Batch integrity validation revalidates the authoritative Batch checks manifest and terminal artifacts before the next Git boundary or finalization.
 
 If batch review returns `accept: no`, Codex runs in write mode with the batch review fix prompt, commits any resulting changes, reruns batch checks, and reruns batch review. `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` and `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` bound the loops.
 
@@ -388,6 +402,8 @@ The following remain part of the v1 behavior contract:
 - `.work/codex/review.prompt.md`
 - `.work/codex/fix-from-review.prompt.md`
 - `.work/codex/checks.log`
+- `.work/codex/checks.manifest.tsv`
+- `.work/codex/check-attempts/issue-checks/attempt-NNNN[.running]/`
 - `.work/codex/implementation.log`
 - `.work/codex/fix-from-checks.log`
 - `.work/codex/review.diff`

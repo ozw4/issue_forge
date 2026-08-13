@@ -2393,6 +2393,15 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review.prompt.md"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.prompt.md"
   assert_file_exists "${repo_dir}/.work/codex/checks.log"
+  assert_file_exists "${repo_dir}/.work/codex/checks.manifest.tsv"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/request.state"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/snapshot.state"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/argv.tsv"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/combined.log"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/result.state"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/artifacts.sha256"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0002/result.state"
+  assert_file_exists "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0003/result.state"
   assert_file_exists "${repo_dir}/.work/codex/implementation.log"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-checks.log"
   assert_file_exists "${repo_dir}/.work/codex/review.diff"
@@ -2406,6 +2415,31 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review-verification.tsv"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.log"
   assert_file_exists "${repo_dir}/.work/codex/token-usage.tsv"
+
+  assert_equals \
+    $'check_id\tscope\tscope_id\toperation\tround\tattempt_id\tkind\trequirement_id\tbase_commit\tsnapshot_head\tsnapshot_tree\tstatus\texit_status\tsignal\tstarted_at\tfinished_at\tduration_ms\tlog_path\tlog_sha256' \
+    "$(head -n 1 "${repo_dir}/.work/codex/checks.manifest.tsv")" \
+    'Issue checks manifest header'
+  assert_equals 3 "$(tail -n +2 "${repo_dir}/.work/codex/checks.manifest.tsv" | wc -l)" 'Issue checks manifest terminal row count'
+  assert_file_contains "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/result.state" $'status\tfailed'
+  assert_file_contains "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0002/result.state" $'status\tpassed'
+  assert_file_contains "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0003/result.state" $'status\tpassed'
+  assert_files_equal \
+    "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0003/combined.log" \
+    "${repo_dir}/.work/codex/checks.log" \
+    'Issue legacy checks log from terminal attempt'
+  assert_files_equal \
+    "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0001/combined.log" \
+    "${repo_dir}/.work/codex/history/checks.round-01.log" \
+    'Issue checks round 1 history from immutable attempt'
+  assert_files_equal \
+    "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0002/combined.log" \
+    "${repo_dir}/.work/codex/history/checks.round-02.log" \
+    'Issue checks round 2 history from immutable attempt'
+  assert_files_equal \
+    "${repo_dir}/.work/codex/check-attempts/issue-checks/attempt-0003/combined.log" \
+    "${repo_dir}/.work/codex/history/checks.round-03.log" \
+    'Issue checks round 3 history from immutable attempt'
 
   assert_file_exists "${repo_dir}/.work/codex/history/implementation.round-00.log"
   assert_file_exists "${repo_dir}/.work/codex/history/checks.round-01.log"
@@ -3093,7 +3127,7 @@ run_issue_queue_strict_issue_review_smoke() {
       CODEX_FLOW_QUEUE_TEST_RUNNER_LABEL=completion-sigkill \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume current
   ) > "${queue_log}" 2>&1 & queue_job=$!
-  for ((attempt = 0; attempt < 2000; attempt += 1)); do
+  for ((attempt = 0; attempt < 4000; attempt += 1)); do
     [[ -f "$pause/paused.after_run_completed_before_current_cleanup.completion-sigkill" ]] && break
     sleep 0.01
   done
@@ -3985,7 +4019,7 @@ run_queue_entity_integrity_smoke() {
   queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-cross-issue.log"; cp "$manifest_backup" "${archive}/archive.manifest"
   sed -i "s/^commit_sha.*/commit_sha$(printf '\t')0000000000000000000000000000000000000000/" "${archive}/archive.manifest"
   queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-wrong-commit.log"; cp "$manifest_backup" "${archive}/archive.manifest"
-  missing_file="$(find "${archive}/codex" -type f | head -n 1)"; cp "$missing_file" "${state_dir}/archive-76.missing"; rm "$missing_file"
+  missing_file="$(find "${archive}/codex" -type f -print -quit)"; cp "$missing_file" "${state_dir}/archive-76.missing"; rm "$missing_file"
   queue_resume_failure "$run" 'content manifest does not match' "${state_dir}/queue-archive-partial.log"
   cp "${state_dir}/archive-76.missing" "$missing_file"
   queue_resume_success "$run" "${state_dir}/queue-archive-tamper.repaired.log"
@@ -4097,6 +4131,10 @@ run_issue_queue_smoke() {
   local run_dir
   local run_batch_dir
   local attempts_dir
+  local check_attempts_dir
+  local batch_checks_manifest
+  local issue_state_file
+  local issue_archive
 
   log 'running issue queue smoke'
   clear_command_logs
@@ -4200,6 +4238,8 @@ run_issue_queue_smoke() {
   run_dir="${run_dir%/manifest.state}"
   run_batch_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   attempts_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts"
+  check_attempts_dir="${run_batch_dir}/check-attempts"
+  batch_checks_manifest="${run_batch_dir}/checks/batch.manifest.tsv"
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
   assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
   assert_file_contains "${run_dir}/manifest.state" $'batch_review_reasoning\tqueue_review'
@@ -4215,6 +4255,40 @@ run_issue_queue_smoke() {
   assert_file_exists "${run_batch_dir}/history/findings.round-01.tsv"
   assert_file_exists "${run_batch_dir}/history/findings.round-02.tsv"
   assert_file_exists "${run_batch_dir}/history/fix-resolution.round-01.tsv"
+  assert_file_exists "$batch_checks_manifest"
+  assert_file_exists "${check_attempts_dir}/batch/batch-checks/attempt-0001/argv.tsv"
+  assert_file_exists "${check_attempts_dir}/batch/batch-checks/attempt-0001/combined.log"
+  assert_file_exists "${check_attempts_dir}/batch/batch-checks/attempt-0001/result.state"
+  assert_file_exists "${check_attempts_dir}/batch/batch-checks/attempt-0002/result.state"
+  assert_equals 2 "$(tail -n +2 "$batch_checks_manifest" | wc -l)" 'Batch checks manifest terminal row count'
+  assert_file_contains "$batch_checks_manifest" $'batch\tbatch-41-40\tbatch-checks'
+  assert_file_contains "${check_attempts_dir}/batch/batch-checks/attempt-0001/result.state" $'status\tpassed'
+  assert_files_equal \
+    "${check_attempts_dir}/batch/batch-checks/attempt-0002/combined.log" \
+    "${batch_dir}/checks.log" \
+    'Batch legacy checks log from terminal attempt'
+  assert_files_equal \
+    "${check_attempts_dir}/batch/batch-checks/attempt-0002/combined.log" \
+    "${batch_dir}/history/batch-checks.round-01.log" \
+    'Batch checks history from immutable attempt'
+  issue_state_file="${run_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}.state"
+  issue_archive="${repo_dir}/$(awk -F '\t' '$1 == "artifact_path" { print $2 }' "$issue_state_file")/codex"
+  assert_file_exists "${issue_archive}/checks.manifest.tsv"
+  assert_file_exists "${issue_archive}/check-attempts/issue-checks/attempt-0001/result.state"
+  assert_file_contains \
+    "${issue_archive%/codex}/archive.manifest" \
+    "$(sha256sum "${issue_archive}/checks.manifest.tsv" | awk '{print $1}')$(printf '\t')codex/checks.manifest.tsv"
+  assert_file_contains \
+    "${issue_archive%/codex}/archive.manifest" \
+    "$(sha256sum "${issue_archive}/check-attempts/issue-checks/attempt-0001/combined.log" | awk '{print $1}')$(printf '\t')codex/check-attempts/issue-checks/attempt-0001/combined.log"
+  assert_files_equal \
+    "${run_batch_dir}/checks/issue-${QUEUE_ISSUE_NUMBER}.manifest.tsv" \
+    "${issue_archive}/checks.manifest.tsv" \
+    'Issue archive checks manifest copy'
+  assert_files_equal \
+    "${check_attempts_dir}/issue-${QUEUE_ISSUE_NUMBER}/issue-checks/attempt-0001/combined.log" \
+    "${issue_archive}/check-attempts/issue-checks/attempt-0001/combined.log" \
+    'Issue archive immutable check attempt copy'
   assert_files_equal "${run_batch_dir}/findings.tsv" "${batch_dir}/findings.tsv" 'batch finding ledger compatibility copy'
   assert_files_equal "${run_batch_dir}/history/findings.round-01.tsv" "${batch_dir}/history/findings.round-01.tsv" 'batch finding history compatibility copy'
   assert_files_equal "${run_batch_dir}/pending-findings.tsv" "${batch_dir}/pending-findings.tsv" 'batch pending finding compatibility copy'

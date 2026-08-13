@@ -10,6 +10,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 # shellcheck source=tools/codex/lib/finding_ledger.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_ledger.sh"
+# shellcheck source=tools/codex/lib/check_attempts.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
 
 generate_review_material() {
   local has_material=0
@@ -52,12 +54,25 @@ run_checks_round() {
   round="$checks_run_round"
   base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
-  set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
-  status=$?
-  set -e
+  if run_check_attempt \
+    "$CODEX_FLOW_CHECK_ATTEMPTS_ROOT" \
+    "$CODEX_FLOW_CHECKS_MANIFEST" \
+    "$checks_log" \
+    issue \
+    "$issue_number" \
+    issue-checks \
+    "$round" \
+    "$base_commit" \
+    "$CODEX_FLOW_CHECKS_COMMAND" \
+    "$base_commit"; then
+    status=0
+  else
+    status=$?
+  fi
 
-  archive_round_file "$checks_log" "checks" "$round" ".log"
+  if [[ -n "${CHECK_ATTEMPT_LAST_LOG:-}" && -f "$CHECK_ATTEMPT_LAST_LOG" ]]; then
+    archive_round_file "$CHECK_ATTEMPT_LAST_LOG" "checks" "$round" ".log"
+  fi
 
   return "$status"
 }
@@ -82,6 +97,22 @@ ensure_checks_pass() {
       log_info "checks passed"
       return 0
     fi
+
+    if [[ "${CHECK_ATTEMPT_LAST_PUBLISH_ERROR:-0}" -eq 1 ]]; then
+      log_fail_with_path 'checks completed but legacy log publication failed' "$CHECK_ATTEMPT_LAST_DIR"
+      return 1
+    fi
+
+    case "${CHECK_ATTEMPT_LAST_STATUS:-}" in
+      invalid)
+        log_fail_with_path 'checks changed the repository and were recorded as invalid' "$CHECK_ATTEMPT_LAST_DIR"
+        return 1
+        ;;
+      interrupted)
+        log_fail_with_path 'checks were interrupted' "$CHECK_ATTEMPT_LAST_DIR"
+        return "${CHECK_ATTEMPT_LAST_EXIT_STATUS:-1}"
+        ;;
+    esac
 
     if [[ "$fix_round" -ge "$CODEX_FLOW_MAX_CHECK_FIX_ROUNDS" ]]; then
       log_fail_with_path "checks failed after ${CODEX_FLOW_MAX_CHECK_FIX_ROUNDS} fix rounds" "$checks_log"

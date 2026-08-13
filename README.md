@@ -249,6 +249,11 @@ single-Issue flow の主要 artifacts は次のとおりです。
 │  ├─ review.prompt.md
 │  ├─ fix-from-review.prompt.md
 │  ├─ checks.log
+│  ├─ checks.manifest.tsv
+│  ├─ check-attempts/
+│  │  └─ issue-checks/
+│  │     ├─ attempt-NNNN.running/
+│  │     └─ attempt-NNNN/
 │  ├─ implementation.log
 │  ├─ fix-from-checks.log
 │  ├─ review.diff
@@ -284,6 +289,10 @@ minor:
 Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
 
 `.work` と consumer-local `vendor/issue_forge` は git discovery、diff、staging、clean から engine が明示的に除外します。`.gitignore` は local hygiene のための追加措置です。
+
+Issue checks は `.work/codex/check-attempts/issue-checks/attempt-NNNN/` に request、既存形式の review snapshot、exact argv、combined log、result、artifact hashes を terminal attempt として保存します。`.work/codex/checks.manifest.tsv` が合否と provenance の source of truth です。`.work/codex/checks.log` と `history/checks.round-NN.log` は terminal attempt の `combined.log` から atomic に公開する compatibility view です。
+
+Queue では Issue check attempt を run-owned Batch state の `check-attempts/issue-<issue>/` と `checks/issue-<issue>.manifest.tsv` に保持し、Issue archive の `codex/` に self-contained copy を含めます。Batch checks は同じ helper を使い、run-owned Batch state の `check-attempts/batch/` と `checks/batch.manifest.tsv` を authoritative store にします。`.work/queue/batches/<batch>/checks.log` と round history は従来どおり残ります。
 
 ## PR publishing
 

@@ -71,6 +71,9 @@ def create_completed_batch_fixture(repo: Path, *, run_state: str, include_second
     archive_manifest.write_text("complete archive\n", encoding="utf-8")
 
     batch_dir = run_dir / "batches" / "batch-1-1"
+    check_manifest = batch_dir / "checks" / "batch.manifest.tsv"
+    check_manifest.parent.mkdir(parents=True, exist_ok=True)
+    check_manifest.write_text("complete batch checks\n", encoding="utf-8")
     write_state(
         batch_dir / "batch.state",
         run_id=run_id,
@@ -152,6 +155,9 @@ validate_issue_archive() {{
   actual="$(sha256sum "$manifest" | awk '{{print $1}}')"
   [[ "$actual" == "$expected" ]]
 }}
+check_attempt_validate_store() {{
+  [[ -f "$2" && ! -L "$2" && "$(< "$2")" == "complete batch checks" ]]
+}}
 run_id=run-integrity
 current_batch_id=batch-2-2
 run_state_dir={shlex.quote(str(run_dir))}
@@ -196,3 +202,17 @@ def test_completed_batch_archive_is_checked_before_next_batch_git_boundary(tmp_p
     rejected = invoke_integrity_boundary(repo, run_dir, "git switch --detach HEAD")
     assert rejected.returncode != 0
     assert "Issue 1 authoritative archive is missing or changed" in rejected.stderr
+
+
+def test_completed_batch_check_provenance_is_checked_at_git_boundary(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    run_dir, _context, _archive_manifest = create_completed_batch_fixture(
+        repo, run_state="completed", include_second_batch=False
+    )
+    check_manifest = run_dir / "batches/batch-1-1/checks/batch.manifest.tsv"
+
+    check_manifest.write_text("tampered\n", encoding="utf-8")
+    rejected = invoke_integrity_boundary(repo, run_dir, "git config --get remote.origin.url")
+
+    assert rejected.returncode != 0
+    assert "batch batch-1-1 check provenance is missing or changed" in rejected.stderr

@@ -19,6 +19,7 @@ Covered behavior includes:
 - Codex token usage TSV artifacts are initialized for single-issue and batch flows, and token counts are recorded when Codex logs include a `tokens used` block
 - queue mode defaults to a light per-issue review prompt and retains strict final batch review
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
+- Issue and Batch checks share one immutable check-attempt helper; strict manifests bind exact argv, fixed base, review snapshot, exit/signal result, and combined-log hash while legacy checks logs remain atomic compatibility views
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
 - `CODEX_FLOW_SKIP_PUBLISH=1` keeps issue-flow commits while skipping branch push and issue PR creation
 - the direct vendor issue queue processes issues sequentially in input order on one batch branch, archives per-issue Codex artifacts, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, and fails before modification when multiple batches are requested without `--auto-merge`
@@ -115,6 +116,12 @@ Starting a new standalone Issue through `start_from_issue.sh` removes the previo
 Validated batch reviews use `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` as the source of truth. A resume continues the same run-owned ledger; another run over the same batch range starts a separate ledger. After each round, the engine copies the current ledger and that round's history to `.work/queue/batches/<batch>/findings.tsv` and `.work/queue/batches/<batch>/history/findings.round-NN.tsv` for compatibility, but never reads those copies as finding state.
 
 The run-owned Batch directory also stores `review-lifecycle.state` (schema version 1) with the logical review/fix rounds, the next `review`, `fix`, or `complete` action, and an update timestamp. Resume follows that state, so a completed fix continues with the next review and a completed review does not rerun before the outer queue checkpoint is written. If a review fix commit became durable before lifecycle publication, resume adopts the expected linear review/check-fix commit frontier only with a clean worktree and run-owned resolution history, reruns checks without rerunning the Fixer, and then advances to the next review. This is Batch-review control state, separate from Agent attempts and finding data; it has no compatibility copy and does not alter queue state schema version 3.
+
+## Check Attempts
+
+Standalone Issue checks store terminal attempts at `.work/codex/check-attempts/issue-checks/attempt-NNNN/` and the strict TSV index at `.work/codex/checks.manifest.tsv`. Queue Issue attempts are authoritative at `.work/queue/runs/<run_id>/batches/<batch>/check-attempts/issue-<issue>/`; their manifests are `checks/issue-<issue>.manifest.tsv`, and validated copies are included in the run-owned Issue archive. Batch attempts use the sibling `check-attempts/batch/` store and `checks/batch.manifest.tsv`.
+
+An unfinished `.running` directory is preserved but never indexed as terminal. Resume scans both terminal and `.running` IDs and allocates the next sequence. Terminal `combined.log` is the only input for atomic legacy `checks.log` publication and check history. The manifest and terminal artifacts, rather than the legacy log, determine the latest structured result. Checks are snapshot-verified as read-only operations using the same exclusions as review snapshots; a repository mutation produces `status=invalid` and is left intact for operator inspection.
 
 Both ledger types use the TSV columns `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `resolution`, and `text`. IDs are ledger-local sequences starting at `F0001` and are reused only for exact normalized-text matches. Normalization removes the leading review bullet marker and a trailing CR, and replaces each literal tab with one space; category tags remain part of batch finding text.
 

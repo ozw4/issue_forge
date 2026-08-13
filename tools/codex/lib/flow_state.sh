@@ -352,6 +352,7 @@ queue_completed_batch_validation_ready() {
   declare -F queue_state_validate_file >/dev/null 2>&1 || return 1
   declare -F validate_durable_issue_context >/dev/null 2>&1 || return 1
   declare -F validate_issue_archive >/dev/null 2>&1 || return 1
+  declare -F check_attempt_validate_store >/dev/null 2>&1 || return 1
 }
 
 queue_validate_completed_batches_integrity() {
@@ -466,6 +467,12 @@ queue_validate_completed_batches_integrity() {
       expected_frontier="$commit"
       start=$((start + 1))
     done
+
+    check_attempt_validate_store \
+      "${run_state_dir}/batches/${batch_id}/check-attempts/batch" \
+      "${run_state_dir}/batches/${batch_id}/checks/batch.manifest.tsv" \
+      || queue_completed_batch_integrity_error "batch ${batch_id} check provenance is missing or changed" \
+      || return 1
 
     command git cat-file -e "${accepted_head}^{commit}" 2>/dev/null \
       || queue_completed_batch_integrity_error "accepted head ${accepted_head} for ${batch_id} is not a commit" \

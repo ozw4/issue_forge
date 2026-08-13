@@ -109,6 +109,9 @@ mkdir -p "$CODEX_FLOW_CODEX_DIR"
 mkdir -p "$CODEX_FLOW_CODEX_HISTORY_DIR"
 initialize_issue_token_usage_tsv
 
+CODEX_FLOW_CHECK_ATTEMPTS_ROOT="${CODEX_FLOW_CHECK_ATTEMPTS_ROOT:-${CODEX_FLOW_CODEX_DIR}/check-attempts}"
+CODEX_FLOW_CHECKS_MANIFEST="${CODEX_FLOW_CHECKS_MANIFEST:-${CODEX_FLOW_CODEX_DIR}/checks.manifest.tsv}"
+
 implement_prompt="${CODEX_FLOW_CODEX_DIR}/implementation.prompt.md"
 fix_checks_prompt="${CODEX_FLOW_CODEX_DIR}/fix-from-checks.prompt.md"
 review_prompt="${CODEX_FLOW_CODEX_DIR}/review.prompt.md"

@@ -6,6 +6,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 # shellcheck source=tools/codex/lib/agent_attempts.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent_attempts.sh"
+# shellcheck source=tools/codex/lib/check_attempts.sh
+if ! declare -F run_check_attempt >/dev/null 2>&1; then
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
+fi
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -74,12 +78,27 @@ run_codex_batch_read() {
 run_batch_checks_once() {
   local base_commit="$1"
   local checks_log="$2"
+  local round="$3"
+  local batch_id="$4"
+  local attempts_root="$5"
+  local manifest_file="$6"
   local status
 
-  set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
-  status=$?
-  set -e
+  if run_check_attempt \
+    "$attempts_root" \
+    "$manifest_file" \
+    "$checks_log" \
+    batch \
+    "$batch_id" \
+    batch-checks \
+    "$round" \
+    "$base_commit" \
+    "$CODEX_FLOW_CHECKS_COMMAND" \
+    "$base_commit"; then
+    status=0
+  else
+    status=$?
+  fi
 
   return "$status"
 }
@@ -92,23 +111,52 @@ ensure_batch_checks_pass() {
   local last_issue="$5"
   local issues_label="$6"
   local check_fix_effort="$7"
+  local batch_state_dir="$8"
+  local batch_id
   local checks_log="${batch_dir}/checks.log"
   local fix_checks_prompt="${batch_dir}/fix-from-batch-checks.prompt.md"
   local fix_checks_log="${batch_dir}/fix-from-batch-checks.log"
   local fix_round=0
   local history_dir="${batch_dir}/history"
+  local attempts_root="${batch_state_dir}/check-attempts/batch"
+  local manifest_file="${batch_state_dir}/checks/batch.manifest.tsv"
+  local check_round
+
+  batch_id="$(basename "$batch_state_dir")"
 
   mkdir -p "$history_dir"
 
   while true; do
     log_info 'running batch checks'
-    if run_batch_checks_once "$base_commit" "$checks_log"; then
-      archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
+    check_round=$((fix_round + 1))
+    if run_batch_checks_once "$base_commit" "$checks_log" "$check_round" "$batch_id" "$attempts_root" "$manifest_file"; then
+      archive_round_file "$CHECK_ATTEMPT_LAST_LOG" 'batch-checks' "$check_round" '.log'
       log_info 'batch checks passed'
       return 0
     fi
 
-    archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
+    if [[ -n "${CHECK_ATTEMPT_LAST_LOG:-}" && -f "$CHECK_ATTEMPT_LAST_LOG" ]]; then
+      archive_round_file "$CHECK_ATTEMPT_LAST_LOG" 'batch-checks' "$check_round" '.log'
+    fi
+
+    if [[ "${CHECK_ATTEMPT_LAST_PUBLISH_ERROR:-0}" -eq 1 ]]; then
+      printf '[queue] batch checks completed but legacy log publication failed\n' >&2
+      printf '[queue] see attempt: %s\n' "$CHECK_ATTEMPT_LAST_DIR" >&2
+      return 1
+    fi
+
+    case "${CHECK_ATTEMPT_LAST_STATUS:-}" in
+      invalid)
+        printf '[queue] batch checks changed the repository and were recorded as invalid\n' >&2
+        printf '[queue] see attempt: %s\n' "$CHECK_ATTEMPT_LAST_DIR" >&2
+        return 1
+        ;;
+      interrupted)
+        printf '[queue] batch checks were interrupted\n' >&2
+        printf '[queue] see attempt: %s\n' "$CHECK_ATTEMPT_LAST_DIR" >&2
+        return "${CHECK_ATTEMPT_LAST_EXIT_STATUS:-1}"
+        ;;
+    esac
 
     if [[ "$fix_round" -ge "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" ]]; then
       printf '[queue] batch checks failed after %s fix rounds\n' "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" >&2
@@ -507,7 +555,7 @@ ensure_batch_review_accepted() {
         fi
 
         if [[ "$run_fix_checks" -eq 1 ]]; then
-          ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
+          ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort" "$batch_state_dir"
           if declare -F queue_failpoint >/dev/null 2>&1; then
             queue_failpoint after_batch_review_fix_checks
           fi

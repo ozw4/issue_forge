@@ -942,7 +942,7 @@ rebuild_batch_issues_file() {
 }
 
 generate_issue_archive_manifest() {
-  local root="$1" output="$2" issue_number="$3" batch_id="$4" commit_sha="$5" path relative hash
+  local root="$1" output_file="$2" issue_number="$3" batch_id="$4" commit_sha="$5" path relative hash
   [[ -d "${root}/codex" && ! -L "${root}/codex" ]] || return 1
   if find "${root}/codex" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then return 1; fi
   {
@@ -957,7 +957,7 @@ generate_issue_archive_manifest() {
         printf 'content_sha256\t%s\t%s\n' "$hash" "$relative"
       fi
     done < <(find "${root}/codex" -mindepth 1 -print | LC_ALL=C sort)
-  } > "$output"
+  } > "$output_file"
 }
 
 validate_issue_archive() {
@@ -968,6 +968,17 @@ validate_issue_archive() {
   generated="$(mktemp)"
   generate_issue_archive_manifest "$destination" "$generated" "$issue_number" "$batch_id" "$commit_sha" || { rm -f "$generated"; fail "Authoritative archive contains unsupported content for Issue ${issue_number}"; }
   cmp -s "$generated" "${destination}/archive.manifest" || { rm -f "$generated"; fail "Authoritative archive content manifest does not match Issue ${issue_number}"; }
+  [[ -d "${destination}/codex/check-attempts" && -f "${destination}/codex/checks.manifest.tsv" ]] || {
+    rm -f "$generated"
+    fail "Authoritative archive lacks check provenance for Issue ${issue_number}"
+  }
+  check_attempt_validate_store \
+    "${destination}/codex/check-attempts" \
+    "${destination}/codex/checks.manifest.tsv" \
+    1 || {
+      rm -f "$generated"
+      fail "Authoritative archive check provenance is invalid for Issue ${issue_number}"
+    }
   if [[ -n "$source" && -d "$source" ]]; then
     source_root="$(mktemp -d)"; mkdir "${source_root}/codex"; cp -R -- "${source}/." "${source_root}/codex/"
     source_manifest="$(mktemp)"
@@ -1076,6 +1087,8 @@ process_issue_on_batch_branch() {
   local issue_light_review=0
   local issue_state_file="${run_state_dir}/batches/${current_batch_id}/issues/${issue_number}.state"
   local issue_state commit_sha recorded_sha artifact_rel destination context_rel context_path context_hash archive_hash compatibility
+  local issue_check_attempts_root="${run_state_dir}/batches/${current_batch_id}/check-attempts/issue-${issue_number}"
+  local issue_checks_manifest="${run_state_dir}/batches/${current_batch_id}/checks/issue-${issue_number}.manifest.tsv"
 
   assert_queue_lease_owned || fail "Queue lease lost before Issue ${issue_number}"
   issue_state="$(queue_state_read_field "$issue_state_file" issue state)"
@@ -1146,10 +1159,25 @@ process_issue_on_batch_branch() {
       if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then issue_light_review=1; fi
       CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
         CODEX_FLOW_AGENT_ATTEMPTS_ROOT="${run_state_dir}/batches/${current_batch_id}/attempts/issue-${issue_number}" \
+        CODEX_FLOW_CHECK_ATTEMPTS_ROOT="$issue_check_attempts_root" \
+        CODEX_FLOW_CHECKS_MANIFEST="$issue_checks_manifest" \
         "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
       queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_flow after
       commit_sha="$(git rev-parse HEAD)"
       queue_failpoint after_issue_flow_commit
+    fi
+    if [[ ! -e "${CODEX_FLOW_CODEX_DIR}/check-attempts" && ! -e "${CODEX_FLOW_CODEX_DIR}/checks.manifest.tsv" ]]; then
+      publish_check_attempt_provenance_copy \
+        "$issue_check_attempts_root" \
+        "$issue_checks_manifest" \
+        "${CODEX_FLOW_CODEX_DIR}/check-attempts" \
+        "${CODEX_FLOW_CODEX_DIR}/checks.manifest.tsv" || \
+        fail "Cannot publish check provenance compatibility copy for Issue ${issue_number}"
+    else
+      check_attempt_validate_store \
+        "${CODEX_FLOW_CODEX_DIR}/check-attempts" \
+        "${CODEX_FLOW_CODEX_DIR}/checks.manifest.tsv" \
+        1 || fail "Issue ${issue_number} check provenance compatibility copy is invalid"
     fi
     queue_set_active_phase issue_commit_reconciliation; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "issue-${issue_number}" issue_commit_reconciliation before
     validate_exact_issue_commit "$issue_number" "$batch_branch" "$issue_base_commit" "$commit_sha"
@@ -1393,7 +1421,7 @@ process_batch_body() {
   if [[ "$batch_state" == checks_running ]]; then
     queue_set_active_phase batch_checks; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
     queue_failpoint fail_batch_checks
-    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
+    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort" "${run_state_dir}/batches/${batch_id}"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks after
     queue_state_transition "$batch_state_file" batch "$batch_id" checks_running review_running; batch_state=review_running
   fi
