@@ -2638,6 +2638,8 @@ run_issue_queue_failure_state_smoke() {
   local failure_log="${state_dir}/queue-forced-failure.log"
   local rejected_fresh_log="${state_dir}/queue-rejected-fresh.log"
   local failure_status
+  local failed_plan
+  local failed_queue_state
 
   log 'running issue queue forced failure state smoke'
   clear_command_logs
@@ -2669,17 +2671,22 @@ run_issue_queue_failure_state_smoke() {
   assert_file_not_contains "${state_dir}/gh.log" 'assignee'
   assert_file_not_contains "${state_dir}/gh.log" 'project'
 
+  failed_plan="$(< "${repo_dir}/.work/queue/plan.tsv")"
+  failed_queue_state="$(< "${repo_dir}/.work/queue/state.tsv")"
+  printf 'dirty after queue failure\n' >> "${repo_dir}/smoke-target.txt"
+
   if (
     cd "${repo_dir}"
     PATH="${stub_dir}:$PATH" \
-      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}"
   ) > "$rejected_fresh_log" 2>&1; then
     fail 'fresh queue should refuse to overwrite failed schema-v1 state'
   fi
   assert_file_contains "$rejected_fresh_log" 'Use --resume when resume support is available.'
-  assert_file_contains "${repo_dir}/.work/queue/plan.tsv" $'issue\t'"${ISSUE_NUMBER}"
-  assert_file_not_contains "${repo_dir}/.work/queue/plan.tsv" $'issue\t'"${QUEUE_ISSUE_NUMBER}"
-  assert_path_not_exists "${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
+  assert_file_not_contains "$rejected_fresh_log" 'Working tree must be clean'
+  assert_file_not_contains "$rejected_fresh_log" 'Local branch already exists'
+  assert_equals "$failed_plan" "$(< "${repo_dir}/.work/queue/plan.tsv")" 'failed queue plan is not replaced'
+  assert_equals "$failed_queue_state" "$(< "${repo_dir}/.work/queue/state.tsv")" 'failed queue state is not replaced'
   assert_path_not_exists "${repo_dir}/.work/queue/lock"
 }
 

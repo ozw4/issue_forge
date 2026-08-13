@@ -712,10 +712,10 @@ main() {
 
   enter_repo_root
   require_queue_prompt_templates
+  ensure_fresh_queue_state_allows_start
   ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
   ensure_planned_batch_branches_available
   create_queue_lock
-  ensure_fresh_queue_state_allows_start
   ensure_planned_batch_directories_available
   write_queue_plan
   initialize_planned_queue_artifacts
