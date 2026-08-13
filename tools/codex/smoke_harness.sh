@@ -2386,6 +2386,85 @@ run_issue_queue_fail_fast_smoke() {
   fi
 }
 
+run_queue_state_helper_smoke() {
+  local helper_root="${temp_root}/queue state helper"
+  local state_file="${helper_root}/state files/state.tsv"
+  local expected_file="${helper_root}/expected state.tsv"
+  local error_log="${helper_root}/reader-error.log"
+  local metadata_file="${helper_root}/metadata files/current_batch"
+  local empty_value
+  local temporary_file
+
+  log 'running queue state helper smoke'
+  mkdir -p "$helper_root"
+
+  # shellcheck source=tools/codex/lib/engine_defaults.sh
+  source "${REPO_ROOT}/tools/codex/lib/engine_defaults.sh"
+  # shellcheck source=tools/codex/lib/queue_state.sh
+  source "${REPO_ROOT}/tools/codex/lib/queue_state.sh"
+
+  assert_equals '.work/queue/plan.tsv' "$CODEX_FLOW_QUEUE_PLAN_FILE" 'default queue plan path'
+  assert_equals '.work/queue/state.tsv' "$CODEX_FLOW_QUEUE_STATE_FILE" 'default queue state path'
+
+  atomic_write_from_stdin "$metadata_file" <<'EOF'
+batch-41-42
+EOF
+  assert_equals 'batch-41-42' "$(< "$metadata_file")" 'atomic metadata value'
+
+  write_state_tsv "$state_file" \
+    status running \
+    phase batch \
+    current_batch batch-41-42 \
+    exit_code ''
+
+  {
+    printf 'schema_version\t1\n'
+    printf 'status\trunning\n'
+    printf 'phase\tbatch\n'
+    printf 'current_batch\tbatch-41-42\n'
+    printf 'exit_code\t\n'
+  } > "$expected_file"
+  assert_files_equal "$expected_file" "$state_file" 'initial queue state contents'
+
+  empty_value="$(read_state_tsv_value "$state_file" exit_code)"
+  assert_equals '' "$empty_value" 'empty queue state value'
+
+  write_state_tsv "$state_file" \
+    status complete \
+    exit_code 0
+
+  cat > "$expected_file" <<'EOF'
+schema_version	1
+status	complete
+exit_code	0
+EOF
+  assert_files_equal "$expected_file" "$state_file" 'replacement queue state contents'
+  assert_file_not_contains "$state_file" $'phase\tbatch'
+  assert_file_not_contains "$state_file" 'batch-41-42'
+
+  if read_state_tsv_value "$state_file" current_batch > /dev/null 2> "$error_log"; then
+    fail 'read_state_tsv_value should reject a missing required key'
+  fi
+  assert_file_contains "$error_log" 'Missing required queue state key'
+
+  if write_state_tsv "$state_file" status > /dev/null 2> "$error_log"; then
+    fail 'write_state_tsv should reject an odd key/value argument count'
+  fi
+  assert_file_contains "$error_log" 'write_state_tsv requires key/value argument pairs'
+
+  atomic_write_from_stdin "$state_file" <<'EOF'
+schema_version	2
+status	running
+EOF
+  if read_state_tsv_value "$state_file" status > /dev/null 2> "$error_log"; then
+    fail 'read_state_tsv_value should reject an unsupported schema version'
+  fi
+  assert_file_contains "$error_log" 'Unsupported queue state schema'
+
+  temporary_file="$(find "$helper_root" -type f -name '.*.tmp.*' -print -quit)"
+  assert_equals '' "$temporary_file" 'atomic queue state temporary files'
+}
+
 run_issue_queue_strict_issue_review_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
   local queue_log="${state_dir}/queue-strict-review.log"
@@ -2612,6 +2691,7 @@ main() {
   run_issue_flow_smoke
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
+  run_queue_state_helper_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
   run_issue_queue_strict_issue_review_smoke
