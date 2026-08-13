@@ -7,6 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly REPO_ROOT
 REAL_GIT="$(command -v git)"
 readonly REAL_GIT
+REAL_CP="$(command -v cp)"
+readonly REAL_CP
 readonly ISSUE_NUMBER=40
 readonly ISSUE_TITLE='Regression Harness Issue'
 readonly ISSUE_URL='https://example.test/issues/40'
@@ -734,6 +736,22 @@ assert_fixed_base_commit_usage() {
 }
 
 write_stub_binaries() {
+  cat > "${stub_dir}/cp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${SMOKE_FORCE_QUEUE_ARCHIVE_COPY_FAILURE:-0}" -ne 0 ]]; then
+  for argument in "\$@"; do
+    if [[ "\$argument" == '.work/codex/.' || "\$argument" == */.work/codex/. ]]; then
+      printf '%s\n' 'forced queue Codex archive copy failure' >&2
+      exit 43
+    fi
+  done
+fi
+
+exec "${REAL_CP}" "\$@"
+EOF
+
   cat > "${stub_dir}/git" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1078,7 +1096,7 @@ set -euo pipefail
 printf 'stub shellcheck ok\n'
 EOF
 
-  chmod +x "${stub_dir}/git" "${stub_dir}/gh" "${stub_dir}/codex" "${stub_dir}/shellcheck"
+  chmod +x "${stub_dir}/cp" "${stub_dir}/git" "${stub_dir}/gh" "${stub_dir}/codex" "${stub_dir}/shellcheck"
 }
 
 create_fixture_repo() {
@@ -2649,23 +2667,28 @@ run_issue_queue_failure_state_smoke() {
   (
     cd "${repo_dir}"
     PATH="${stub_dir}:$PATH" \
-      SMOKE_FORCE_QUEUE_FAILURE_ISSUE="${ISSUE_NUMBER}" \
+      SMOKE_FORCE_QUEUE_ARCHIVE_COPY_FAILURE=1 \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
       "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}"
   ) > "$failure_log" 2>&1
   failure_status="$?"
   set -e
 
-  assert_equals '42' "$failure_status" 'forced queue failure exit status'
-  assert_file_contains "$failure_log" "forced queue issue context failure for issue ${ISSUE_NUMBER}"
+  assert_equals '1' "$failure_status" 'forced queue archive failure exit status'
+  assert_file_contains "$failure_log" 'forced queue Codex archive copy failure'
+  assert_file_contains "$failure_log" "Failed to copy Codex artifacts for issue ${ISSUE_NUMBER}"
   assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'status\tfailed'
   assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'phase\tbatch'
-  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'exit_code\t42'
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'exit_code\t1'
   assert_file_contains "${batch_dir}/state.tsv" $'status\tfailed'
   assert_file_contains "${batch_dir}/state.tsv" $'phase\tissues'
-  assert_file_contains "${batch_dir}/state.tsv" $'exit_code\t42'
+  assert_file_contains "${batch_dir}/state.tsv" $'exit_code\t1'
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tfailed'
-  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tcontext'
-  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t42'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tarchive'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t1'
+  assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
+  assert_path_not_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex"
   assert_path_not_exists "${repo_dir}/.work/queue/lock"
   assert_file_not_contains "${state_dir}/gh.log" 'label'
   assert_file_not_contains "${state_dir}/gh.log" 'assignee'

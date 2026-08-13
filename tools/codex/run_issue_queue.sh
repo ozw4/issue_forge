@@ -545,6 +545,7 @@ process_issue_on_batch_branch() {
   ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
   issue_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
   write_atomic_value "${batch_dir}/issues/${issue_number}/head_commit" "$issue_head_commit"
+  write_issue_state "$batch_id" "$issue_number" leased archive ''
   archive_issue_codex_artifacts "$batch_dir" "$issue_number"
   write_issue_state "$batch_id" "$issue_number" committed batch ''
   write_batch_state "$batch_id" running issues '' ''
