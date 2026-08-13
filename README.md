@@ -201,6 +201,8 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
+fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きしません。`--resume` と `--requeue` はまだ未対応です。
+
 ## Issue zip import
 
 Markdown Issue files をまとめた zip から GitHub Issues を一括作成できます。この helper は `.work/`、branch、Codex flow、PR state を変更しません。
@@ -246,8 +248,23 @@ single-Issue flow の主要 artifacts は次のとおりです。
 │  ├─ token-usage.tsv
 │  └─ history/
 └─ queue/
+   ├─ plan.tsv
+   ├─ state.tsv
+   ├─ current_batch
    └─ batches/
       └─ batch-<first_issue>-<last_issue>/
+         ├─ state.tsv
+         ├─ branch
+         ├─ base_commit
+         ├─ head_commit
+         ├─ pr_number
+         ├─ pr_url
+         └─ issues/
+            └─ <issue>/
+               ├─ state.tsv
+               ├─ base_commit
+               ├─ head_commit
+               └─ codex/
 ```
 
 `review.txt` は次の schema を維持します。

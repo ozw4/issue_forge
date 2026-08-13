@@ -21,7 +21,7 @@ Covered behavior includes:
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
 - `CODEX_FLOW_SKIP_PUBLISH=1` keeps issue-flow commits while skipping branch push and issue PR creation
-- the direct vendor issue queue processes issues sequentially in input order on one batch branch, archives per-issue Codex artifacts, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, and fails before modification when multiple batches are requested without `--auto-merge`
+- the direct vendor issue queue processes issues sequentially in input order on one batch branch, persists its fresh plan and queue/batch/Issue lifecycle state, archives per-issue Codex artifacts atomically, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, records terminal success/failure, and fails before modification when multiple batches are requested without `--auto-merge`
 - PR publishing generates the deterministic body format, stores body-file contents from the `gh` stub, covers the create path, and covers existing PR title/body sync through `gh pr edit`
 - PR body assertions cover `Closes #<issue>`, summary, changed files, checks, review, checks/review artifacts when present, and `not available yet` when those artifacts are missing
 - the harness asserts that no GitHub workflow file is created

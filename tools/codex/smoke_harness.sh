@@ -803,6 +803,10 @@ flag_value() {
 
 if [[ "\$#" -ge 3 && "\$1" == "issue" && "\$2" == "view" ]]; then
   issue_number="\$3"
+  if [[ "\${SMOKE_FORCE_QUEUE_FAILURE_ISSUE:-}" == "\$issue_number" ]]; then
+    printf 'forced queue issue context failure for issue %s\n' "\$issue_number" >&2
+    exit 42
+  fi
   case "\$issue_number" in
     ${ISSUE_NUMBER})
       issue_title='${ISSUE_TITLE}'
@@ -2506,6 +2510,7 @@ run_issue_queue_strict_issue_review_smoke() {
 
 run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  local expected_plan="${state_dir}/expected-queue-plan.tsv"
   local queue_log="${state_dir}/queue.log"
 
   log 'running issue queue smoke'
@@ -2528,7 +2533,7 @@ run_issue_queue_smoke() {
   fi
 
   assert_equals "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" "$("${REAL_GIT}" -C "${repo_dir}" branch --show-current)" 'queue batch branch'
-  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} origin/main"
+  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} $(< "${batch_dir}/base_commit")"
   assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${QUEUE_ISSUE_NUMBER}"
   assert_file_not_contains "${state_dir}/git.log" "switch --create issue/${ISSUE_NUMBER}"
   assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
@@ -2540,11 +2545,45 @@ run_issue_queue_smoke() {
   assert_file_contains "${state_dir}/batch-pr-create-body.txt" "Closes #${ISSUE_NUMBER}"
   assert_file_contains "${state_dir}/batch-pr-create-body.txt" "#${QUEUE_ISSUE_NUMBER} ${QUEUE_ISSUE_TITLE}"
   assert_file_contains "${state_dir}/batch-pr-create-body.txt" "#${ISSUE_NUMBER} ${ISSUE_TITLE}"
+  assert_file_not_contains "${state_dir}/gh.log" 'label'
+  assert_file_not_contains "${state_dir}/gh.log" 'assignee'
+  assert_file_not_contains "${state_dir}/gh.log" 'project'
+
+  cat > "$expected_plan" <<EOF
+schema_version	1
+review_every	2
+batch_review_effort	queue_review
+batch_review_fix_effort	queue_fix
+batch_check_fix_effort	queue_fix
+draft_pr	0
+auto_merge	0
+issue	${QUEUE_ISSUE_NUMBER}
+issue	${ISSUE_NUMBER}
+EOF
+  assert_files_equal "$expected_plan" "${repo_dir}/.work/queue/plan.tsv" 'fresh queue plan'
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'phase\tdone'
+  assert_file_contains "${batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${batch_dir}/state.tsv" $'phase\tdone'
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tdone'
 
   assert_file_exists "${batch_dir}/issues.txt"
   assert_file_order "${batch_dir}/issues.txt" "# Issue #${QUEUE_ISSUE_NUMBER}" "# Issue #${ISSUE_NUMBER}"
   assert_file_exists "${batch_dir}/base_commit"
   assert_file_exists "${batch_dir}/head_commit"
+  assert_file_exists "${batch_dir}/branch"
+  assert_file_exists "${batch_dir}/pr_number"
+  assert_file_exists "${batch_dir}/pr_url"
+  assert_equals "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" "$(< "${batch_dir}/branch")" 'saved batch branch'
+  assert_equals '400' "$(< "${batch_dir}/pr_number")" 'saved batch PR number'
+  assert_equals 'https://example.test/pr/400' "$(< "${batch_dir}/pr_url")" 'saved batch PR URL'
+  assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/base_commit"
+  assert_file_exists "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/head_commit"
+  assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/base_commit"
+  assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
   assert_file_exists "${batch_dir}/changed-files.txt"
   assert_file_exists "${batch_dir}/batch.diff"
   assert_file_exists "${batch_dir}/batch.untracked.txt"
@@ -2592,6 +2631,56 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+}
+
+run_issue_queue_failure_state_smoke() {
+  local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  local failure_log="${state_dir}/queue-forced-failure.log"
+  local rejected_fresh_log="${state_dir}/queue-rejected-fresh.log"
+  local failure_status
+
+  log 'running issue queue forced failure state smoke'
+  clear_command_logs
+  reset_flow_counters
+
+  set +e
+  (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_FORCE_QUEUE_FAILURE_ISSUE="${ISSUE_NUMBER}" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${ISSUE_NUMBER}"
+  ) > "$failure_log" 2>&1
+  failure_status="$?"
+  set -e
+
+  assert_equals '42' "$failure_status" 'forced queue failure exit status'
+  assert_file_contains "$failure_log" "forced queue issue context failure for issue ${ISSUE_NUMBER}"
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'status\tfailed'
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'phase\tbatch'
+  assert_file_contains "${repo_dir}/.work/queue/state.tsv" $'exit_code\t42'
+  assert_file_contains "${batch_dir}/state.tsv" $'status\tfailed'
+  assert_file_contains "${batch_dir}/state.tsv" $'phase\tissues'
+  assert_file_contains "${batch_dir}/state.tsv" $'exit_code\t42'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tfailed'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tcontext'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t42'
+  assert_path_not_exists "${repo_dir}/.work/queue/lock"
+  assert_file_not_contains "${state_dir}/gh.log" 'label'
+  assert_file_not_contains "${state_dir}/gh.log" 'assignee'
+  assert_file_not_contains "${state_dir}/gh.log" 'project'
+
+  if (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" "${QUEUE_ISSUE_NUMBER}"
+  ) > "$rejected_fresh_log" 2>&1; then
+    fail 'fresh queue should refuse to overwrite failed schema-v1 state'
+  fi
+  assert_file_contains "$rejected_fresh_log" 'Use --resume when resume support is available.'
+  assert_file_contains "${repo_dir}/.work/queue/plan.tsv" $'issue\t'"${ISSUE_NUMBER}"
+  assert_file_not_contains "${repo_dir}/.work/queue/plan.tsv" $'issue\t'"${QUEUE_ISSUE_NUMBER}"
+  assert_path_not_exists "${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
+  assert_path_not_exists "${repo_dir}/.work/queue/lock"
 }
 
 run_vendor_worktree_visibility_smoke() {
@@ -2697,6 +2786,7 @@ main() {
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
   run_issue_queue_strict_issue_review_smoke
+  run_issue_queue_failure_state_smoke
   run_vendor_worktree_visibility_smoke
   run_no_workflow_file_smoke
   log 'all smoke scenarios passed'

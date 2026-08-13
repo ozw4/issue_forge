@@ -251,6 +251,12 @@ CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW=<0-or-1> vendor/issue_fo
 
 After each issue, `.work/codex` is archived under `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/codex/`. Batch artifacts also include `issues.txt`, `base_commit`, `head_commit`, `changed-files.txt`, `batch.diff`, `batch.untracked.txt`, `batch.summary.txt`, `checks.log`, batch review/fix prompts and logs, and `history/`.
 
+A fresh queue persists its validated input order and effective options in `.work/queue/plan.tsv`, then initializes queue, batch, and Issue TSV state before creating any batch branch. Queue checkpoints are `initializing`, `batch`, and terminal `done`. Batch checkpoints are `branch`, `issues`, `checks`, `review`, `publish`, optional `merge`, `ack`, and terminal `done`. Issue state moves from `queued / context` to `leased / context`, `leased / implementation`, `committed / batch`, and finally `acked / done`. Ack means that batch publish succeeded, or that the PR was confirmed merged when `--auto-merge` is enabled; it does not close the GitHub Issue directly.
+
+Each batch saves its branch name before processing. In the branch checkpoint, the queue fetches `origin/${CODEX_FLOW_BASE_BRANCH}`, resolves `CODEX_FLOW_BASE_REF` to an exact commit, atomically saves that commit as the batch `base_commit`, and creates the branch from the saved SHA. Each Issue saves its starting `HEAD` and committed `HEAD` under its batch-local directory. Batch publish also saves `pr_number` and `pr_url`.
+
+Non-zero queue exit records `failed` on the queue and current batch while preserving their last checkpoint, and records `failed` on the current Issue when it is still leased. Each failed state records the original exit code, and the queue lock is removed best-effort. Successful queues and batches end as `succeeded / done`; Issues end as `acked / done`. A fresh run refuses to overwrite a schema-v1 `running` or `failed` queue and points to future resume support. A `succeeded` queue plan may be replaced only when the newly planned branch names and batch directories remain available. This contract does not migrate pre-schema queue artifacts and does not yet define resume or requeue behavior.
+
 Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If checks fail, Codex runs in write mode with the batch checks fix prompt and the configured batch check fix reasoning. A fix round that produces no repository changes is a hard error. Batch review runs in read mode against the combined batch diff and issue material, verifies that the review did not modify repository files, extracts the standard review output format, and validates it with the same review schema and acceptance semantics as normal review. The batch review prompt is stricter by requiring findings to consider correctness, regressions, cross-issue interaction, scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security, token, GitHub CLI, and merge-risk behavior.
 
 If batch review returns `accept: no`, Codex runs in write mode with the batch review fix prompt, commits any resulting changes, reruns batch checks, and reruns batch review. `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` and `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` bound the loops.
@@ -333,7 +339,18 @@ The following remain part of the v1 behavior contract:
 - `.work/codex/fix-from-review.log`
 - `.work/codex/history/<stem>.round-<NN>.<ext>`
 - `.work/queue/lock`
+- `.work/queue/plan.tsv`
+- `.work/queue/state.tsv`
 - `.work/queue/current_batch`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/state.tsv`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/branch`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/base_commit`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/head_commit`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/pr_number`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/pr_url`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/state.tsv`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/base_commit`
+- `.work/queue/batches/batch-<first_issue>-<last_issue>/issues/<issue_number>/head_commit`
 - `.work/queue/batches/batch-<first_issue>-<last_issue>/`
 
 Additional invariants:
