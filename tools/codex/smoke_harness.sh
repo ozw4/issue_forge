@@ -2402,6 +2402,8 @@ run_queue_state_helper_smoke() {
   source "${REPO_ROOT}/tools/codex/lib/engine_defaults.sh"
   # shellcheck source=tools/codex/lib/queue_state.sh
   source "${REPO_ROOT}/tools/codex/lib/queue_state.sh"
+  # Loading the shared helper through direct and indirect dependencies is safe.
+  source "${REPO_ROOT}/tools/codex/lib/queue_state.sh"
 
   assert_equals '.work/queue/plan.tsv' "$CODEX_FLOW_QUEUE_PLAN_FILE" 'default queue plan path'
   assert_equals '.work/queue/state.tsv' "$CODEX_FLOW_QUEUE_STATE_FILE" 'default queue state path'

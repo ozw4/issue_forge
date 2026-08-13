@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [[ -n "${ISSUE_FORGE_QUEUE_STATE_LOADED:-}" ]]; then
+  return 0
+fi
+readonly ISSUE_FORGE_QUEUE_STATE_LOADED=1
+
 readonly CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION=1
 
 atomic_write_from_stdin() {
