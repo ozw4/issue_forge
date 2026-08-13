@@ -244,6 +244,86 @@ read_batch_review_lifecycle() {
     <<< "$values"
 }
 
+reconcile_committed_batch_review_fix() {
+  local snapshot_file="$1"
+  local batch_state_dir="$2"
+  local review_fix_round="$3"
+  local first_issue="$4"
+  local last_issue="$5"
+  local expected_state
+  local expected_head
+  local current_head
+  local resolution_history
+  local review_fix_subject="chore: address batch review for issues #${first_issue}-#${last_issue}"
+  local checks_fix_subject="chore: address batch checks for issues #${first_issue}-#${last_issue}"
+  local commit
+  local parents
+  local previous_commit
+  local subject
+  local commit_index=0
+
+  printf -v resolution_history '%s/history/fix-resolution.round-%02d.tsv' \
+    "$batch_state_dir" "$review_fix_round"
+
+  if [[ ! -f "$resolution_history" ]]; then
+    printf 'Cannot reconcile committed batch review fix: resolution history is missing: %s\n' \
+      "$resolution_history" >&2
+    return 1
+  fi
+  if [[ -n "$(status_outside_work)" ]]; then
+    printf 'Cannot reconcile committed batch review fix: working tree is not clean.\n' >&2
+    return 1
+  fi
+  if ! expected_state="$(_review_snapshot_read_expected_state "$snapshot_file")"; then
+    printf 'Cannot reconcile committed batch review fix: review snapshot is invalid: %s\n' \
+      "$snapshot_file" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r expected_head _ <<< "$expected_state"
+  if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')"; then
+    printf 'Cannot reconcile committed batch review fix: current HEAD is not a commit.\n' >&2
+    return 1
+  fi
+  if [[ "$current_head" == "$expected_head" ]]; then
+    printf 'Cannot reconcile committed batch review fix: no commit follows the review snapshot.\n' >&2
+    return 1
+  fi
+  if ! git merge-base --is-ancestor "$expected_head" "$current_head"; then
+    printf 'Cannot reconcile committed batch review fix: current HEAD does not descend from review snapshot HEAD %s.\n' \
+      "$expected_head" >&2
+    return 1
+  fi
+
+  previous_commit="$expected_head"
+  while IFS= read -r commit; do
+    commit_index=$((commit_index + 1))
+    parents="$(git show -s --format=%P "$commit")"
+    if [[ "$parents" != "$previous_commit" ]]; then
+      printf 'Cannot reconcile committed batch review fix: commit %s is not on the expected linear frontier.\n' \
+        "$commit" >&2
+      return 1
+    fi
+    subject="$(git show -s --format=%s "$commit")"
+    if [[ "$commit_index" -eq 1 ]]; then
+      if [[ "$subject" != "$review_fix_subject" ]]; then
+        printf 'Cannot reconcile committed batch review fix: first commit has unexpected subject: %s\n' \
+          "$subject" >&2
+        return 1
+      fi
+    elif [[ "$subject" != "$checks_fix_subject" ]]; then
+      printf 'Cannot reconcile committed batch review fix: intervening commit has unexpected subject: %s\n' \
+        "$subject" >&2
+      return 1
+    fi
+    previous_commit="$commit"
+  done < <(git rev-list --reverse "${expected_head}..${current_head}")
+
+  if [[ "$commit_index" -eq 0 || "$previous_commit" != "$current_head" ]]; then
+    printf 'Cannot reconcile committed batch review fix: expected fix commit range is incomplete.\n' >&2
+    return 1
+  fi
+}
+
 run_batch_review_once() {
   local batch_dir="$1"
   local issues_file="$2"
@@ -335,6 +415,8 @@ ensure_batch_review_accepted() {
   local review_fix_round
   local review_round
   local next_action
+  local fix_commit_reconciled
+  local run_fix_checks
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
@@ -369,39 +451,66 @@ ensure_batch_review_accepted() {
           exit 1
         fi
 
-        write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
-        cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
-        write_fix_from_batch_review_prompt_file \
-          "$issues_file" \
-          "$batch_review_output" \
-          "$fix_review_prompt" \
-          "$batch_pending_findings" \
-          "$batch_review_snapshot"
-        assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
-        ensure_clean_worktree 'Working tree must be clean before batch review fix.'
-        log_info "codex fix from batch review (round ${review_fix_round})"
-        run_codex_batch_write \
-          batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
-          "$review_fix_effort" "$batch_review_snapshot"
-        archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
-        ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
-        extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
-        history_dir="$batch_state_history_dir"
-        archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
-        cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"
-        cp -- "$(history_round_path 'fix-resolution' "$review_fix_round" '.tsv')" "${batch_dir}/history/"
-        history_dir="${batch_dir}/history"
-
-        if [[ -z "$(status_outside_work)" ]]; then
-          if awk -F '\t' '$2 == "fixed" { found = 1 } END { exit !found }' "$batch_fix_resolution"; then
-            printf 'Batch review fix reported fixed findings but produced no repository changes.\n' >&2
-            printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
+        fix_commit_reconciled=0
+        run_fix_checks=0
+        if ! assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix" 2>/dev/null; then
+          if ! reconcile_committed_batch_review_fix \
+            "$batch_review_snapshot" \
+            "$batch_state_dir" \
+            "$review_fix_round" \
+            "$first_issue" \
+            "$last_issue"; then
             exit 1
           fi
-          log_info 'batch review fix reported no code changes; skipping commit and checks'
-        else
-          commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
+          fix_commit_reconciled=1
+          run_fix_checks=1
+          log_info "adopting committed batch review fix (round ${review_fix_round})"
+        fi
+
+        if [[ "$fix_commit_reconciled" -eq 0 ]]; then
+          write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
+          cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
+          write_fix_from_batch_review_prompt_file \
+            "$issues_file" \
+            "$batch_review_output" \
+            "$fix_review_prompt" \
+            "$batch_pending_findings" \
+            "$batch_review_snapshot"
+          ensure_clean_worktree 'Working tree must be clean before batch review fix.'
+          log_info "codex fix from batch review (round ${review_fix_round})"
+          run_codex_batch_write \
+            batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
+            "$review_fix_effort" "$batch_review_snapshot"
+          archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
+          ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
+          extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
+          history_dir="$batch_state_history_dir"
+          archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
+          cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"
+          cp -- "$(history_round_path 'fix-resolution' "$review_fix_round" '.tsv')" "${batch_dir}/history/"
+          history_dir="${batch_dir}/history"
+
+          if [[ -z "$(status_outside_work)" ]]; then
+            if awk -F '\t' '$2 == "fixed" { found = 1 } END { exit !found }' "$batch_fix_resolution"; then
+              printf 'Batch review fix reported fixed findings but produced no repository changes.\n' >&2
+              printf 'Batch review fix log: %s\n' "$fix_review_log" >&2
+              exit 1
+            fi
+            log_info 'batch review fix reported no code changes; skipping commit and checks'
+          else
+            commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
+            run_fix_checks=1
+            if declare -F queue_failpoint >/dev/null 2>&1; then
+              queue_failpoint after_batch_review_fix_commit
+            fi
+          fi
+        fi
+
+        if [[ "$run_fix_checks" -eq 1 ]]; then
           ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
+          if declare -F queue_failpoint >/dev/null 2>&1; then
+            queue_failpoint after_batch_review_fix_checks
+          fi
         fi
 
         review_round=$((review_round + 1))

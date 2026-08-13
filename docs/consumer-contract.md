@@ -434,6 +434,7 @@ verification:
 - resuming a queue run continues that run's ledger, while a different run over the same batch range starts a separate ledger and never reads the compatibility copy as finding state
 - each run-owned Batch directory has a fixed version-1 `review-lifecycle.state` TSV containing `review_round`, `fix_round`, `next_action` (`review`, `fix`, or `complete`), and `updated_at`; resume continues that saved action and logical round, and `complete` prevents Reviewer or Fixer reruns before the outer `batch_review after` checkpoint
 - `review-lifecycle.state` is the Batch review/fix loop's commit-point control state after successful artifacts and checks; it is separate from Agent attempts and the finding ledger, has no compatibility copy, and does not change queue state schema version 3
+- if a Batch review fix commit is durable before that commit point, resume adopts it only when the worktree is clean, the current HEAD is a linear descendant of the saved review snapshot HEAD containing the expected review/check-fix commit subjects, and that round's run-owned fix-resolution history exists; it reruns checks without rerunning the Fixer before advancing the lifecycle
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` must have at least one current finding in `blocker:`, `major:`, or `minor:`; verification records do not count as current findings or rejection reasons

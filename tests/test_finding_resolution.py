@@ -13,6 +13,7 @@ HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "finding_ledger.sh"
 BATCH_HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "batch_review_helpers.sh"
 REVIEW_HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "checks_review_helpers.sh"
 HISTORY_HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "history_helpers.sh"
+SNAPSHOT_HELPER = REPO_ROOT / "tools" / "codex" / "lib" / "review_snapshots.sh"
 
 
 def run_helper(command: str, *args: Path | int | str) -> subprocess.CompletedProcess[str]:
@@ -534,6 +535,149 @@ def read_lifecycle_state(batch_state_dir: Path) -> dict[str, str]:
     return dict(
         line.split("\t", maxsplit=1)
         for line in state_file.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def run_batch_commit_boundary(
+    repo: Path,
+    *,
+    stop_after: str = "",
+) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPER))}
+source {shlex.quote(str(REVIEW_HELPER))}
+source {shlex.quote(str(SNAPSHOT_HELPER))}
+source {shlex.quote(str(BATCH_HELPER))}
+
+stop_after="$1"
+batch_dir="$PWD/.work/queue/batches/batch-1"
+batch_state_dir="$PWD/.work/queue/runs/run-a/batches/batch-1"
+lifecycle_state="$batch_state_dir/review-lifecycle.state"
+snapshot="$batch_dir/batch-review.snapshot.state"
+CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
+CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(':(exclude).work')
+mkdir -p "$batch_dir/history" "$batch_state_dir/history"
+
+if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
+  printf '%s\n' \
+    $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
+    $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
+    > "$batch_state_dir/findings.tsv"
+  printf '%s\n' 'accept: no' > "$batch_dir/batch-review.txt"
+  capture_review_snapshot "$snapshot"
+  initialize_batch_review_lifecycle "$lifecycle_state"
+  write_batch_review_lifecycle "$lifecycle_state" 1 1 fix
+fi
+
+run_batch_review_once() {{
+  printf 'review:%s\n' "$6" >> "$batch_dir/events"
+  printf '%s\n' 'accept: yes' > "$batch_dir/batch-review.txt"
+}}
+write_fix_from_batch_review_prompt_file() {{ : > "$3"; }}
+ensure_clean_worktree() {{
+  [[ -z "$(status_outside_work)" ]] || exit 1
+}}
+status_outside_work() {{
+  git status --porcelain --untracked-files=all -- . ':(exclude).work'
+}}
+log_info() {{ printf 'log:%s\n' "$1" >> "$batch_dir/events"; }}
+run_codex_batch_write() {{
+  printf 'fix-agent:%s\n' "$2" >> "$batch_dir/events"
+  printf '%s\n' fixed-by-review > target.txt
+  printf 'resolution:\n- F0001 | fixed | applied fix\n' > "$4"
+}}
+ensure_batch_token_usage_tsv() {{ :; }}
+commit_issue_changes() {{
+  git add target.txt
+  git commit -m "$1" >/dev/null
+  printf 'commit:%s\n' "$(git rev-parse HEAD)" >> "$batch_dir/events"
+}}
+ensure_batch_checks_pass() {{ printf 'checks\n' >> "$batch_dir/events"; }}
+queue_failpoint() {{
+  if [[ -n "$stop_after" && "$stop_after" == "$1" ]]; then
+    printf 'stop:%s\n' "$1" >> "$batch_dir/events"
+    exit 86
+  fi
+}}
+
+ensure_batch_review_accepted \
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir"
+"""
+    return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
+        ["bash", "-c", script, "batch-commit-boundary-test", stop_after],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
+def initialize_batch_commit_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "target.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "target.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+    return repo
+
+
+@pytest.mark.parametrize(
+    ("stop_after", "checks_before_resume", "checks_after_resume"),
+    [
+        ("after_batch_review_fix_commit", 0, 1),
+        ("after_batch_review_fix_checks", 1, 2),
+    ],
+)
+def test_batch_resume_reconciles_committed_fix_before_lifecycle_update(
+    tmp_path: Path,
+    stop_after: str,
+    checks_before_resume: int,
+    checks_after_resume: int,
+) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    batch_dir = repo / ".work" / "queue" / "batches" / "batch-1"
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_commit_boundary(repo, stop_after=stop_after)
+    assert stopped.returncode == 86, stopped.stderr
+    assert read_lifecycle_state(state_dir)["next_action"] == "fix"
+    commits_after_stop = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    events_before_resume = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    assert events_before_resume.count("fix-agent:1") == 1
+    assert events_before_resume.count("checks") == checks_before_resume
+    assert commits_after_stop == "2"
+
+    resumed = run_batch_commit_boundary(repo)
+    assert resumed.returncode == 0, resumed.stderr
+    events = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    commits_after_resume = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    state = read_lifecycle_state(state_dir)
+
+    assert events.count("fix-agent:1") == 1
+    assert len([event for event in events if event.startswith("commit:")]) == 1
+    assert events.count("checks") == checks_after_resume
+    assert events.count("review:2") == 1
+    assert commits_after_resume == "2"
+    assert (state["review_round"], state["fix_round"], state["next_action"]) == (
+        "2",
+        "1",
+        "complete",
     )
 
 
