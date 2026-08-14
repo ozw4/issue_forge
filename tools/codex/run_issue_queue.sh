@@ -699,8 +699,8 @@ reconcile_batch_branch_phase() {
   local batch_dir="$3"
 
   if [[ ! -f "${batch_dir}/base_commit" ]]; then
-    if [[ "$queue_resume_mode" -eq 1 ]]; then
-      fail "Missing batch base commit required to resume branch phase: ${batch_dir}/base_commit"
+    if git show-ref --verify --quiet "refs/heads/${batch_branch}"; then
+      fail "Batch branch exists without saved base commit: ${batch_branch}"
     fi
     create_batch_branch "$batch_branch" "$batch_dir"
     return 0

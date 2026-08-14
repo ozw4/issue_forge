@@ -3218,6 +3218,8 @@ run_issue_queue_resume_smoke() {
   local resume_status
   local batch_base_commit
   local first_issue_head
+  local completed_batch_id
+  local completed_batch_dir
 
   log 'running queue-level resume smoke'
 
@@ -3251,6 +3253,58 @@ run_issue_queue_resume_smoke() {
   assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
   assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
   assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+
+  copy_queue_resume_fixture unstarted-second-batch
+  resume_log="${state_dir}/queue-resume-unstarted-second-batch.log"
+  completed_batch_id="batch-${ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  completed_batch_dir="${resume_repo}/.work/queue/batches/${completed_batch_id}"
+  rm -rf "${resume_repo}/.work/queue/batches"
+  mkdir -p \
+    "${completed_batch_dir}/issues/${ISSUE_NUMBER}" \
+    "${resume_repo}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/issues/${QUEUE_ISSUE_NUMBER}" \
+    "${resume_repo}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}/history"
+  resume_batch_id="batch-${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"
+  resume_batch_dir="${resume_repo}/.work/queue/batches/${resume_batch_id}"
+  cat > "${resume_repo}/.work/queue/plan.tsv" <<EOF
+schema_version	1
+review_every	1
+batch_review_effort	queue_review
+batch_review_fix_effort	queue_fix
+batch_check_fix_effort	queue_fix
+draft_pr	0
+auto_merge	1
+issue	${ISSUE_NUMBER}
+issue	${QUEUE_ISSUE_NUMBER}
+EOF
+  printf 'batch/%s-%s\n' "$ISSUE_NUMBER" "$ISSUE_NUMBER" > "${completed_batch_dir}/branch"
+  write_state_tsv "${completed_batch_dir}/state.tsv" \
+    status succeeded phase 'done' current_issue '' exit_code ''
+  write_issue_state_tsv \
+    "${completed_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" \
+    acked 'done' '' "$completed_batch_id"
+  printf 'batch/%s-%s\n' "$QUEUE_ISSUE_NUMBER" "$QUEUE_ISSUE_NUMBER" > "${resume_batch_dir}/branch"
+  printf '' > "${resume_batch_dir}/issues.txt"
+  printf 'phase\tissues\tround\treasoning\ttokens\tlog\n' > "${resume_batch_dir}/token-usage.tsv"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" queued context
+  write_resume_batch_state planned branch
+  write_resume_queue_state failed batch "$completed_batch_id" 1
+  if "${REAL_GIT}" -C "$resume_repo" show-ref --verify --quiet \
+    "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER}"; then
+    fail 'unstarted second batch fixture unexpectedly has a local branch'
+  fi
+  assert_path_not_exists "${resume_batch_dir}/base_commit"
+  clear_command_logs
+  reset_flow_counters
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "$resume_log" "skipping completed batch ${completed_batch_id}"
+  assert_file_contains "${state_dir}/git.log" "switch --create batch/${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER} "
+  assert_file_exists "${resume_batch_dir}/base_commit"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${completed_batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_not_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
 
   copy_queue_resume_fixture committed-next
   resume_log="${state_dir}/queue-resume-committed-next.log"
