@@ -618,7 +618,7 @@ auto_merge_batch_pr() {
 
   head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
   log_info "enabling auto-merge for batch PR #${pr_number}"
-  gh pr merge "$pr_number" --auto --squash --delete-branch --match-head-commit "$head_sha"
+  gh pr merge "$pr_number" --auto --squash --match-head-commit "$head_sha"
   wait_for_batch_pr_merge "$pr_number"
   git fetch origin "$CODEX_FLOW_BASE_BRANCH"
 }

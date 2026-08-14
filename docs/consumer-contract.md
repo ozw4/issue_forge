@@ -301,10 +301,10 @@ The PR body includes one `Closes #<issue_number>` line per issue plus an issue l
 If the issue list requires more than one batch, `--auto-merge` is required. Without it, the queue fails before modifying the repository because the next batch must start from the base branch after the previous batch has merged. Auto-merge uses:
 
 ```bash
-gh pr merge <pr_number> --auto --squash --delete-branch --match-head-commit <head_sha>
+gh pr merge <pr_number> --auto --squash --match-head-commit <head_sha>
 ```
 
-It does not use `--admin`. The queue polls `gh pr view <pr_number> --json state,mergedAt`; a closed unmerged PR or timeout is a hard error. After a batch PR merges, the queue fetches `origin/${CODEX_FLOW_BASE_BRANCH}` before creating the next batch branch.
+It does not use `--admin` or `--delete-branch`. The local batch branch remains available as the checkpoint used by the subsequent ack phase. The queue polls `gh pr view <pr_number> --json state,mergedAt`; a closed unmerged PR or timeout is a hard error. After a batch PR merges, the queue fetches `origin/${CODEX_FLOW_BASE_BRANCH}` before creating the next batch branch.
 
 Auto-merge reconciliation performs the same PR state query before requesting auto-merge. An already merged PR skips `gh pr merge --auto`, succeeds, and still fetches the base branch. An open unmerged PR keeps the existing request and polling behavior.
 

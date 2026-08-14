@@ -3145,7 +3145,8 @@ run_batch_resume_helpers_smoke() {
   clear_command_logs
   run_batch_helper_command auto_merge_batch_pr 400
   assert_file_contains "${state_dir}/gh.log" \
-    "pr merge 400 --auto --squash --delete-branch --match-head-commit ${head_commit}"
+    "pr merge 400 --auto --squash --match-head-commit ${head_commit}"
+  assert_file_not_contains "${state_dir}/gh.log" '--delete-branch'
   assert_file_exists "${state_dir}/batch-pr-merge.txt"
   assert_file_contains "${state_dir}/git.log" 'fetch origin main'
 
@@ -3401,6 +3402,34 @@ EOF
   assert_file_not_contains "${state_dir}/gh.log" 'pr merge'
   assert_path_not_exists "${state_dir}/batch-pr-merge.txt"
   assert_file_contains "${state_dir}/git.log" 'fetch origin main'
+
+  copy_queue_resume_fixture merge-open
+  resume_log="${state_dir}/queue-resume-merge-open.log"
+  sed -i $'s/^auto_merge\t0$/auto_merge\t1/' "${resume_repo}/.work/queue/plan.tsv"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed merge '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  rm -f "${state_dir}/batch-pr-merge.txt"
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr merge 400 --auto --squash --match-head-commit $(< "${resume_batch_dir}/head_commit")"
+  assert_file_not_contains "${state_dir}/gh.log" '--delete-branch'
+  assert_file_exists "${state_dir}/batch-pr-merge.txt"
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'phase\tdone'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'phase\tdone'
+  if ! "${REAL_GIT}" -C "$resume_repo" show-ref --verify --quiet \
+    "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"; then
+    fail 'open auto-merge resume should retain the local batch branch through ack'
+  fi
 
   copy_queue_resume_fixture stale-lock
   resume_log="${state_dir}/queue-resume-stale-lock.log"

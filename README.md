@@ -205,7 +205,7 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--batch-review-effort VALUE`: final batch review の reasoning override
 - `--batch-fix-effort VALUE`: batch review/checks fix の reasoning override
 - `--draft`: batch PR を draft で作成
-- `--auto-merge`: batch PR に squash auto-merge と branch delete を設定
+- `--auto-merge`: batch PR に squash auto-merge を設定（ack完了までlocal batch branchは維持）
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
