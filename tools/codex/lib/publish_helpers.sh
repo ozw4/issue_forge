@@ -2,6 +2,8 @@
 
 # shellcheck source=tools/codex/lib/review_semantics.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
+# shellcheck source=tools/codex/lib/queue_state.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/queue_state.sh"
 
 require_publish_commands() {
   require_command awk
@@ -411,33 +413,200 @@ sync_batch_pr_for_branch() {
   printf -v "$pr_action_variable" '%s' 'created'
 }
 
+read_batch_pr_state_tsv() {
+  local pr_identifier="$1"
+
+  gh pr view "$pr_identifier" --json state,mergedAt --jq '[.state, (.mergedAt // "")] | @tsv'
+}
+
+sync_saved_batch_pr() {
+  local batch_dir="$1"
+  local first_issue="$2"
+  local last_issue="$3"
+  local pr_number_variable="$4"
+  local pr_url_variable="$5"
+  local pr_action_variable="$6"
+  local saved_pr_number
+  local saved_pr_url
+  local state_line
+  local state
+  local merged_at
+  local pr_body_file
+  local pr_title="Batch: address issues #${first_issue}-#${last_issue}"
+
+  shift 6
+
+  if [[ ! -f "${batch_dir}/pr_number" && ! -f "${batch_dir}/pr_url" ]]; then
+    return 1
+  fi
+  if [[ ! -f "${batch_dir}/pr_number" || ! -f "${batch_dir}/pr_url" ]]; then
+    printf 'Incomplete saved batch PR metadata in %s: expected pr_number and pr_url\n' "$batch_dir" >&2
+    exit 1
+  fi
+
+  saved_pr_number="$(< "${batch_dir}/pr_number")"
+  saved_pr_url="$(< "${batch_dir}/pr_url")"
+  if [[ ! "$saved_pr_number" =~ ^[0-9]+$ || -z "$saved_pr_url" ]]; then
+    printf 'Invalid saved batch PR metadata in %s\n' "$batch_dir" >&2
+    exit 1
+  fi
+
+  state_line="$(read_batch_pr_state_tsv "$saved_pr_number")"
+  IFS=$'\t' read -r state merged_at <<< "$state_line"
+  if [[ -z "$state" ]]; then
+    printf 'Malformed PR state response for PR #%s: %s\n' "$saved_pr_number" "$state_line" >&2
+    exit 1
+  fi
+
+  if [[ -n "$merged_at" || "$state" == 'MERGED' ]]; then
+    printf -v "$pr_number_variable" '%s' "$saved_pr_number"
+    printf -v "$pr_url_variable" '%s' "$saved_pr_url"
+    printf -v "$pr_action_variable" '%s' 'reused merged'
+    return 0
+  fi
+
+  if [[ "$state" == 'CLOSED' ]]; then
+    printf 'Saved batch PR #%s is closed without merging: %s\n' "$saved_pr_number" "$saved_pr_url" >&2
+    exit 1
+  fi
+  if [[ "$state" != 'OPEN' ]]; then
+    printf 'Unsupported state for saved batch PR #%s: %s\n' "$saved_pr_number" "$state" >&2
+    exit 1
+  fi
+
+  pr_body_file="$(mktemp)"
+  write_batch_pr_body_file "$first_issue" "$last_issue" "$pr_body_file" "$@"
+  gh pr edit "$saved_pr_url" \
+    --title "$pr_title" \
+    --body-file "$pr_body_file" >/dev/null
+  rm -f "$pr_body_file"
+
+  printf -v "$pr_number_variable" '%s' "$saved_pr_number"
+  printf -v "$pr_url_variable" '%s' "$saved_pr_url"
+  printf -v "$pr_action_variable" '%s' 'updated'
+}
+
+write_batch_pr_metadata() {
+  local batch_dir="$1"
+  local pr_number="$2"
+  local pr_url="$3"
+
+  printf '%s\n' "$pr_number" | atomic_write_from_stdin "${batch_dir}/pr_number"
+  printf '%s\n' "$pr_url" | atomic_write_from_stdin "${batch_dir}/pr_url"
+}
+
 publish_batch_results() {
-  local first_issue="$1"
-  local last_issue="$2"
-  local branch_name="$3"
-  local draft_pr="$4"
-  local pr_number_variable="$5"
-  local pr_url_variable="$6"
+  local batch_dir="$1"
+  local first_issue="$2"
+  local last_issue="$3"
+  local branch_name="$4"
+  local draft_pr="$5"
+  local pr_number_variable="$6"
+  local pr_url_variable="$7"
   local published_pr_number
   local published_pr_url
   local pr_action
 
-  shift 6
+  shift 7
 
-  log_info "pushing batch branch ${branch_name}"
-  git push --set-upstream origin "$branch_name" >/dev/null
-
-  sync_batch_pr_for_branch \
+  if sync_saved_batch_pr \
+    "$batch_dir" \
     "$first_issue" \
     "$last_issue" \
-    "$branch_name" \
-    "$draft_pr" \
     published_pr_number \
     published_pr_url \
     pr_action \
-    "$@"
+    "$@"; then
+    if [[ "$pr_action" != 'reused merged' ]]; then
+      log_info "pushing batch branch ${branch_name}"
+      git push --set-upstream origin "$branch_name" >/dev/null
+    fi
+  else
+    log_info "pushing batch branch ${branch_name}"
+    git push --set-upstream origin "$branch_name" >/dev/null
+    sync_batch_pr_for_branch \
+      "$first_issue" \
+      "$last_issue" \
+      "$branch_name" \
+      "$draft_pr" \
+      published_pr_number \
+      published_pr_url \
+      pr_action \
+      "$@"
+  fi
 
+  write_batch_pr_metadata "$batch_dir" "$published_pr_number" "$published_pr_url"
   log_info "${pr_action} batch PR: ${published_pr_url}"
   printf -v "$pr_number_variable" '%s' "$published_pr_number"
   printf -v "$pr_url_variable" '%s' "$published_pr_url"
+}
+
+wait_for_batch_pr_merge() {
+  local pr_number="$1"
+  local start_seconds="$SECONDS"
+  local state_line
+  local state
+  local merged_at
+
+  while true; do
+    state_line="$(read_batch_pr_state_tsv "$pr_number")"
+    IFS=$'\t' read -r state merged_at <<< "$state_line"
+
+    if [[ -z "$state" ]]; then
+      printf '[queue] Malformed PR state response for PR #%s: %s\n' "$pr_number" "$state_line" >&2
+      exit 1
+    fi
+
+    if [[ -n "$merged_at" || "$state" == 'MERGED' ]]; then
+      log_info "batch PR #${pr_number} merged"
+      return 0
+    fi
+
+    if [[ "$state" == 'CLOSED' ]]; then
+      printf '[queue] Batch PR #%s closed without merging\n' "$pr_number" >&2
+      exit 1
+    fi
+
+    if (( SECONDS - start_seconds >= CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS )); then
+      printf '[queue] Timed out waiting for batch PR #%s to merge\n' "$pr_number" >&2
+      exit 1
+    fi
+
+    sleep "$CODEX_FLOW_AUTO_MERGE_POLL_SECONDS"
+  done
+}
+
+auto_merge_batch_pr() {
+  local pr_number="$1"
+  local state_line
+  local state
+  local merged_at
+  local head_sha
+
+  state_line="$(read_batch_pr_state_tsv "$pr_number")"
+  IFS=$'\t' read -r state merged_at <<< "$state_line"
+  if [[ -z "$state" ]]; then
+    printf '[queue] Malformed PR state response for PR #%s: %s\n' "$pr_number" "$state_line" >&2
+    exit 1
+  fi
+
+  if [[ -n "$merged_at" || "$state" == 'MERGED' ]]; then
+    log_info "batch PR #${pr_number} is already merged"
+    git fetch origin "$CODEX_FLOW_BASE_BRANCH"
+    return 0
+  fi
+  if [[ "$state" == 'CLOSED' ]]; then
+    printf '[queue] Batch PR #%s closed without merging\n' "$pr_number" >&2
+    exit 1
+  fi
+  if [[ "$state" != 'OPEN' ]]; then
+    printf 'Unsupported state for batch PR #%s: %s\n' "$pr_number" "$state" >&2
+    exit 1
+  fi
+
+  head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+  log_info "enabling auto-merge for batch PR #${pr_number}"
+  gh pr merge "$pr_number" --auto --squash --delete-branch --match-head-commit "$head_sha"
+  wait_for_batch_pr_merge "$pr_number"
+  git fetch origin "$CODEX_FLOW_BASE_BRANCH"
 }

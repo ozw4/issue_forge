@@ -4,6 +4,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/queue_state.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/queue_state.sh"
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -42,7 +44,18 @@ write_batch_changed_files() {
   local base_commit="$1"
   local output_file="$2"
 
-  git diff --name-only "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" > "$output_file"
+  git diff --name-only "$base_commit" -- . "${CODEX_FLOW_WORKTREE_EXCLUDE_PATHS[@]}" \
+    | atomic_write_from_stdin "$output_file"
+}
+
+write_batch_head_metadata() {
+  local batch_dir="$1"
+  local base_commit="$2"
+  local head_commit
+
+  head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+  printf '%s\n' "$head_commit" | atomic_write_from_stdin "${batch_dir}/head_commit"
+  write_batch_changed_files "$base_commit" "${batch_dir}/changed-files.txt"
 }
 
 run_codex_batch_write() {
@@ -84,23 +97,45 @@ ensure_batch_checks_pass() {
   local last_issue="$5"
   local issues_label="$6"
   local check_fix_effort="$7"
+  local reconcile_commit_message="${8:-chore: address batch checks for issues #${first_issue}-#${last_issue}}"
   local checks_log="${batch_dir}/checks.log"
   local fix_checks_prompt="${batch_dir}/fix-from-batch-checks.prompt.md"
   local fix_checks_log="${batch_dir}/fix-from-batch-checks.log"
-  local fix_round=0
+  local checks_round
+  local checks_status
+  local fix_round
+  local had_pending_changes
   local history_dir="${batch_dir}/history"
+  local history_allow_overwrite=0
 
   mkdir -p "$history_dir"
+  checks_round="$(max_history_round 'batch-checks' '.log')"
+  fix_round="$(max_history_round 'fix-from-batch-checks' '.log')"
 
   while true; do
+    checks_round=$((checks_round + 1))
+    had_pending_changes=0
+    if [[ -n "$(status_outside_work)" ]]; then
+      had_pending_changes=1
+    fi
+
     log_info 'running batch checks'
     if run_batch_checks_once "$base_commit" "$checks_log"; then
-      archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
+      checks_status=0
+    else
+      checks_status="$?"
+    fi
+    archive_round_file "$checks_log" 'batch-checks' "$checks_round" '.log'
+
+    if [[ "$had_pending_changes" -eq 1 && -n "$(status_outside_work)" ]]; then
+      log_info 'committing changes recovered from an interrupted batch fix'
+      commit_issue_changes "$reconcile_commit_message" 1
+    fi
+
+    if [[ "$checks_status" -eq 0 ]]; then
       log_info 'batch checks passed'
       return 0
     fi
-
-    archive_round_file "$checks_log" 'batch-checks' "$((fix_round + 1))" '.log'
 
     if [[ "$fix_round" -ge "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" ]]; then
       printf '[queue] batch checks failed after %s fix rounds\n' "$CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS" >&2
@@ -159,6 +194,7 @@ run_batch_review_once() {
   local before_status
   local after_status
   local history_dir="${batch_dir}/history"
+  local history_allow_overwrite=0
 
   mkdir -p "$history_dir"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
@@ -202,12 +238,51 @@ ensure_batch_review_accepted() {
   local batch_review_output="${batch_dir}/batch-review.txt"
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
-  local review_fix_round=0
-  local review_round=1
+  local review_fix_round
+  local review_round=0
+  local candidate_round
+  local stem
+  local run_new_review=1
   local history_dir="${batch_dir}/history"
+  # Used dynamically by archive_round_file in nested round helpers.
+  # shellcheck disable=SC2034
+  local history_allow_overwrite=0
+  local review_fix_commit_message="chore: address batch review for issues #${first_issue}-#${last_issue}"
 
   mkdir -p "$history_dir"
-  run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
+  review_fix_round="$(max_history_round 'fix-from-batch-review' '.log')"
+  for stem in batch-diff batch-untracked batch-summary batch-review-raw batch-review; do
+    candidate_round="$(max_history_round "$stem" '.txt')"
+    if [[ "$candidate_round" -gt "$review_round" ]]; then
+      review_round="$candidate_round"
+    fi
+  done
+
+  if [[ -n "$(status_outside_work)" ]]; then
+    log_info 'reconciling interrupted batch review fix through batch checks'
+    ensure_batch_checks_pass \
+      "$batch_dir" \
+      "$issues_file" \
+      "$base_commit" \
+      "$first_issue" \
+      "$last_issue" \
+      "$issues_label" \
+      "$check_fix_effort" \
+      "$review_fix_commit_message"
+  elif [[ -f "$batch_review_output" ]] \
+    && validate_review_output "$batch_review_output" \
+    && validate_review_output_semantics "$batch_review_output"; then
+    if review_output_accepted "$batch_review_output"; then
+      log_info 'reusing valid accepted batch review checkpoint'
+      return 0
+    fi
+    run_new_review=0
+  fi
+
+  if [[ "$run_new_review" -eq 1 ]]; then
+    review_round=$((review_round + 1))
+    run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"
+  fi
 
   while ! review_output_accepted "$batch_review_output"; do
     if [[ "$review_fix_round" -ge "$CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS" ]]; then
@@ -230,7 +305,7 @@ ensure_batch_review_accepted() {
       exit 1
     fi
 
-    commit_issue_changes "chore: address batch review for issues #${first_issue}-#${last_issue}" 1
+    commit_issue_changes "$review_fix_commit_message" 1
     ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort"
     review_round=$((review_round + 1))
     run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round"

@@ -924,7 +924,11 @@ if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "view" ]]; then
   fi
 
   if [[ "\$3" == "400" && " \$* " == *" --json state,mergedAt "* ]]; then
-    printf 'OPEN\t\n'
+    if [[ -f "${state_dir}/batch-pr-state.txt" ]]; then
+      cat "${state_dir}/batch-pr-state.txt"
+    else
+      printf 'OPEN\t\n'
+    fi
     exit 0
   fi
 
@@ -934,6 +938,7 @@ fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "merge" ]]; then
   printf 'merged\n' > "${state_dir}/batch-pr-merge.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
   exit 0
 fi
 
@@ -2838,6 +2843,9 @@ EOF
   assert_file_exists "${batch_dir}/batch-review.txt"
   assert_file_exists "${batch_dir}/fix-from-batch-review.prompt.md"
   assert_file_exists "${batch_dir}/fix-from-batch-review.log"
+  assert_file_exists "${batch_dir}/history/batch-checks.round-01.log"
+  assert_file_exists "${batch_dir}/history/batch-checks.round-02.log"
+  assert_file_exists "${batch_dir}/history/fix-from-batch-review.round-01.log"
   assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
   assert_file_exists "${batch_dir}/history/batch-summary.round-01.txt"
@@ -2874,6 +2882,193 @@ EOF
   assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+}
+
+run_batch_helper_command() {
+  (
+  cd "${repo_dir}"
+  PATH="${stub_dir}:$PATH" \
+    SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+    SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+    bash -c '
+set -euo pipefail
+source vendor/issue_forge/tools/codex/lib/config.sh
+source vendor/issue_forge/tools/codex/lib/history_helpers.sh
+source vendor/issue_forge/tools/codex/lib/checks_review_helpers.sh
+source vendor/issue_forge/tools/codex/lib/flow_state.sh
+source vendor/issue_forge/tools/codex/lib/publish_helpers.sh
+source vendor/issue_forge/tools/codex/lib/prompt_templates.sh
+source vendor/issue_forge/tools/codex/lib/batch_review_helpers.sh
+log_info() {
+  printf "[batch-helper] %s\\n" "$1"
+}
+"$@"
+' batch-helper "$@"
+  )
+}
+
+run_batch_resume_helpers_smoke() {
+  local existing_batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  local helper_root="${repo_dir}/.work/queue/helper-resume"
+  local checks_dir="${helper_root}/checks"
+  local checks_budget_dir="${helper_root}/checks-budget"
+  local accepted_dir="${helper_root}/accepted-review"
+  local rejected_dir="${helper_root}/rejected-review"
+  local dirty_review_dir="${helper_root}/dirty-review"
+  local publish_dir="${helper_root}/publish"
+  local issues_file="${existing_batch_dir}/issues.txt"
+  local base_commit
+  local budget_log="${state_dir}/batch-checks-budget.log"
+  local budget_status
+  local head_commit
+  local temporary_file
+  local round
+
+  log 'running resume-safe batch helper smoke'
+  base_commit="$(< "${existing_batch_dir}/base_commit")"
+  rm -rf "$helper_root"
+  mkdir -p \
+    "${checks_dir}/history" \
+    "${checks_budget_dir}/history" \
+    "${accepted_dir}/history" \
+    "${rejected_dir}/history" \
+    "${dirty_review_dir}/history" \
+    "$publish_dir"
+
+  clear_command_logs
+  reset_flow_counters
+  printf 'preserve existing batch checks history\n' > "${checks_dir}/history/batch-checks.round-03.log"
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  run_batch_helper_command ensure_batch_checks_pass \
+    "$checks_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" queue_fix
+  assert_equals 'preserve existing batch checks history' \
+    "$(< "${checks_dir}/history/batch-checks.round-03.log")" \
+    'existing batch checks history is preserved'
+  assert_file_exists "${checks_dir}/history/batch-checks.round-04.log"
+  assert_file_contains "${checks_dir}/history/batch-checks.round-04.log" 'simulated checks pass on round 2'
+
+  clear_command_logs
+  reset_flow_counters
+  for ((round = 1; round <= 5; round += 1)); do
+    printf 'existing batch checks fix %s\n' "$round" \
+      > "${checks_budget_dir}/history/fix-from-batch-checks.round-$(printf '%02d' "$round").log"
+  done
+  set +e
+  run_batch_helper_command ensure_batch_checks_pass \
+    "$checks_budget_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" queue_fix \
+    > "$budget_log" 2>&1
+  budget_status="$?"
+  set -e
+  assert_equals '1' "$budget_status" 'cumulative batch checks fix budget exit status'
+  assert_file_contains "$budget_log" 'batch checks failed after 5 fix rounds'
+  assert_file_not_contains "${state_dir}/codex.log" 'Make the required batch-check fixes, then stop.'
+
+  clear_command_logs
+  reset_flow_counters
+  write_review_output_fixture "${accepted_dir}/batch-review.txt" yes '- none' '- none' '- none'
+  cp "${accepted_dir}/batch-review.txt" "${accepted_dir}/history/batch-review.round-02.txt"
+  run_batch_helper_command ensure_batch_review_accepted \
+    "$accepted_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" \
+    queue_review queue_fix queue_fix
+  assert_path_not_exists "${state_dir}/batch-review-count.txt"
+  assert_file_not_contains "${state_dir}/codex.log" 'strict batch review session'
+
+  clear_command_logs
+  reset_flow_counters
+  write_review_output_fixture \
+    "${rejected_dir}/batch-review.txt" no '- none' '- existing rejected batch finding' '- none'
+  cp "${rejected_dir}/batch-review.txt" "${rejected_dir}/history/batch-review.round-03.txt"
+  printf 'existing review fix 1\n' > "${rejected_dir}/history/fix-from-batch-review.round-01.log"
+  printf 'existing review fix 2\n' > "${rejected_dir}/history/fix-from-batch-review.round-02.log"
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/batch-review-count.txt"
+  run_batch_helper_command ensure_batch_review_accepted \
+    "$rejected_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" \
+    queue_review queue_fix queue_fix
+  assert_file_contains "${rejected_dir}/history/fix-from-batch-review.round-03.log" 'applied batch review fix round 1'
+  assert_file_exists "${rejected_dir}/history/batch-review.round-04.txt"
+  assert_file_contains "${rejected_dir}/history/batch-review.round-04.txt" 'accept: yes'
+  assert_file_contains "${rejected_dir}/history/batch-checks.round-01.log" 'simulated checks pass on round 2'
+
+  clear_command_logs
+  reset_flow_counters
+  write_review_output_fixture "${dirty_review_dir}/batch-review.txt" yes '- none' '- none' '- none'
+  cp "${dirty_review_dir}/batch-review.txt" "${dirty_review_dir}/history/batch-review.round-05.txt"
+  printf 'interrupted batch review fix\n' >> "${repo_dir}/smoke-target.txt"
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/batch-review-count.txt"
+  run_batch_helper_command ensure_batch_review_accepted \
+    "$dirty_review_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" \
+    queue_review queue_fix queue_fix
+  assert_file_exists "${dirty_review_dir}/history/batch-checks.round-01.log"
+  assert_file_exists "${dirty_review_dir}/history/batch-review.round-06.txt"
+  assert_equals '2' "$(< "${state_dir}/batch-review-count.txt")" 'dirty accepted review triggers a new review call'
+  assert_equals "chore: address batch review for issues #${QUEUE_ISSUE_NUMBER}-#${ISSUE_NUMBER}" \
+    "$("${REAL_GIT}" -C "${repo_dir}" log -1 --pretty=%s)" \
+    'interrupted review fix reconciliation commit message'
+
+  run_batch_helper_command write_batch_head_metadata "$publish_dir" "$base_commit"
+  head_commit="$("${REAL_GIT}" -C "${repo_dir}" rev-parse HEAD)"
+  assert_equals "$head_commit" "$(< "${publish_dir}/head_commit")" 'atomic batch head metadata'
+  assert_file_contains "${publish_dir}/changed-files.txt" 'smoke-target.txt'
+
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  clear_command_logs
+  run_batch_helper_command publish_batch_results \
+    "$publish_dir" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
+    "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" 0 published_number published_url \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER"
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr list --head batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} --base main --state open"
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+  assert_equals '400' "$(< "${publish_dir}/pr_number")" 'atomically saved resumed batch PR number'
+  assert_equals 'https://example.test/pr/400' "$(< "${publish_dir}/pr_url")" 'atomically saved resumed batch PR URL'
+  temporary_file="$(find "$publish_dir" -maxdepth 1 -type f -name '.pr_*.tmp.*' -print -quit)"
+  assert_equals '' "$temporary_file" 'batch PR metadata leaves no atomic temporary file'
+
+  clear_command_logs
+  run_batch_helper_command publish_batch_results \
+    "$publish_dir" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
+    "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" 0 published_number published_url \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER"
+  assert_file_contains "${state_dir}/gh.log" 'pr view 400 --json state,mergedAt'
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr list'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  clear_command_logs
+  run_batch_helper_command publish_batch_results \
+    "$publish_dir" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
+    "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" 0 published_number published_url \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER"
+  assert_file_contains "${state_dir}/gh.log" 'pr view 400 --json state,mergedAt'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr edit'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  rm -f "${state_dir}/batch-pr-merge.txt"
+  clear_command_logs
+  run_batch_helper_command auto_merge_batch_pr 400
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr merge 400 --auto --squash --delete-branch --match-head-commit ${head_commit}"
+  assert_file_exists "${state_dir}/batch-pr-merge.txt"
+  assert_file_contains "${state_dir}/git.log" 'fetch origin main'
+
+  rm -f "${state_dir}/batch-pr-merge.txt"
+  clear_command_logs
+  run_batch_helper_command auto_merge_batch_pr 400
+  assert_file_contains "${state_dir}/gh.log" 'pr view 400 --json state,mergedAt'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr merge'
+  assert_path_not_exists "${state_dir}/batch-pr-merge.txt"
+  assert_file_contains "${state_dir}/git.log" 'fetch origin main'
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
 }
 
 run_issue_queue_failure_state_smoke() {
@@ -3041,6 +3236,7 @@ main() {
   run_issue_flow_checkpoint_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
+  run_batch_resume_helpers_smoke
   run_issue_queue_strict_issue_review_smoke
   run_issue_queue_failure_state_smoke
   run_vendor_worktree_visibility_smoke

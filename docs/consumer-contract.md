@@ -274,6 +274,12 @@ Batch checks call `CODEX_FLOW_CHECKS_COMMAND` with the batch base commit. If che
 
 If batch review returns `accept: no`, Codex runs in write mode with the batch review fix prompt, commits any resulting changes, reruns batch checks, and reruns batch review. `CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS` and `CODEX_FLOW_BATCH_CHECK_MAX_FIX_ROUNDS` bound the loops.
 
+Batch checks and review helpers are restart-safe even though the queue CLI does not yet expose `--resume`. Check runs continue after the maximum existing `batch-checks.round-NN.log`, and both check and review fix budgets include existing corresponding fix history. Review rounds continue after the maximum batch review/material history round. Existing history is never overwritten and token usage remains unique by phase, issue set, and round.
+
+When a review-phase checkpoint is re-entered with a dirty worktree, the helper treats it as a possible interrupted fix: it runs batch checks against the current worktree, commits the recovered fix changes, and obtains a new review instead of immediately applying the old finding again. With a clean worktree, a structurally and semantically valid accepted `batch-review.txt` is reusable, while a valid rejected review resumes at the next fix round. Missing structured output or malformed current output triggers a new review and is never treated as accepted.
+
+Before publish, the queue atomically writes the current `HEAD` to `head_commit` and generates `changed-files.txt` through temporary-file replacement. Batch publish writes `pr_number` and `pr_url` the same way after PR synchronization succeeds. If both PR metadata files already exist, publish checks that PR first: an open PR receives title/body synchronization, an already merged PR is treated as published, and a closed unmerged PR is a hard error. Without saved metadata, the existing branch/base open-PR lookup remains authoritative, so a process exit after PR creation but before metadata persistence does not create a duplicate PR.
+
 The queue creates one batch PR per batch. The PR title is:
 
 ```text
@@ -289,6 +295,8 @@ gh pr merge <pr_number> --auto --squash --delete-branch --match-head-commit <hea
 ```
 
 It does not use `--admin`. The queue polls `gh pr view <pr_number> --json state,mergedAt`; a closed unmerged PR or timeout is a hard error. After a batch PR merges, the queue fetches `origin/${CODEX_FLOW_BASE_BRANCH}` before creating the next batch branch.
+
+Auto-merge reconciliation performs the same PR state query before requesting auto-merge. An already merged PR skips `gh pr merge --auto`, succeeds, and still fetches the base branch. An open unmerged PR keeps the existing request and polling behavior.
 
 ## 10. Git / Worktree Exclusion Contract
 

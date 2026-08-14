@@ -205,6 +205,8 @@ branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batch
 
 fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きしません。`--resume` と `--requeue` はまだ未対応です。
 
+batch checks/review/publish/merge の内部 helper は、Prompt 05 の phase dispatch から再呼び出せる resume-safe contract を持ちます。既存 history から round と累積 fix budget を復元し、clean な accepted review は再利用します。dirty review entry は現在の worktree を checks と新 review で再評価します。publish は保存済み PR metadata または branch/base の open PR を再利用し、merge 済み PR では auto-merge request を再発行しません。これは内部 helper contract であり、現時点の queue CLI に `--resume` を追加するものではありません。
+
 ## Issue zip import
 
 Markdown Issue files をまとめた zip から GitHub Issues を一括作成できます。この helper は `.work/`、branch、Codex flow、PR state を変更しません。

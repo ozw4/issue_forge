@@ -562,55 +562,6 @@ process_issue_on_batch_branch() {
   rm -rf "$CODEX_FLOW_CODEX_DIR"
 }
 
-read_pr_state_tsv() {
-  local pr_number="$1"
-
-  gh pr view "$pr_number" --json state,mergedAt --jq '[.state, (.mergedAt // "")] | @tsv'
-}
-
-wait_for_batch_pr_merge() {
-  local pr_number="$1"
-  local start_seconds="$SECONDS"
-  local state_line
-  local state
-  local merged_at
-
-  while true; do
-    state_line="$(read_pr_state_tsv "$pr_number")"
-    IFS=$'\t' read -r state merged_at <<< "$state_line"
-
-    if [[ -z "$state" ]]; then
-      fail "Malformed PR state response for PR #${pr_number}: ${state_line}"
-    fi
-
-    if [[ -n "$merged_at" ]]; then
-      log_info "batch PR #${pr_number} merged"
-      return 0
-    fi
-
-    if [[ "$state" == 'CLOSED' ]]; then
-      fail "Batch PR #${pr_number} closed without merging"
-    fi
-
-    if (( SECONDS - start_seconds >= CODEX_FLOW_AUTO_MERGE_WAIT_SECONDS )); then
-      fail "Timed out waiting for batch PR #${pr_number} to merge"
-    fi
-
-    sleep "$CODEX_FLOW_AUTO_MERGE_POLL_SECONDS"
-  done
-}
-
-auto_merge_batch_pr() {
-  local pr_number="$1"
-  local head_sha
-
-  head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
-  log_info "enabling auto-merge for batch PR #${pr_number}"
-  gh pr merge "$pr_number" --auto --squash --delete-branch --match-head-commit "$head_sha"
-  wait_for_batch_pr_merge "$pr_number"
-  git fetch origin "$CODEX_FLOW_BASE_BRANCH"
-}
-
 process_batch() {
   local start_index="$1"
   local end_index="$2"
@@ -620,7 +571,6 @@ process_batch() {
   local batch_dir
   local batch_branch
   local batch_base_commit
-  local batch_head_commit
   local batch_pr_number
   local batch_pr_url
   local issues_file
@@ -663,12 +613,11 @@ process_batch() {
     "$batch_review_fix_effort" \
     "$batch_check_fix_effort"
 
-  batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
-  write_atomic_value "${batch_dir}/head_commit" "$batch_head_commit"
-  write_batch_changed_files "$batch_base_commit" "${batch_dir}/changed-files.txt"
+  write_batch_head_metadata "$batch_dir" "$batch_base_commit"
 
   write_batch_state "$batch_id" running publish '' ''
   publish_batch_results \
+    "$batch_dir" \
     "$first_issue" \
     "$last_issue" \
     "$batch_branch" \
@@ -676,8 +625,9 @@ process_batch() {
     batch_pr_number \
     batch_pr_url \
     "${batch_issues[@]}"
-  write_atomic_value "${batch_dir}/pr_number" "$batch_pr_number"
-  write_atomic_value "${batch_dir}/pr_url" "$batch_pr_url"
+  if [[ -z "$batch_pr_number" || -z "$batch_pr_url" ]]; then
+    fail 'Batch publish returned incomplete PR metadata.'
+  fi
 
   if [[ "$auto_merge" -eq 1 ]]; then
     write_batch_state "$batch_id" running merge '' ''
