@@ -975,6 +975,10 @@ fi
 case "\$prompt" in
   *"strict batch review session"*)
     batch_review_count="\$(increment_counter "${state_dir}/batch-review-count.txt")"
+    if [[ "\${SMOKE_MALFORMED_BATCH_REVIEW:-0}" -ne 0 ]]; then
+      printf 'malformed batch review output\n'
+      exit 0
+    fi
     if [[ "\$batch_review_count" -eq 1 ]]; then
       printf '%s\n' '${CODEX_RUNTIME_SESSION_LOG_LINE}'
       cat <<'OUT'
@@ -2914,12 +2918,15 @@ run_batch_resume_helpers_smoke() {
   local checks_budget_dir="${helper_root}/checks-budget"
   local accepted_dir="${helper_root}/accepted-review"
   local rejected_dir="${helper_root}/rejected-review"
+  local interrupted_review_dir="${helper_root}/interrupted-review"
   local dirty_review_dir="${helper_root}/dirty-review"
   local publish_dir="${helper_root}/publish"
   local issues_file="${existing_batch_dir}/issues.txt"
   local base_commit
   local budget_log="${state_dir}/batch-checks-budget.log"
   local budget_status
+  local interrupted_review_log="${state_dir}/batch-review-interrupted.log"
+  local interrupted_review_status
   local head_commit
   local temporary_file
   local round
@@ -2932,6 +2939,7 @@ run_batch_resume_helpers_smoke() {
     "${checks_budget_dir}/history" \
     "${accepted_dir}/history" \
     "${rejected_dir}/history" \
+    "${interrupted_review_dir}/history" \
     "${dirty_review_dir}/history" \
     "$publish_dir"
 
@@ -2996,6 +3004,44 @@ run_batch_resume_helpers_smoke() {
 
   clear_command_logs
   reset_flow_counters
+  write_review_output_fixture \
+    "${interrupted_review_dir}/batch-review.txt" no '- none' '- stale rejected batch finding' '- none'
+  cp \
+    "${interrupted_review_dir}/batch-review.txt" \
+    "${interrupted_review_dir}/history/batch-review.round-02.txt"
+  set +e
+  SMOKE_MALFORMED_BATCH_REVIEW=1 run_batch_helper_command run_batch_review_once \
+    "$interrupted_review_dir" "$issues_file" "$base_commit" \
+    "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" queue_review 3 \
+    > "$interrupted_review_log" 2>&1
+  interrupted_review_status="$?"
+  set -e
+  assert_equals '1' "$interrupted_review_status" 'interrupted batch review exit status'
+  assert_file_contains "$interrupted_review_log" 'Failed to extract structured batch review output.'
+  assert_path_not_exists "${interrupted_review_dir}/batch-review.txt"
+  assert_file_contains \
+    "${interrupted_review_dir}/history/batch-review.round-02.txt" \
+    'stale rejected batch finding'
+  assert_file_contains \
+    "${interrupted_review_dir}/history/batch-review-raw.round-03.txt" \
+    'malformed batch review output'
+
+  clear_command_logs
+  run_batch_helper_command ensure_batch_review_accepted \
+    "$interrupted_review_dir" "$issues_file" "$base_commit" \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" "${QUEUE_ISSUE_NUMBER},${ISSUE_NUMBER}" \
+    queue_review queue_fix queue_fix
+  assert_path_not_exists "${state_dir}/fix-batch-review-count.txt"
+  assert_file_not_contains "${state_dir}/codex.log" 'Make the required batch-review fixes, then stop.'
+  assert_file_exists "${interrupted_review_dir}/history/batch-review.round-04.txt"
+  assert_file_contains "${interrupted_review_dir}/history/batch-review.round-04.txt" 'accept: yes'
+  assert_equals \
+    '2' \
+    "$(< "${state_dir}/batch-review-count.txt")" \
+    'partial batch review resumes with a new review call'
+
+  clear_command_logs
+  reset_flow_counters
   write_review_output_fixture "${dirty_review_dir}/batch-review.txt" yes '- none' '- none' '- none'
   cp "${dirty_review_dir}/batch-review.txt" "${dirty_review_dir}/history/batch-review.round-05.txt"
   printf 'interrupted batch review fix\n' >> "${repo_dir}/smoke-target.txt"
@@ -3031,6 +3077,21 @@ run_batch_resume_helpers_smoke() {
   assert_equals 'https://example.test/pr/400' "$(< "${publish_dir}/pr_url")" 'atomically saved resumed batch PR URL'
   temporary_file="$(find "$publish_dir" -maxdepth 1 -type f -name '.pr_*.tmp.*' -print -quit)"
   assert_equals '' "$temporary_file" 'batch PR metadata leaves no atomic temporary file'
+
+  rm -f "${publish_dir}/pr_url"
+  clear_command_logs
+  run_batch_helper_command publish_batch_results \
+    "$publish_dir" "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER" \
+    "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" 0 published_number published_url \
+    "$QUEUE_ISSUE_NUMBER" "$ISSUE_NUMBER"
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr list --head batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} --base main --state open"
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+  assert_equals '400' "$(< "${publish_dir}/pr_number")" 'reconciled partial batch PR number'
+  assert_equals 'https://example.test/pr/400' \
+    "$(< "${publish_dir}/pr_url")" \
+    'reconciled partial batch PR URL'
 
   clear_command_logs
   run_batch_helper_command publish_batch_results \

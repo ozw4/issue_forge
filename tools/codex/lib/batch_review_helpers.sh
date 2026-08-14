@@ -197,6 +197,7 @@ run_batch_review_once() {
   local history_allow_overwrite=0
 
   mkdir -p "$history_dir"
+  rm -f "$batch_review_output"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
   archive_round_file "$batch_diff" 'batch-diff' "$review_round" '.txt'
   archive_round_file "$batch_untracked" 'batch-untracked' "$review_round" '.txt'

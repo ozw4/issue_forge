@@ -440,8 +440,8 @@ sync_saved_batch_pr() {
     return 1
   fi
   if [[ ! -f "${batch_dir}/pr_number" || ! -f "${batch_dir}/pr_url" ]]; then
-    printf 'Incomplete saved batch PR metadata in %s: expected pr_number and pr_url\n' "$batch_dir" >&2
-    exit 1
+    log_info "reconciling incomplete batch PR metadata through branch lookup"
+    return 1
   fi
 
   saved_pr_number="$(< "${batch_dir}/pr_number")"
