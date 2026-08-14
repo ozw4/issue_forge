@@ -120,3 +120,41 @@ read_state_tsv_value() {
   printf 'Missing required queue state key in %s: %s\n' "$state_file" "$required_key" >&2
   return 1
 }
+
+write_issue_state_tsv() {
+  local destination
+  local status
+  local phase
+  local exit_code
+  local lease_owner
+
+  if [[ "$#" -lt 4 || "$#" -gt 5 ]]; then
+    printf 'write_issue_state_tsv requires state path, status, phase, exit code, and optional lease owner\n' >&2
+    return 1
+  fi
+
+  destination="$1"
+  status="$2"
+  phase="$3"
+  exit_code="$4"
+  lease_owner="${5:-}"
+
+  if [[ -z "$lease_owner" ]]; then
+    if [[ ! -f "$destination" ]]; then
+      printf 'Missing Issue state file for lease-preserving update: %s\n' "$destination" >&2
+      return 1
+    fi
+    lease_owner="$(read_state_tsv_value "$destination" lease_owner)"
+  fi
+
+  if [[ -z "$lease_owner" ]]; then
+    printf 'Missing lease owner for Issue state update: %s\n' "$destination" >&2
+    return 1
+  fi
+
+  write_state_tsv "$destination" \
+    status "$status" \
+    phase "$phase" \
+    lease_owner "$lease_owner" \
+    exit_code "$exit_code"
+}

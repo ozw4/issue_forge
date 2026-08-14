@@ -56,6 +56,22 @@ ensure_token_usage_tsv() {
   fi
 }
 
+token_usage_row_exists() {
+  local output_file="$1"
+  local phase="$2"
+  local subject="$3"
+  local round="$4"
+
+  [[ -f "$output_file" ]] || return 1
+
+  awk -F '\t' \
+    -v phase="$phase" \
+    -v subject="$subject" \
+    -v round="$round" \
+    'NR > 1 && $1 == phase && $2 == subject && $3 == round { found = 1; exit } END { exit !found }' \
+    "$output_file"
+}
+
 append_codex_token_usage() {
   local output_file="$1"
   local header="$2"
@@ -68,6 +84,10 @@ append_codex_token_usage() {
   local log_path
 
   ensure_token_usage_tsv "$output_file" "$header"
+
+  if token_usage_row_exists "$output_file" "$phase" "$subject" "$round"; then
+    return 0
+  fi
 
   tokens="$(extract_codex_token_usage "$log_file" || true)"
   if [[ -z "$tokens" ]]; then

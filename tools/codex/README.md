@@ -70,7 +70,11 @@ Batch flows write `.work/queue/batches/<batch>/token-usage.tsv` with this header
 phase	issues	round	reasoning	tokens	log
 ```
 
-Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow.
+Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. A phase/subject/round key is appended at most once, which makes collection idempotent across reconciliation. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow.
+
+## Internal Issue Checkpoints
+
+Queue mode passes each Issue `state.tsv` and `head_commit` path to `run_issue_flow.sh`. This enables resume-safe internal dispatch across `implementation`, `checks`, `review`, `commit`, and `archive`; phase always names the next action. It is limited to `CODEX_FLOW_SKIP_PUBLISH=1`, and there is no public queue `--resume` option yet. Normal single-Issue invocation does not use these checkpoint variables and still requires a clean worktree at entry.
 
 ## Queue Light Review
 

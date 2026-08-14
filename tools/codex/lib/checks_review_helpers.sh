@@ -61,18 +61,14 @@ run_checks_round() {
 }
 
 run_fix_from_checks_round() {
-  local fix_round="$1"
-
   fix_checks_round=$((fix_checks_round + 1))
-  log_info "codex fix from checks (round ${fix_round})"
+  log_info "codex fix from checks (round ${fix_checks_round})"
   run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" "$CODEX_FLOW_CHECK_FIX_REASONING" "$fix_checks_log"
 }
 
 ensure_checks_pass() {
-  local fix_round=0
-
   while true; do
     log_info "running local checks"
 
@@ -81,13 +77,12 @@ ensure_checks_pass() {
       return 0
     fi
 
-    if [[ "$fix_round" -ge "$CODEX_FLOW_MAX_CHECK_FIX_ROUNDS" ]]; then
+    if [[ "$fix_checks_round" -ge "$CODEX_FLOW_MAX_CHECK_FIX_ROUNDS" ]]; then
       log_fail_with_path "checks failed after ${CODEX_FLOW_MAX_CHECK_FIX_ROUNDS} fix rounds" "$checks_log"
       return 1
     fi
 
-    fix_round=$((fix_round + 1))
-    run_fix_from_checks_round "$fix_round"
+    run_fix_from_checks_round
   done
 }
 
@@ -467,29 +462,24 @@ review_accepted() {
 }
 
 run_fix_from_review_round() {
-  local review_fix_round="$1"
-
   fix_review_round=$((fix_review_round + 1))
-  log_info "codex fix from review (round ${review_fix_round})"
+  log_info "codex fix from review (round ${fix_review_round})"
   run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
 }
 
 ensure_review_accepted() {
-  local review_fix_round=0
-
   run_review_round
   ensure_valid_review_output
 
   while ! review_accepted; do
-    if [[ "$review_fix_round" -ge "$CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS" ]]; then
+    if [[ "$fix_review_round" -ge "$CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS" ]]; then
       log_fail_with_path "review did not reach acceptance after ${CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS} fix rounds" "$review_output"
       exit 1
     fi
 
-    review_fix_round=$((review_fix_round + 1))
-    run_fix_from_review_round "$review_fix_round"
+    run_fix_from_review_round
     ensure_checks_pass
     run_review_round
     ensure_valid_review_output

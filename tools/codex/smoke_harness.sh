@@ -1080,6 +1080,10 @@ OUT
   *"Make the required changes, then stop."*)
     implementation_count="\$(increment_counter "${state_dir}/implementation-count.txt")"
     printf 'implementation round %s\n' "\$implementation_count" >> smoke-target.txt
+    if [[ "\${SMOKE_FAIL_IMPLEMENTATION_AFTER_EDIT:-0}" -ne 0 ]]; then
+      printf 'forced interrupted implementation after edit\n' >&2
+      exit 42
+    fi
     printf 'applied implementation round %s\n' "\$implementation_count"
     exit 0
     ;;
@@ -1789,6 +1793,7 @@ resolve_codex_profile_sandbox write
 run_token_usage_parser_smoke() {
   local token_log="${state_dir}/token-usage-parser.log"
   local no_token_log="${state_dir}/token-usage-parser-empty.log"
+  local usage_tsv="${state_dir}/token-usage-idempotent.tsv"
   local parsed_tokens
   local empty_tokens
 
@@ -1814,6 +1819,18 @@ EOF
   empty_tokens="$(extract_codex_token_usage "$no_token_log")"
   assert_equals '133813' "$parsed_tokens" 'token usage parser should return final comma-normalized value'
   assert_equals '' "$empty_tokens" 'token usage parser should return empty without a token block'
+
+  append_codex_token_usage "$usage_tsv" \
+    $'phase\tsubject\tround\treasoning\ttokens\tlog' \
+    review 'issue-40' 2 medium "$token_log"
+  append_codex_token_usage "$usage_tsv" \
+    $'phase\tsubject\tround\treasoning\ttokens\tlog' \
+    review 'issue-40' 2 medium "$token_log"
+  assert_fixed_line_count \
+    "$usage_tsv" \
+    $'review\tissue-40\t2\tmedium\t133813\t'"$token_log" \
+    '1' \
+    'idempotent token usage phase/subject/round row'
 }
 
 run_review_output_validation_smoke() {
@@ -2411,6 +2428,7 @@ run_issue_queue_fail_fast_smoke() {
 run_queue_state_helper_smoke() {
   local helper_root="${temp_root}/queue state helper"
   local state_file="${helper_root}/state files/state.tsv"
+  local issue_state="${helper_root}/state files/issue-state.tsv"
   local expected_file="${helper_root}/expected state.tsv"
   local error_log="${helper_root}/reader-error.log"
   local metadata_file="${helper_root}/metadata files/current_batch"
@@ -2450,6 +2468,13 @@ EOF
   } > "$expected_file"
   assert_files_equal "$expected_file" "$state_file" 'initial queue state contents'
 
+  write_issue_state_tsv "$issue_state" leased implementation '' 'batch-40-40'
+  write_issue_state_tsv "$issue_state" failed checks 17
+  assert_file_contains "$issue_state" $'status\tfailed'
+  assert_file_contains "$issue_state" $'phase\tchecks'
+  assert_file_contains "$issue_state" $'lease_owner\tbatch-40-40'
+  assert_file_contains "$issue_state" $'exit_code\t17'
+
   empty_value="$(read_state_tsv_value "$state_file" exit_code)"
   assert_equals '' "$empty_value" 'empty queue state value'
 
@@ -2487,6 +2512,179 @@ EOF
 
   temporary_file="$(find "$helper_root" -type f -name '.*.tmp.*' -print -quit)"
   assert_equals '' "$temporary_file" 'atomic queue state temporary files'
+}
+
+prepare_checkpoint_fixture() {
+  local fixture_name="$1"
+  local initial_phase="$2"
+
+  checkpoint_repo="${temp_root}/checkpoint-${fixture_name}"
+  checkpoint_issue_dir="${checkpoint_repo}/.work/queue/batches/batch-${ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${ISSUE_NUMBER}"
+  checkpoint_state="${checkpoint_issue_dir}/state.tsv"
+  checkpoint_head_file="${checkpoint_issue_dir}/head_commit"
+  checkpoint_branch="batch/checkpoint-${fixture_name}"
+
+  "${REAL_GIT}" clone --branch main "$remote_dir" "$checkpoint_repo" >/dev/null
+  "${REAL_GIT}" -C "$checkpoint_repo" config user.name 'Smoke Harness'
+  "${REAL_GIT}" -C "$checkpoint_repo" config user.email 'smoke@example.test'
+  ln -s "$REPO_ROOT" "${checkpoint_repo}/${FIXTURE_ENGINE_PATH}"
+  "${REAL_GIT}" -C "$checkpoint_repo" switch --create "$checkpoint_branch" >/dev/null
+
+  mkdir -p "${checkpoint_repo}/.work/issues" "$checkpoint_issue_dir"
+  cat > "${checkpoint_repo}/.work/issues/${ISSUE_NUMBER}.md" <<EOF
+# Issue #${ISSUE_NUMBER}
+
+Title: ${ISSUE_TITLE}
+URL: ${ISSUE_URL}
+
+## Body
+Checkpoint smoke fixture.
+EOF
+
+  checkpoint_base_commit="$("${REAL_GIT}" -C "$checkpoint_repo" rev-parse HEAD)"
+  printf '%s\n' "$ISSUE_NUMBER" > "${checkpoint_repo}/.work/current_issue"
+  printf '%s\n' "$checkpoint_branch" > "${checkpoint_repo}/.work/current_branch"
+  printf '%s\n' "$checkpoint_base_commit" > "${checkpoint_repo}/.work/base_commit"
+  printf '%s\n' "$checkpoint_base_commit" > "${checkpoint_issue_dir}/base_commit"
+  write_issue_state_tsv "$checkpoint_state" leased "$initial_phase" '' "batch-${ISSUE_NUMBER}-${ISSUE_NUMBER}"
+}
+
+run_checkpoint_flow() {
+  (
+    cd "$checkpoint_repo"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      CODEX_FLOW_SKIP_PUBLISH=1 \
+      CODEX_FLOW_PHASE_STATE_FILE="$checkpoint_state" \
+      CODEX_FLOW_ISSUE_HEAD_COMMIT_FILE="$checkpoint_head_file" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_flow.sh" "$ISSUE_NUMBER"
+  )
+}
+
+assert_checkpoint_committed_archive() {
+  assert_file_contains "$checkpoint_state" $'status\tcommitted'
+  assert_file_contains "$checkpoint_state" $'phase\tarchive'
+  assert_file_contains "$checkpoint_state" $'lease_owner\tbatch-40-40'
+  assert_file_contains "$checkpoint_state" $'exit_code\t'
+  assert_file_exists "$checkpoint_head_file"
+  assert_equals \
+    "$("${REAL_GIT}" -C "$checkpoint_repo" rev-parse HEAD)" \
+    "$(< "$checkpoint_head_file")" \
+    'checkpoint Issue head commit'
+}
+
+run_issue_flow_checkpoint_smoke() {
+  local interrupted_log="${state_dir}/checkpoint-implementation-interrupted.log"
+  local resumed_log="${state_dir}/checkpoint-implementation-resumed.log"
+  local checks_log="${state_dir}/checkpoint-checks-resumed.log"
+  local commit_log="${state_dir}/checkpoint-commit-reconciled.log"
+  local checks_budget_log="${state_dir}/checkpoint-checks-budget.log"
+  local review_budget_log="${state_dir}/checkpoint-review-budget.log"
+  local interrupted_status
+  local budget_status
+  local round
+
+  log 'running Issue phase checkpoint smoke'
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture implementation-interrupted implementation
+  set +e
+  SMOKE_FAIL_IMPLEMENTATION_AFTER_EDIT=1 run_checkpoint_flow > "$interrupted_log" 2>&1
+  interrupted_status="$?"
+  set -e
+  assert_equals '42' "$interrupted_status" 'interrupted implementation exit status'
+  assert_file_contains "$checkpoint_state" $'status\tfailed'
+  assert_file_contains "$checkpoint_state" $'phase\timplementation'
+  assert_file_contains "$checkpoint_state" $'exit_code\t42'
+  assert_equals '1' "$(< "${state_dir}/implementation-count.txt")" 'interrupted implementation invocation count'
+
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/review-count.txt"
+  run_checkpoint_flow > "$resumed_log" 2>&1
+  assert_file_contains "$resumed_log" 'reconciled interrupted implementation changes; continuing with checks'
+  assert_equals '1' "$(< "${state_dir}/implementation-count.txt")" 'resumed flow must not rerun implementation'
+  assert_checkpoint_committed_archive
+  assert_file_exists "${checkpoint_repo}/.work/codex/history/checks.round-01.log"
+  assert_file_exists "${checkpoint_repo}/.work/codex/history/review.round-01.txt"
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture checks-history checks
+  printf 'checkpoint checks change\n' >> "${checkpoint_repo}/smoke-target.txt"
+  mkdir -p "${checkpoint_repo}/.work/codex/history"
+  printf 'preserve checks round one\n' > "${checkpoint_repo}/.work/codex/history/checks.round-01.log"
+  cat > "${checkpoint_repo}/.work/codex/review.txt" <<'EOF'
+accept: yes
+
+blocker:
+- none
+
+major:
+- none
+
+minor:
+- none
+EOF
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  run_checkpoint_flow > "$checks_log" 2>&1
+  assert_equals 'preserve checks round one' "$(< "${checkpoint_repo}/.work/codex/history/checks.round-01.log")" 'existing checks history is preserved'
+  assert_file_exists "${checkpoint_repo}/.work/codex/history/checks.round-02.log"
+  assert_file_contains "$checks_log" 'reusing valid accepted review checkpoint'
+  assert_path_not_exists "${state_dir}/review-count.txt"
+  assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_checkpoint_committed_archive
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture commit-reconcile commit
+  printf 'commit reconciliation change\n' >> "${checkpoint_repo}/smoke-target.txt"
+  "${REAL_GIT}" -C "$checkpoint_repo" add smoke-target.txt
+  "${REAL_GIT}" -C "$checkpoint_repo" commit -m 'fixture: interrupted after commit' >/dev/null
+  run_checkpoint_flow > "$commit_log" 2>&1
+  assert_file_contains "$commit_log" 'reconciled Issue commit completed before phase checkpoint'
+  assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_path_not_exists "${state_dir}/checks-count.txt"
+  assert_path_not_exists "${state_dir}/review-count.txt"
+  assert_checkpoint_committed_archive
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture checks-budget checks
+  printf 'checkpoint checks budget change\n' >> "${checkpoint_repo}/smoke-target.txt"
+  mkdir -p "${checkpoint_repo}/.work/codex/history"
+  for ((round = 1; round <= 20; round += 1)); do
+    printf 'existing checks fix %s\n' "$round" > "${checkpoint_repo}/.work/codex/history/fix-from-checks.round-$(printf '%02d' "$round").log"
+  done
+  set +e
+  run_checkpoint_flow > "$checks_budget_log" 2>&1
+  budget_status="$?"
+  set -e
+  assert_equals '1' "$budget_status" 'cumulative checks fix budget exit status'
+  assert_file_contains "$checks_budget_log" 'checks failed after 20 fix rounds'
+  assert_path_not_exists "${state_dir}/fix-checks-count.txt"
+  assert_file_contains "$checkpoint_state" $'status\tfailed'
+  assert_file_contains "$checkpoint_state" $'phase\tchecks'
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture review-budget review
+  printf 'checkpoint review budget change\n' >> "${checkpoint_repo}/smoke-target.txt"
+  mkdir -p "${checkpoint_repo}/.work/codex/history"
+  for ((round = 1; round <= 19; round += 1)); do
+    printf 'existing review fix %s\n' "$round" > "${checkpoint_repo}/.work/codex/history/fix-from-review.round-$(printf '%02d' "$round").log"
+  done
+  set +e
+  run_checkpoint_flow > "$review_budget_log" 2>&1
+  budget_status="$?"
+  set -e
+  assert_equals '1' "$budget_status" 'cumulative review fix budget exit status'
+  assert_file_contains "$review_budget_log" 'review did not reach acceptance after 19 fix rounds'
+  assert_path_not_exists "${state_dir}/fix-review-count.txt"
+  assert_file_exists "${checkpoint_repo}/.work/codex/history/review.round-01.txt"
+  assert_file_contains "$checkpoint_state" $'status\tfailed'
+  assert_file_contains "$checkpoint_state" $'phase\treview'
 }
 
 run_issue_queue_strict_issue_review_smoke() {
@@ -2684,9 +2882,9 @@ run_issue_queue_failure_state_smoke() {
   assert_file_contains "${batch_dir}/state.tsv" $'status\tfailed'
   assert_file_contains "${batch_dir}/state.tsv" $'phase\tissues'
   assert_file_contains "${batch_dir}/state.tsv" $'exit_code\t1'
-  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tfailed'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tcommitted'
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tarchive'
-  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t1'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t'
   assert_file_exists "${batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
   assert_path_not_exists "${batch_dir}/issues/${ISSUE_NUMBER}/codex"
   assert_path_not_exists "${repo_dir}/.work/queue/lock"
@@ -2813,6 +3011,7 @@ main() {
   run_restart_issue_flow_smoke
   run_continue_after_review_smoke
   run_queue_state_helper_smoke
+  run_issue_flow_checkpoint_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
   run_issue_queue_strict_issue_review_smoke

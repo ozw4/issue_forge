@@ -187,6 +187,8 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
 
 各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
 
+queue 内の per-Issue flow は `implementation`、`checks`、`review`、`commit` を batch-local `state.tsv` に atomic checkpoint し、commit 後は `committed / archive` で queue に戻ります。中断時の dirty implementation、既存 accepted review、commit 済み HEAD を内部的に reconcile できますが、queue CLI の public `--resume` はまだ提供しません。checkpoint 環境変数を指定しない通常の single-Issue flow は clean worktree、publish、artifact path を含む従来の挙動を維持します。
+
 ```sh
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 ```
@@ -284,7 +286,7 @@ minor:
 
 `accept: yes` でも `blocker:` または `major:` に実 finding がある場合は validation failure です。`minor:` は残り得ます。
 
-Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
+Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。同じ phase、subject、round の row は重複追加しません。計測できない場合も flow は失敗せず、TSV header だけが残ります。
 
 `.work` と consumer-local `vendor/issue_forge` は git discovery、diff、staging、clean から engine が明示的に除外します。`.gitignore` は local hygiene のための追加措置です。
 

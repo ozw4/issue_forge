@@ -26,6 +26,7 @@ queue_lock=''
 queue_lifecycle_started=0
 queue_current_batch=''
 batch_current_issue=''
+history_allow_overwrite=1
 
 log_info() {
   printf '[queue] %s\n' "$1"
@@ -275,11 +276,12 @@ write_issue_state() {
   local batch_id="$1"
   local issue_number="$2"
 
-  write_state_tsv "$(issue_state_file "$batch_id" "$issue_number")" \
-    status "$3" \
-    phase "$4" \
-    lease_owner "$batch_id" \
-    exit_code "$5"
+  write_issue_state_tsv \
+    "$(issue_state_file "$batch_id" "$issue_number")" \
+    "$3" \
+    "$4" \
+    "$5" \
+    "$batch_id"
 }
 
 handle_queue_exit() {
@@ -515,7 +517,8 @@ process_issue_on_batch_branch() {
   local batch_id="$5"
   local issue_file
   local issue_base_commit
-  local issue_head_commit
+  local issue_checkpoint_file
+  local issue_head_commit_file
   local issue_light_review=0
 
   batch_current_issue="$issue_number"
@@ -535,17 +538,23 @@ process_issue_on_batch_branch() {
   write_atomic_value "$CODEX_FLOW_CURRENT_BRANCH_FILE" "$batch_branch"
   write_atomic_value "$CODEX_FLOW_BASE_COMMIT_FILE" "$issue_base_commit"
   write_issue_state "$batch_id" "$issue_number" leased implementation ''
+  issue_checkpoint_file="$(issue_state_file "$batch_id" "$issue_number")"
+  issue_head_commit_file="${batch_dir}/issues/${issue_number}/head_commit"
 
   log_info "running issue flow for issue ${issue_number}"
   if [[ "$CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW" -ne 0 ]]; then
     issue_light_review=1
   fi
-  CODEX_FLOW_SKIP_PUBLISH=1 CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
+  CODEX_FLOW_SKIP_PUBLISH=1 \
+    CODEX_FLOW_LIGHT_ISSUE_REVIEW="$issue_light_review" \
+    CODEX_FLOW_PHASE_STATE_FILE="$issue_checkpoint_file" \
+    CODEX_FLOW_ISSUE_HEAD_COMMIT_FILE="$issue_head_commit_file" \
     "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_issue_flow.sh" "$issue_number"
+  if [[ "$(read_state_tsv_value "$issue_checkpoint_file" status)" != 'committed' \
+    || "$(read_state_tsv_value "$issue_checkpoint_file" phase)" != 'archive' ]]; then
+    fail "Issue ${issue_number} flow returned without a committed / archive checkpoint"
+  fi
   ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
-  issue_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
-  write_atomic_value "${batch_dir}/issues/${issue_number}/head_commit" "$issue_head_commit"
-  write_issue_state "$batch_id" "$issue_number" leased archive ''
   archive_issue_codex_artifacts "$batch_dir" "$issue_number"
   write_issue_state "$batch_id" "$issue_number" committed batch ''
   write_batch_state "$batch_id" running issues '' ''
