@@ -51,7 +51,7 @@ archive_round_file() {
   local destination
 
   destination="$(history_round_path "$stem" "$round" "$extension")"
-  if [[ -e "$destination" && "${history_allow_overwrite:-0}" -ne 1 ]]; then
+  if [[ -e "$destination" && "${history_allow_overwrite:-1}" -ne 1 ]]; then
     printf 'Refusing to overwrite existing history file: %s\n' "$destination" >&2
     return 1
   fi
