@@ -233,7 +233,7 @@ reconcile_checkpoint_entry() {
         advance_issue_phase checks
       fi
       ;;
-    checks|review)
+    checks)
       if [[ "$current_head" != "$base_commit" ]]; then
         printf 'Cannot reconcile %s phase because HEAD advanced from the Issue base commit.\n' "$phase" >&2
         exit 1
@@ -241,6 +241,20 @@ reconcile_checkpoint_entry() {
       if [[ -z "$worktree_status" ]]; then
         printf 'Cannot reconcile %s phase without uncommitted Issue changes.\n' "$phase" >&2
         exit 1
+      fi
+      ;;
+    review)
+      if [[ "$current_head" != "$base_commit" ]]; then
+        printf 'Cannot reconcile review phase because HEAD advanced from the Issue base commit.\n' >&2
+        exit 1
+      fi
+      if [[ -z "$worktree_status" ]]; then
+        printf 'Cannot reconcile review phase without uncommitted Issue changes.\n' >&2
+        exit 1
+      fi
+      if ! existing_review_is_accepted; then
+        log_info 'reconciling non-accepted review checkpoint through checks'
+        advance_issue_phase checks
       fi
       ;;
     commit)

@@ -1056,6 +1056,10 @@ OUT
   *".work/codex/review.txt"*)
     fix_review_count="\$(increment_counter "${state_dir}/fix-review-count.txt")"
     printf 'fix review round %s\n' "\$fix_review_count" >> smoke-target.txt
+    if [[ "\${SMOKE_FAIL_REVIEW_FIX_AFTER_EDIT:-0}" -ne 0 ]]; then
+      printf 'forced interrupted review fix after edit\n' >&2
+      exit 43
+    fi
     printf 'applied review fix round %s\n' "\$fix_review_count"
     exit 0
     ;;
@@ -2579,6 +2583,8 @@ run_issue_flow_checkpoint_smoke() {
   local resumed_log="${state_dir}/checkpoint-implementation-resumed.log"
   local checks_log="${state_dir}/checkpoint-checks-resumed.log"
   local commit_log="${state_dir}/checkpoint-commit-reconciled.log"
+  local review_fix_interrupted_log="${state_dir}/checkpoint-review-fix-interrupted.log"
+  local review_fix_resumed_log="${state_dir}/checkpoint-review-fix-resumed.log"
   local checks_budget_log="${state_dir}/checkpoint-checks-budget.log"
   local review_budget_log="${state_dir}/checkpoint-review-budget.log"
   local interrupted_status
@@ -2634,6 +2640,27 @@ EOF
   assert_file_contains "$checks_log" 'reusing valid accepted review checkpoint'
   assert_path_not_exists "${state_dir}/review-count.txt"
   assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_checkpoint_committed_archive
+
+  clear_command_logs
+  reset_flow_counters
+  prepare_checkpoint_fixture review-fix-interrupted implementation
+  set +e
+  SMOKE_FAIL_REVIEW_FIX_AFTER_EDIT=1 run_checkpoint_flow > "$review_fix_interrupted_log" 2>&1
+  interrupted_status="$?"
+  set -e
+  assert_equals '43' "$interrupted_status" 'interrupted review fix exit status'
+  assert_file_contains "$checkpoint_state" $'status\tfailed'
+  assert_file_contains "$checkpoint_state" $'phase\treview'
+  assert_file_contains "$checkpoint_state" $'exit_code\t43'
+  assert_equals '1' "$(< "${state_dir}/fix-review-count.txt")" 'interrupted review fix invocation count'
+
+  run_checkpoint_flow > "$review_fix_resumed_log" 2>&1
+  assert_file_contains "$review_fix_resumed_log" 'reconciling non-accepted review checkpoint through checks'
+  assert_file_order "$review_fix_resumed_log" '[flow] running local checks' '[flow] codex review'
+  assert_equals '3' "$(< "${state_dir}/checks-count.txt")" 'resumed review fix checks invocation count'
+  assert_equals '2' "$(< "${state_dir}/review-count.txt")" 'resumed review invocation count'
+  assert_equals '1' "$(< "${state_dir}/fix-review-count.txt")" 'resumed flow must not repeat interrupted review fix'
   assert_checkpoint_committed_archive
 
   clear_command_logs
