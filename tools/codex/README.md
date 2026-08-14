@@ -21,7 +21,8 @@ Covered behavior includes:
 - the direct vendor issue-flow entrypoint keeps the current `.work/codex/*` filenames, history round naming, review accept/format path, and worktree exclusions
 - review material keeps text diffs in `review.diff`/`batch.diff`, writes compact `review.summary.txt`/`batch.summary.txt` metadata, and omits `GIT binary patch` payloads
 - `CODEX_FLOW_SKIP_PUBLISH=1` keeps issue-flow commits while skipping branch push and issue PR creation
-- the direct vendor issue queue processes issues sequentially in input order on one batch branch, persists its fresh plan and queue/batch/Issue lifecycle state, archives per-issue Codex artifacts atomically, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, records terminal success/failure, and fails before modification when multiple batches are requested without `--auto-merge`
+- the direct vendor issue queue processes issues sequentially in input order on one batch branch, persists its fresh plan and queue/batch/Issue lifecycle state, resumes the first unfinished phase from that local state, archives per-issue Codex artifacts atomically, runs batch checks/review/fix loops with configured reasoning effort, creates a single batch PR, records terminal success/failure, and fails before modification when multiple batches are requested without `--auto-merge`
+- queue resume fixtures cover terminal no-op, interrupted dirty implementation, committed-Issue skip, batch checks, publish reconciliation and existing-PR lookup, already-merged auto-merge, stale/live locks, dirty wrong-branch rejection, and missing/old plan or state rejection
 - batch helper fixtures restore check/review rounds and cumulative fix budgets from history, reuse clean accepted reviews, discard stale structured output when a newer review is interrupted, re-evaluate dirty interrupted fixes, reconcile existing PRs before creation (including incomplete saved metadata), atomically persist batch head/PR metadata, and skip duplicate auto-merge requests for merged PRs
 - PR publishing generates the deterministic body format, stores body-file contents from the `gh` stub, covers the create path, and covers existing PR title/body sync through `gh pr edit`
 - PR body assertions cover `Closes #<issue>`, summary, changed files, checks, review, checks/review artifacts when present, and `not available yet` when those artifacts are missing
@@ -75,7 +76,7 @@ Rows are appended after Codex calls when the corresponding Codex log contains a 
 
 ## Internal Issue Checkpoints
 
-Queue mode passes each Issue `state.tsv` and `head_commit` path to `run_issue_flow.sh`. This enables resume-safe internal dispatch across `implementation`, `checks`, `review`, `commit`, and `archive`; phase always names the next action. It is limited to `CODEX_FLOW_SKIP_PUBLISH=1`, and there is no public queue `--resume` option yet. Normal single-Issue invocation does not use these checkpoint variables and still requires a clean worktree at entry.
+Queue mode passes each Issue `state.tsv` and `head_commit` path to `run_issue_flow.sh`. This enables resume-safe internal dispatch across `implementation`, `checks`, `review`, `commit`, and `archive`; phase always names the next action. It is limited to `CODEX_FLOW_SKIP_PUBLISH=1`. The public `run_issue_queue.sh --resume` entrypoint restores the saved schema-v1 plan and drives these checkpoints on the same local worktree. Normal single-Issue invocation does not use these checkpoint variables and still requires a clean worktree at entry.
 
 ## Queue Light Review
 

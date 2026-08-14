@@ -27,6 +27,8 @@ queue_lifecycle_started=0
 queue_current_batch=''
 batch_current_issue=''
 history_allow_overwrite=1
+queue_resume_mode=0
+queue_resume_complete=0
 
 log_info() {
   printf '[queue] %s\n' "$1"
@@ -40,6 +42,7 @@ fail() {
 usage() {
   cat <<'EOF'
 Usage: tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
+       tools/codex/run_issue_queue.sh --resume
 
 Options:
   --review-every <positive_integer>
@@ -47,6 +50,7 @@ Options:
   --batch-fix-effort <non_empty_value_without_whitespace>
   --auto-merge
   --draft
+  --resume
   --help
 EOF
 }
@@ -152,6 +156,105 @@ parse_queue_arguments() {
   fi
 }
 
+parse_queue_cli() {
+  if [[ "${1:-}" == '--resume' ]]; then
+    if [[ "$#" -ne 1 ]]; then
+      fail '--resume does not accept Issue numbers or fresh queue options'
+    fi
+    queue_resume_mode=1
+    return 0
+  fi
+
+  parse_queue_arguments "$@"
+}
+
+read_queue_plan() {
+  local key
+  local value
+  local schema_version=''
+  local schema_count=0
+  local review_every_count=0
+  local batch_review_effort_count=0
+  local batch_review_fix_effort_count=0
+  local batch_check_fix_effort_count=0
+  local draft_pr_count=0
+  local auto_merge_count=0
+
+  if [[ ! -f "$CODEX_FLOW_QUEUE_PLAN_FILE" ]]; then
+    fail "Missing queue plan file required for --resume: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
+  fi
+
+  issue_numbers=()
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      schema_version)
+        schema_version="$value"
+        schema_count=$((schema_count + 1))
+        ;;
+      review_every)
+        review_every="$value"
+        review_every_count=$((review_every_count + 1))
+        ;;
+      batch_review_effort)
+        batch_review_effort="$value"
+        batch_review_effort_count=$((batch_review_effort_count + 1))
+        ;;
+      batch_review_fix_effort)
+        batch_review_fix_effort="$value"
+        batch_review_fix_effort_count=$((batch_review_fix_effort_count + 1))
+        ;;
+      batch_check_fix_effort)
+        batch_check_fix_effort="$value"
+        batch_check_fix_effort_count=$((batch_check_fix_effort_count + 1))
+        ;;
+      draft_pr)
+        draft_pr="$value"
+        draft_pr_count=$((draft_pr_count + 1))
+        ;;
+      auto_merge)
+        auto_merge="$value"
+        auto_merge_count=$((auto_merge_count + 1))
+        ;;
+      issue)
+        require_numeric_issue_number "$value"
+        issue_numbers+=("$value")
+        ;;
+      '')
+        fail "Malformed empty key in queue plan: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
+        ;;
+      *)
+        fail "Unsupported queue plan key in ${CODEX_FLOW_QUEUE_PLAN_FILE}: ${key}"
+        ;;
+    esac
+  done < "$CODEX_FLOW_QUEUE_PLAN_FILE"
+
+  if [[ "$schema_count" -ne 1 || "$schema_version" != "$CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION" ]]; then
+    fail "Unsupported queue plan schema in ${CODEX_FLOW_QUEUE_PLAN_FILE}: expected schema_version ${CODEX_FLOW_QUEUE_STATE_SCHEMA_VERSION}"
+  fi
+  if [[ "$review_every_count" -ne 1 || "$batch_review_effort_count" -ne 1 \
+    || "$batch_review_fix_effort_count" -ne 1 || "$batch_check_fix_effort_count" -ne 1 \
+    || "$draft_pr_count" -ne 1 || "$auto_merge_count" -ne 1 ]]; then
+    fail "Missing or duplicate required option key in queue plan: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
+  fi
+  if [[ "${#issue_numbers[@]}" -eq 0 ]]; then
+    fail "Queue plan contains no Issue numbers: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
+  fi
+
+  require_positive_integer_value 'plan review_every' "$review_every"
+  require_nonempty_no_whitespace_value 'plan batch_review_effort' "$batch_review_effort"
+  require_nonempty_no_whitespace_value 'plan batch_review_fix_effort' "$batch_review_fix_effort"
+  require_nonempty_no_whitespace_value 'plan batch_check_fix_effort' "$batch_check_fix_effort"
+  if [[ ! "$draft_pr" =~ ^[01]$ ]]; then
+    fail "plan draft_pr must be 0 or 1: ${draft_pr}"
+  fi
+  if [[ ! "$auto_merge" =~ ^[01]$ ]]; then
+    fail "plan auto_merge must be 0 or 1: ${auto_merge}"
+  fi
+  if [[ "$auto_merge" -eq 1 && "$draft_pr" -eq 1 ]]; then
+    fail 'Saved queue plan combines auto_merge with a draft batch PR'
+  fi
+}
+
 ensure_unique_issues() {
   local issue_number
   local seen_file
@@ -228,14 +331,24 @@ ensure_planned_batch_branches_available() {
 }
 
 create_queue_lock() {
+  local saved_pid=''
+
   mkdir -p "$CODEX_FLOW_QUEUE_DIR"
   queue_lock="${CODEX_FLOW_QUEUE_DIR}/lock"
 
   if [[ -e "$queue_lock" ]]; then
-    fail "Queue lock already exists: ${queue_lock}"
+    if [[ "$queue_resume_mode" -ne 1 ]]; then
+      fail "Queue lock already exists: ${queue_lock}"
+    fi
+
+    IFS= read -r saved_pid < "$queue_lock" || true
+    if [[ "$saved_pid" =~ ^[0-9]+$ ]] && kill -0 "$saved_pid" 2>/dev/null; then
+      fail "Queue lock belongs to a live local process (${saved_pid}): ${queue_lock}"
+    fi
+    log_info "reclaiming stale queue lock: ${queue_lock}"
   fi
 
-  printf '%s\n' "$$" > "$queue_lock"
+  write_atomic_value "$queue_lock" "$$"
   trap 'handle_queue_exit' EXIT
 }
 
@@ -348,7 +461,7 @@ ensure_fresh_queue_state_allows_start() {
       return 0
       ;;
     running|failed)
-      fail "Queue state is ${existing_status}; do not overwrite it with a fresh run. Use --resume when resume support is available."
+      fail "Queue state is ${existing_status}; do not overwrite it with a fresh run. Use --resume."
       ;;
     *)
       fail "Cannot start a fresh queue from queue status: ${existing_status}"
@@ -495,6 +608,24 @@ archive_issue_codex_artifacts() {
   fi
 }
 
+reconcile_issue_codex_archive() {
+  local batch_dir="$1"
+  local issue_number="$2"
+  local issue_dir="${batch_dir}/issues/${issue_number}"
+  local destination="${issue_dir}/codex"
+
+  find "$issue_dir" -mindepth 1 -maxdepth 1 -type d -name '.codex.tmp.*' \
+    -exec rm -rf -- {} +
+
+  if [[ ! -d "$destination" ]]; then
+    archive_issue_codex_artifacts "$batch_dir" "$issue_number"
+  else
+    log_info "reusing completed Codex archive for issue ${issue_number}"
+  fi
+
+  rm -rf -- "$CODEX_FLOW_CODEX_DIR"
+}
+
 create_batch_branch() {
   local branch_name="$1"
   local batch_dir="$2"
@@ -509,35 +640,131 @@ create_batch_branch() {
   git switch --create "$branch_name" "$batch_base_commit"
 }
 
-process_issue_on_batch_branch() {
+resolve_commit_file() {
+  local commit_file="$1"
+  local label="$2"
+  local saved_commit
+  local resolved_commit
+
+  if [[ ! -f "$commit_file" ]]; then
+    fail "Missing ${label}: ${commit_file}"
+  fi
+  saved_commit="$(< "$commit_file")"
+  if ! resolved_commit="$(git rev-parse --verify "${saved_commit}^{commit}" 2>/dev/null)"; then
+    fail "Invalid ${label} in ${commit_file}: ${saved_commit}"
+  fi
+  printf '%s\n' "$resolved_commit"
+}
+
+restore_batch_branch() {
+  local batch_id="$1"
+  local batch_branch="$2"
+  local batch_dir="$3"
+  local allow_create="$4"
+  local batch_base_commit
+  local current_branch
+  local worktree_status
+
+  batch_base_commit="$(resolve_commit_file "${batch_dir}/base_commit" 'batch base commit')"
+  current_branch="$(git branch --show-current)"
+  worktree_status="$(status_outside_work)"
+
+  if ! git show-ref --verify --quiet "refs/heads/${batch_branch}"; then
+    if [[ "$allow_create" -ne 1 ]]; then
+      fail "Missing local batch branch required for resume: ${batch_branch}"
+    fi
+    if [[ -n "$worktree_status" ]]; then
+      fail "Cannot recreate batch branch ${batch_branch} with a dirty worktree"
+    fi
+    log_info "recreating batch branch ${batch_branch} from saved base commit"
+    git switch --create "$batch_branch" "$batch_base_commit"
+  elif [[ "$current_branch" != "$batch_branch" ]]; then
+    if [[ -n "$worktree_status" ]]; then
+      fail "Cannot resume batch ${batch_id} from dirty branch ${current_branch:-detached}; expected ${batch_branch}"
+    fi
+    log_info "switching to saved batch branch ${batch_branch}"
+    git switch "$batch_branch"
+  fi
+
+  if ! git merge-base --is-ancestor "$batch_base_commit" "$batch_branch"; then
+    fail "Saved batch base commit is not in local branch history: ${batch_base_commit} not in ${batch_branch}"
+  fi
+
+  write_atomic_value "$CODEX_FLOW_CURRENT_BRANCH_FILE" "$batch_branch"
+}
+
+reconcile_batch_branch_phase() {
+  local batch_id="$1"
+  local batch_branch="$2"
+  local batch_dir="$3"
+
+  if [[ ! -f "${batch_dir}/base_commit" ]]; then
+    if [[ "$queue_resume_mode" -eq 1 ]]; then
+      fail "Missing batch base commit required to resume branch phase: ${batch_dir}/base_commit"
+    fi
+    create_batch_branch "$batch_branch" "$batch_dir"
+    return 0
+  fi
+
+  restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 1
+}
+
+restore_issue_runtime_state() {
+  local issue_number="$1"
+  local batch_branch="$2"
+  local batch_dir="$3"
+  local issue_base_commit
+
+  issue_base_commit="$(resolve_commit_file "${batch_dir}/issues/${issue_number}/base_commit" "Issue ${issue_number} base commit")"
+  write_atomic_value "$CODEX_FLOW_CURRENT_ISSUE_FILE" "$issue_number"
+  write_atomic_value "$CODEX_FLOW_CURRENT_BRANCH_FILE" "$batch_branch"
+  write_atomic_value "$CODEX_FLOW_BASE_COMMIT_FILE" "$issue_base_commit"
+}
+
+prepare_issue_context_on_batch_branch() {
   local issue_number="$1"
   local batch_branch="$2"
   local batch_dir="$3"
   local issues_file="$4"
   local batch_id="$5"
+  local issue_dir="${batch_dir}/issues/${issue_number}"
   local issue_file
   local issue_base_commit
-  local issue_checkpoint_file
-  local issue_head_commit_file
-  local issue_light_review=0
 
   batch_current_issue="$issue_number"
   write_batch_state "$batch_id" running issues "$issue_number" ''
   write_issue_state "$batch_id" "$issue_number" leased context ''
   ensure_clean_worktree "Working tree must be clean before processing issue ${issue_number}."
-  rm -rf "$CODEX_FLOW_CODEX_DIR"
+  rm -rf -- "$CODEX_FLOW_CODEX_DIR"
 
   log_info "fetching issue ${issue_number}"
   write_issue_context_file "$issue_number"
   issue_file="$(require_issue_file "$issue_number")"
   append_issue_context_to_batch_file "$issue_number" "$issue_file" "$issues_file"
 
-  issue_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
-  write_atomic_value "${batch_dir}/issues/${issue_number}/base_commit" "$issue_base_commit"
+  if [[ -f "${issue_dir}/base_commit" ]]; then
+    issue_base_commit="$(resolve_commit_file "${issue_dir}/base_commit" "Issue ${issue_number} base commit")"
+    if [[ "$issue_base_commit" != "$(git rev-parse --verify 'HEAD^{commit}')" ]]; then
+      fail "Saved Issue ${issue_number} base commit does not match current HEAD during context reconciliation"
+    fi
+  else
+    issue_base_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+    write_atomic_value "${issue_dir}/base_commit" "$issue_base_commit"
+  fi
   write_atomic_value "$CODEX_FLOW_CURRENT_ISSUE_FILE" "$issue_number"
   write_atomic_value "$CODEX_FLOW_CURRENT_BRANCH_FILE" "$batch_branch"
   write_atomic_value "$CODEX_FLOW_BASE_COMMIT_FILE" "$issue_base_commit"
   write_issue_state "$batch_id" "$issue_number" leased implementation ''
+}
+
+run_issue_checkpoint_flow() {
+  local issue_number="$1"
+  local batch_dir="$2"
+  local batch_id="$3"
+  local issue_checkpoint_file
+  local issue_head_commit_file
+  local issue_light_review=0
+
   issue_checkpoint_file="$(issue_state_file "$batch_id" "$issue_number")"
   issue_head_commit_file="${batch_dir}/issues/${issue_number}/head_commit"
 
@@ -554,12 +781,94 @@ process_issue_on_batch_branch() {
     || "$(read_state_tsv_value "$issue_checkpoint_file" phase)" != 'archive' ]]; then
     fail "Issue ${issue_number} flow returned without a committed / archive checkpoint"
   fi
-  ensure_clean_worktree "Issue ${issue_number} flow left uncommitted repository changes."
-  archive_issue_codex_artifacts "$batch_dir" "$issue_number"
-  write_issue_state "$batch_id" "$issue_number" committed batch ''
-  write_batch_state "$batch_id" running issues '' ''
-  batch_current_issue=''
-  rm -rf "$CODEX_FLOW_CODEX_DIR"
+}
+
+validate_issue_head_in_batch_branch() {
+  local batch_dir="$1"
+  local issue_number="$2"
+  local batch_branch="$3"
+  local issue_head_commit
+
+  issue_head_commit="$(resolve_commit_file "${batch_dir}/issues/${issue_number}/head_commit" "Issue ${issue_number} head commit")"
+  if ! git merge-base --is-ancestor "$issue_head_commit" "$batch_branch"; then
+    fail "Issue ${issue_number} head commit is not in batch branch history: ${issue_head_commit}"
+  fi
+}
+
+process_issue_on_batch_branch() {
+  local issue_number="$1"
+  local batch_branch="$2"
+  local batch_dir="$3"
+  local issues_file="$4"
+  local batch_id="$5"
+  local issue_status
+  local issue_phase
+
+  while true; do
+    issue_status="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" status)"
+    issue_phase="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" phase)"
+
+    case "${issue_status}/${issue_phase}" in
+      acked/done)
+        return 0
+        ;;
+      committed/batch)
+        validate_issue_head_in_batch_branch "$batch_dir" "$issue_number" "$batch_branch"
+        return 0
+        ;;
+      queued/context|leased/context|failed/context)
+        prepare_issue_context_on_batch_branch \
+          "$issue_number" "$batch_branch" "$batch_dir" "$issues_file" "$batch_id"
+        ;;
+      leased/implementation|failed/implementation|leased/checks|failed/checks|leased/review|failed/review|leased/commit|failed/commit)
+        batch_current_issue="$issue_number"
+        write_batch_state "$batch_id" running issues "$issue_number" ''
+        write_issue_state "$batch_id" "$issue_number" leased "$issue_phase" ''
+        restore_issue_runtime_state "$issue_number" "$batch_branch" "$batch_dir"
+        run_issue_checkpoint_flow "$issue_number" "$batch_dir" "$batch_id"
+        ;;
+      committed/archive)
+        batch_current_issue="$issue_number"
+        write_batch_state "$batch_id" running issues "$issue_number" ''
+        restore_issue_runtime_state "$issue_number" "$batch_branch" "$batch_dir"
+        ensure_clean_worktree "Issue ${issue_number} archive reconciliation requires a clean worktree."
+        validate_issue_head_in_batch_branch "$batch_dir" "$issue_number" "$batch_branch"
+        reconcile_issue_codex_archive "$batch_dir" "$issue_number"
+        write_issue_state "$batch_id" "$issue_number" committed batch ''
+        write_batch_state "$batch_id" running issues '' ''
+        batch_current_issue=''
+        ;;
+      *)
+        fail "Unsupported Issue state for issue ${issue_number}: ${issue_status} / ${issue_phase}"
+        ;;
+    esac
+  done
+}
+
+ack_batch_issues() {
+  local batch_id="$1"
+  local batch_dir="$2"
+  local batch_branch="$3"
+  shift 3
+  local issue_number
+  local issue_status
+  local issue_phase
+
+  for issue_number in "$@"; do
+    issue_status="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" status)"
+    issue_phase="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" phase)"
+    case "${issue_status}/${issue_phase}" in
+      acked/done)
+        ;;
+      committed/batch)
+        validate_issue_head_in_batch_branch "$batch_dir" "$issue_number" "$batch_branch"
+        write_issue_state "$batch_id" "$issue_number" acked 'done' ''
+        ;;
+      *)
+        fail "Cannot ack issue ${issue_number} from state ${issue_status} / ${issue_phase}"
+        ;;
+    esac
+  done
 }
 
 process_batch() {
@@ -576,95 +885,268 @@ process_batch() {
   local issues_file
   local batch_issues_label
   local index
+  local issue_number
+  local batch_status
+  local batch_phase
   local -a batch_issues=()
 
   batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
   batch_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
   issues_file="${batch_dir}/issues.txt"
+  batch_base_commit=''
+
+  for ((index = start_index; index < end_index; index += 1)); do
+    batch_issues+=("${issue_numbers[$index]}")
+  done
+  batch_issues_label="$(join_issue_numbers "${batch_issues[@]}")"
 
   queue_current_batch="$batch_id"
   write_atomic_value "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id"
   write_queue_state running batch "$batch_id" ''
-  write_batch_state "$batch_id" running branch '' ''
 
-  create_batch_branch "$batch_branch" "$batch_dir"
-  batch_base_commit="$(< "${batch_dir}/base_commit")"
-  write_batch_state "$batch_id" running issues '' ''
+  while true; do
+    batch_status="$(read_state_tsv_value "$(batch_state_file "$batch_id")" status)"
+    batch_phase="$(read_state_tsv_value "$(batch_state_file "$batch_id")" phase)"
+    case "$batch_status" in
+      planned|running|failed) ;;
+      succeeded)
+        if [[ "$batch_phase" == 'done' ]]; then
+          break
+        fi
+        fail "Succeeded batch has non-terminal phase: ${batch_id} / ${batch_phase}"
+        ;;
+      *) fail "Unsupported batch status for ${batch_id}: ${batch_status}" ;;
+    esac
 
-  for ((index = start_index; index < end_index; index += 1)); do
-    batch_issues+=("${issue_numbers[$index]}")
-    process_issue_on_batch_branch "${issue_numbers[$index]}" "$batch_branch" "$batch_dir" "$issues_file" "$batch_id"
-  done
-
-  batch_issues_label="$(join_issue_numbers "${batch_issues[@]}")"
-
-  write_batch_state "$batch_id" running checks '' ''
-  ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
-  write_batch_state "$batch_id" running review '' ''
-  ensure_batch_review_accepted \
-    "$batch_dir" \
-    "$issues_file" \
-    "$batch_base_commit" \
-    "$first_issue" \
-    "$last_issue" \
-    "$batch_issues_label" \
-    "$batch_review_effort" \
-    "$batch_review_fix_effort" \
-    "$batch_check_fix_effort"
-
-  write_batch_head_metadata "$batch_dir" "$batch_base_commit"
-
-  write_batch_state "$batch_id" running publish '' ''
-  publish_batch_results \
-    "$batch_dir" \
-    "$first_issue" \
-    "$last_issue" \
-    "$batch_branch" \
-    "$draft_pr" \
-    batch_pr_number \
-    batch_pr_url \
-    "${batch_issues[@]}"
-  if [[ -z "$batch_pr_number" || -z "$batch_pr_url" ]]; then
-    fail 'Batch publish returned incomplete PR metadata.'
-  fi
-
-  if [[ "$auto_merge" -eq 1 ]]; then
-    write_batch_state "$batch_id" running merge '' ''
-    auto_merge_batch_pr "$batch_pr_number"
-  fi
-
-  write_batch_state "$batch_id" running ack '' ''
-  for index in "${!batch_issues[@]}"; do
-    if [[ "$(read_state_tsv_value "$(issue_state_file "$batch_id" "${batch_issues[$index]}")" status)" != 'committed' ]]; then
-      fail "Cannot ack issue ${batch_issues[$index]} because it is not committed"
+    if [[ "$batch_status" == 'failed' ]]; then
+      write_batch_state "$batch_id" running "$batch_phase" \
+        "$(read_state_tsv_value "$(batch_state_file "$batch_id")" current_issue)" ''
     fi
-    write_issue_state "$batch_id" "${batch_issues[$index]}" acked 'done' ''
+
+    case "$batch_phase" in
+      branch)
+        reconcile_batch_branch_phase "$batch_id" "$batch_branch" "$batch_dir"
+        write_batch_state "$batch_id" running issues '' ''
+        ;;
+      issues)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        batch_base_commit="$(resolve_commit_file "${batch_dir}/base_commit" 'batch base commit')"
+        for issue_number in "${batch_issues[@]}"; do
+          process_issue_on_batch_branch "$issue_number" "$batch_branch" "$batch_dir" "$issues_file" "$batch_id"
+        done
+        write_batch_state "$batch_id" running checks '' ''
+        ;;
+      checks)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        batch_base_commit="$(resolve_commit_file "${batch_dir}/base_commit" 'batch base commit')"
+        ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort"
+        write_batch_state "$batch_id" running review '' ''
+        ;;
+      review)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        batch_base_commit="$(resolve_commit_file "${batch_dir}/base_commit" 'batch base commit')"
+        ensure_batch_review_accepted \
+          "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" \
+          "$batch_issues_label" "$batch_review_effort" "$batch_review_fix_effort" "$batch_check_fix_effort"
+        write_batch_state "$batch_id" running publish '' ''
+        ;;
+      publish)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        batch_base_commit="$(resolve_commit_file "${batch_dir}/base_commit" 'batch base commit')"
+        write_batch_head_metadata "$batch_dir" "$batch_base_commit"
+        publish_batch_results \
+          "$batch_dir" "$first_issue" "$last_issue" "$batch_branch" "$draft_pr" \
+          batch_pr_number batch_pr_url "${batch_issues[@]}"
+        if [[ -z "$batch_pr_number" || -z "$batch_pr_url" ]]; then
+          fail 'Batch publish returned incomplete PR metadata.'
+        fi
+        if [[ "$auto_merge" -eq 1 ]]; then
+          write_batch_state "$batch_id" running merge '' ''
+        else
+          write_batch_state "$batch_id" running ack '' ''
+        fi
+        ;;
+      merge)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        if [[ ! -f "${batch_dir}/pr_number" || ! -f "${batch_dir}/pr_url" ]]; then
+          fail "Missing saved batch PR metadata required for merge: ${batch_dir}/pr_number and ${batch_dir}/pr_url"
+        fi
+        batch_pr_number="$(< "${batch_dir}/pr_number")"
+        if [[ ! "$batch_pr_number" =~ ^[0-9]+$ ]]; then
+          fail "Invalid saved batch PR number for merge: ${batch_pr_number}"
+        fi
+        auto_merge_batch_pr "$batch_pr_number"
+        write_batch_state "$batch_id" running ack '' ''
+        ;;
+      ack)
+        restore_batch_branch "$batch_id" "$batch_branch" "$batch_dir" 0
+        ack_batch_issues "$batch_id" "$batch_dir" "$batch_branch" "${batch_issues[@]}"
+        write_batch_state "$batch_id" succeeded 'done' '' ''
+        ;;
+      done)
+        if [[ "$batch_status" != 'succeeded' ]]; then
+          fail "Batch done phase requires succeeded status: ${batch_id}"
+        fi
+        ;;
+      *)
+        fail "Unsupported batch phase for ${batch_id}: ${batch_phase}"
+        ;;
+    esac
   done
 
-  write_batch_state "$batch_id" succeeded 'done' '' ''
   batch_current_issue=''
   queue_current_batch=''
   write_atomic_value "${CODEX_FLOW_QUEUE_DIR}/current_batch" ''
   write_queue_state running batch '' ''
 }
 
+validate_resume_queue_artifacts() {
+  local start_index=0
+  local end_index
+  local first_issue
+  local last_issue
+  local batch_id
+  local batch_dir
+  local expected_branch
+  local saved_branch
+  local batch_status
+  local batch_phase
+  local issue_number
+  local index
+  local checkpoint_batch
+  local checkpoint_known=0
+  local issue_count="${#issue_numbers[@]}"
+
+  checkpoint_batch="$(read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" current_batch)"
+
+  while [[ "$start_index" -lt "$issue_count" ]]; do
+    end_index=$((start_index + review_every))
+    if [[ "$end_index" -gt "$issue_count" ]]; then
+      end_index="$issue_count"
+    fi
+    first_issue="${issue_numbers[$start_index]}"
+    last_issue="${issue_numbers[$((end_index - 1))]}"
+    batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
+    batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
+    expected_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
+
+    if [[ ! -d "$batch_dir" ]]; then
+      fail "Missing planned batch artifact directory: ${batch_dir}"
+    fi
+    if [[ ! -f "${batch_dir}/branch" ]]; then
+      fail "Missing saved batch branch metadata: ${batch_dir}/branch"
+    fi
+    saved_branch="$(< "${batch_dir}/branch")"
+    if [[ "$saved_branch" != "$expected_branch" ]]; then
+      fail "Saved batch branch does not match restored plan for ${batch_id}: ${saved_branch} != ${expected_branch}"
+    fi
+
+    batch_status="$(read_state_tsv_value "$(batch_state_file "$batch_id")" status)"
+    batch_phase="$(read_state_tsv_value "$(batch_state_file "$batch_id")" phase)"
+    read_state_tsv_value "$(batch_state_file "$batch_id")" current_issue >/dev/null
+    read_state_tsv_value "$(batch_state_file "$batch_id")" exit_code >/dev/null
+    if [[ "$batch_status" == 'succeeded' && "$batch_phase" != 'done' ]]; then
+      fail "Succeeded batch has non-terminal phase: ${batch_id} / ${batch_phase}"
+    fi
+
+    for ((index = start_index; index < end_index; index += 1)); do
+      issue_number="${issue_numbers[$index]}"
+      read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" status >/dev/null
+      read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" phase >/dev/null
+      read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" lease_owner >/dev/null
+      read_state_tsv_value "$(issue_state_file "$batch_id" "$issue_number")" exit_code >/dev/null
+    done
+
+    if [[ -n "$checkpoint_batch" && "$checkpoint_batch" == "$batch_id" ]]; then
+      checkpoint_known=1
+    fi
+    start_index="$end_index"
+  done
+
+  if [[ -n "$checkpoint_batch" && "$checkpoint_known" -ne 1 ]]; then
+    fail "Queue current_batch is not present in the restored plan: ${checkpoint_batch}"
+  fi
+}
+
+validate_resume_queue_state_file() {
+  if [[ ! -f "$CODEX_FLOW_QUEUE_STATE_FILE" ]]; then
+    fail "Missing queue state file required for --resume: ${CODEX_FLOW_QUEUE_STATE_FILE}"
+  fi
+  read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" status >/dev/null
+  read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" phase >/dev/null
+  read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" current_batch >/dev/null
+  read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" exit_code >/dev/null
+}
+
+resume_queue_state() {
+  local queue_status
+  local queue_phase
+  local checkpoint_batch
+
+  queue_status="$(read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" status)"
+  queue_phase="$(read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" phase)"
+  checkpoint_batch="$(read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" current_batch)"
+
+  if [[ "$queue_status" == 'succeeded' && "$queue_phase" == 'done' ]]; then
+    log_info 'queue is already complete; nothing to resume'
+    queue_resume_complete=1
+    return 0
+  fi
+
+  case "$queue_status" in
+    running|failed) ;;
+    succeeded)
+      fail "Succeeded queue has non-terminal phase: ${queue_phase}"
+      ;;
+    *)
+      fail "Unsupported queue status for --resume: ${queue_status}"
+      ;;
+  esac
+
+  queue_lifecycle_started=1
+  write_queue_state running batch "$checkpoint_batch" ''
+  return 0
+}
+
+run_planned_batches() {
+  local issue_count="${#issue_numbers[@]}"
+  local start_index=0
+  local end_index
+  local first_issue
+  local last_issue
+  local batch_id
+  local batch_status
+  local batch_phase
+
+  while [[ "$start_index" -lt "$issue_count" ]]; do
+    end_index=$((start_index + review_every))
+    if [[ "$end_index" -gt "$issue_count" ]]; then
+      end_index="$issue_count"
+    fi
+    first_issue="${issue_numbers[$start_index]}"
+    last_issue="${issue_numbers[$((end_index - 1))]}"
+    batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
+    batch_status="$(read_state_tsv_value "$(batch_state_file "$batch_id")" status)"
+    batch_phase="$(read_state_tsv_value "$(batch_state_file "$batch_id")" phase)"
+
+    if [[ "$batch_status" == 'succeeded' && "$batch_phase" == 'done' ]]; then
+      log_info "skipping completed batch ${batch_id}"
+    else
+      process_batch "$start_index" "$end_index"
+    fi
+    start_index="$end_index"
+  done
+}
+
 main() {
   local issue_count
   local planned_batch_count
-  local start_index=0
-  local end_index
 
-  parse_queue_arguments "$@"
-  ensure_unique_issues
-
-  issue_count="${#issue_numbers[@]}"
-  planned_batch_count="$(batch_count_for_queue "$issue_count")"
-  if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
-    fail 'Multiple batches require --auto-merge so each next batch starts from the merged base branch.'
-  fi
+  parse_queue_cli "$@"
 
   require_command awk
+  require_command find
   require_command gh
   require_command git
   require_command mktemp
@@ -672,23 +1154,40 @@ main() {
 
   enter_repo_root
   require_queue_prompt_templates
-  ensure_fresh_queue_state_allows_start
-  ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
-  ensure_planned_batch_branches_available
-  create_queue_lock
-  ensure_planned_batch_directories_available
-  write_queue_plan
-  initialize_planned_queue_artifacts
 
-  while [[ "$start_index" -lt "$issue_count" ]]; do
-    end_index=$((start_index + review_every))
-    if [[ "$end_index" -gt "$issue_count" ]]; then
-      end_index="$issue_count"
+  if [[ "$queue_resume_mode" -eq 1 ]]; then
+    read_queue_plan
+    ensure_unique_issues
+    validate_resume_queue_state_file
+    create_queue_lock
+    resume_queue_state
+    if [[ "$queue_resume_complete" -eq 1 ]]; then
+      return 0
     fi
+    validate_resume_queue_artifacts
+  else
+    ensure_unique_issues
+    issue_count="${#issue_numbers[@]}"
+    planned_batch_count="$(batch_count_for_queue "$issue_count")"
+    if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
+      fail 'Multiple batches require --auto-merge so each next batch starts from the merged base branch.'
+    fi
+    ensure_fresh_queue_state_allows_start
+    ensure_clean_worktree 'Working tree must be clean before running the issue queue.'
+    ensure_planned_batch_branches_available
+    create_queue_lock
+    ensure_planned_batch_directories_available
+    write_queue_plan
+    initialize_planned_queue_artifacts
+  fi
 
-    process_batch "$start_index" "$end_index"
-    start_index="$end_index"
-  done
+  issue_count="${#issue_numbers[@]}"
+  planned_batch_count="$(batch_count_for_queue "$issue_count")"
+  if [[ "$planned_batch_count" -gt 1 && "$auto_merge" -ne 1 ]]; then
+    fail 'Restored multi-batch queue requires auto_merge=1.'
+  fi
+
+  run_planned_batches
 
   queue_current_batch=''
   write_atomic_value "${CODEX_FLOW_QUEUE_DIR}/current_batch" ''

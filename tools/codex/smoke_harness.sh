@@ -907,6 +907,10 @@ fi
 
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "edit" ]]; then
   if [[ "\$3" == "https://example.test/pr/400" ]]; then
+    if [[ "\${SMOKE_FORCE_BATCH_PR_PUBLISH_FAILURE:-0}" -ne 0 ]]; then
+      printf 'forced batch PR publish failure\n' >&2
+      exit 44
+    fi
     copy_flag_value_to_file '--body-file' "${state_dir}/batch-pr-edit-body.txt" "\$@"
     write_flag_value_to_file '--title' "${state_dir}/batch-pr-edit-title.txt" "\$@"
     exit 0
@@ -2764,6 +2768,10 @@ run_issue_queue_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local expected_plan="${state_dir}/expected-queue-plan.tsv"
   local queue_log="${state_dir}/queue.log"
+  local resume_log="${state_dir}/queue-complete-resume.log"
+  local codex_log_before_resume
+  local gh_log_before_resume
+  local checks_count_before_resume
 
   log 'running issue queue smoke'
   clear_command_logs
@@ -2886,6 +2894,25 @@ EOF
   assert_file_contains "${batch_dir}/changed-files.txt" 'smoke-target.txt'
   assert_commit_includes_path HEAD 'smoke-target.txt'
   assert_commit_excludes_internal_paths HEAD
+
+  codex_log_before_resume="$(< "${state_dir}/codex.log")"
+  gh_log_before_resume="$(< "${state_dir}/gh.log")"
+  checks_count_before_resume="$(< "${state_dir}/checks-count.txt")"
+  if ! (
+    cd "${repo_dir}"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume
+  ) > "$resume_log" 2>&1; then
+    cat "$resume_log" >&2
+    fail 'completed queue --resume should succeed'
+  fi
+  assert_file_contains "$resume_log" 'queue is already complete; nothing to resume'
+  assert_equals "$codex_log_before_resume" "$(< "${state_dir}/codex.log")" 'completed resume Codex calls'
+  assert_equals "$gh_log_before_resume" "$(< "${state_dir}/gh.log")" 'completed resume GitHub calls'
+  assert_equals "$checks_count_before_resume" "$(< "${state_dir}/checks-count.txt")" 'completed resume checks calls'
+  assert_path_not_exists "${repo_dir}/.work/queue/lock"
 }
 
 run_batch_helper_command() {
@@ -3132,6 +3159,275 @@ run_batch_resume_helpers_smoke() {
   printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
 }
 
+copy_queue_resume_fixture() {
+  local fixture_name="$1"
+
+  resume_repo="${temp_root}/queue-resume-${fixture_name}"
+  resume_batch_id="batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  resume_batch_dir="${resume_repo}/.work/queue/batches/${resume_batch_id}"
+  cp -R "${repo_dir}" "$resume_repo"
+}
+
+write_resume_queue_state() {
+  local status="$1"
+  local phase="$2"
+  local current_batch="$3"
+  local exit_code="${4:-}"
+
+  write_state_tsv "${resume_repo}/.work/queue/state.tsv" \
+    status "$status" phase "$phase" current_batch "$current_batch" exit_code "$exit_code"
+}
+
+write_resume_batch_state() {
+  local status="$1"
+  local phase="$2"
+  local current_issue="${3:-}"
+  local exit_code="${4:-}"
+
+  write_state_tsv "${resume_batch_dir}/state.tsv" \
+    status "$status" phase "$phase" current_issue "$current_issue" exit_code "$exit_code"
+}
+
+write_resume_issue_state() {
+  local issue_number="$1"
+  local status="$2"
+  local phase="$3"
+  local exit_code="${4:-}"
+
+  write_issue_state_tsv \
+    "${resume_batch_dir}/issues/${issue_number}/state.tsv" \
+    "$status" "$phase" "$exit_code" "$resume_batch_id"
+}
+
+run_queue_resume_fixture() {
+  local output_log="$1"
+  shift
+
+  (
+    cd "$resume_repo"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "$@" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume
+  ) > "$output_log" 2>&1
+}
+
+run_issue_queue_resume_smoke() {
+  local resume_log
+  local resume_status
+  local batch_base_commit
+  local first_issue_head
+
+  log 'running queue-level resume smoke'
+
+  copy_queue_resume_fixture implementation
+  resume_log="${state_dir}/queue-resume-implementation.log"
+  batch_base_commit="$(< "${resume_batch_dir}/base_commit")"
+  "${REAL_GIT}" -C "$resume_repo" reset --hard "$batch_base_commit" >/dev/null
+  rm -rf \
+    "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex" \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/codex"
+  rm -f \
+    "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/head_commit" \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit" \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" failed implementation 42
+  write_resume_issue_state "$ISSUE_NUMBER" queued context
+  write_resume_batch_state failed issues "$QUEUE_ISSUE_NUMBER" 42
+  write_resume_queue_state failed batch "$resume_batch_id" 42
+  printf 'interrupted queue implementation\n' >> "${resume_repo}/smoke-target.txt"
+  clear_command_logs
+  reset_flow_counters
+  printf '7\n' > "${state_dir}/implementation-count.txt"
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/review-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "$resume_log" 'reconciled interrupted implementation changes; continuing with checks'
+  assert_equals '8' "$(< "${state_dir}/implementation-count.txt")" 'queue resume skips interrupted implementation rerun'
+  assert_file_not_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER}"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+
+  copy_queue_resume_fixture committed-next
+  resume_log="${state_dir}/queue-resume-committed-next.log"
+  first_issue_head="$(< "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/head_commit")"
+  "${REAL_GIT}" -C "$resume_repo" reset --hard "$first_issue_head" >/dev/null
+  rm -rf "${resume_batch_dir}/issues/${ISSUE_NUMBER}/codex"
+  rm -f \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit" \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" queued context
+  write_resume_batch_state failed issues "$QUEUE_ISSUE_NUMBER" 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/review-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_equals '1' "$(< "${state_dir}/implementation-count.txt")" 'committed Issue skip leaves only next implementation'
+  assert_file_not_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
+  assert_file_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER}"
+
+  copy_queue_resume_fixture checks
+  resume_log="${state_dir}/queue-resume-checks.log"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed checks '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_exists "${resume_batch_dir}/history/batch-checks.round-03.log"
+  assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_path_not_exists "${state_dir}/batch-review-count.txt"
+  assert_file_not_contains "${state_dir}/gh.log" 'issue view'
+
+  copy_queue_resume_fixture publish
+  resume_log="${state_dir}/queue-resume-publish-failed.log"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state running publish
+  write_resume_queue_state running batch "$resume_batch_id"
+  clear_command_logs
+  reset_flow_counters
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  set +e
+  run_queue_resume_fixture "$resume_log" env SMOKE_FORCE_BATCH_PR_PUBLISH_FAILURE=1
+  resume_status="$?"
+  set -e
+  assert_equals '2' "$resume_status" 'queue publish interruption exit status'
+  assert_file_contains "$resume_log" 'forced batch PR publish failure'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'status\tfailed'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'phase\tpublish'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'exit_code\t2'
+  clear_command_logs
+  run_queue_resume_fixture "${state_dir}/queue-resume-publish-reconciled.log"
+  assert_file_contains "${state_dir}/gh.log" 'pr view 400 --json state,mergedAt'
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_path_not_exists "${state_dir}/batch-review-count.txt"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+
+  copy_queue_resume_fixture publish-lookup
+  resume_log="${state_dir}/queue-resume-publish-lookup.log"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed publish '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  rm -f "${resume_batch_dir}/pr_number" "${resume_batch_dir}/pr_url"
+  clear_command_logs
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr list --head batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} --base main --state open"
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+  assert_equals '400' "$(< "${resume_batch_dir}/pr_number")" 'queue resume restored PR number'
+  assert_equals 'https://example.test/pr/400' "$(< "${resume_batch_dir}/pr_url")" 'queue resume restored PR URL'
+
+  copy_queue_resume_fixture merged
+  resume_log="${state_dir}/queue-resume-merged.log"
+  sed -i $'s/^auto_merge\t0$/auto_merge\t1/' "${resume_repo}/.work/queue/plan.tsv"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed merge '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  rm -f "${state_dir}/batch-pr-merge.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "${state_dir}/gh.log" 'pr view 400 --json state,mergedAt'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr merge'
+  assert_path_not_exists "${state_dir}/batch-pr-merge.txt"
+  assert_file_contains "${state_dir}/git.log" 'fetch origin main'
+
+  copy_queue_resume_fixture stale-lock
+  resume_log="${state_dir}/queue-resume-stale-lock.log"
+  printf '99999999\n' > "${resume_repo}/.work/queue/lock"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "$resume_log" 'reclaiming stale queue lock'
+  assert_file_contains "$resume_log" 'queue is already complete; nothing to resume'
+  assert_path_not_exists "${resume_repo}/.work/queue/lock"
+
+  copy_queue_resume_fixture live-lock
+  resume_log="${state_dir}/queue-resume-live-lock.log"
+  printf '%s\n' "$$" > "${resume_repo}/.work/queue/lock"
+  set +e
+  run_queue_resume_fixture "$resume_log"
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'live queue lock resume exit status'
+  assert_file_contains "$resume_log" 'Queue lock belongs to a live local process'
+  assert_file_exists "${resume_repo}/.work/queue/lock"
+
+  copy_queue_resume_fixture dirty-branch
+  resume_log="${state_dir}/queue-resume-dirty-branch.log"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed checks '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  "${REAL_GIT}" -C "$resume_repo" switch main >/dev/null
+  printf 'dirty wrong branch\n' >> "${resume_repo}/smoke-target.txt"
+  set +e
+  run_queue_resume_fixture "$resume_log"
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'dirty different branch resume exit status'
+  assert_file_contains "$resume_log" "Cannot resume batch ${resume_batch_id} from dirty branch main"
+
+  copy_queue_resume_fixture missing-plan
+  resume_log="${state_dir}/queue-resume-missing-plan.log"
+  rm -f "${resume_repo}/.work/queue/plan.tsv"
+  set +e
+  run_queue_resume_fixture "$resume_log"
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'missing queue plan resume exit status'
+  assert_file_contains "$resume_log" 'Missing queue plan file required for --resume'
+
+  copy_queue_resume_fixture old-plan
+  resume_log="${state_dir}/queue-resume-old-plan.log"
+  sed -i $'s/^schema_version\t1$/schema_version\t2/' "${resume_repo}/.work/queue/plan.tsv"
+  set +e
+  run_queue_resume_fixture "$resume_log"
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'old queue plan resume exit status'
+  assert_file_contains "$resume_log" 'Unsupported queue plan schema'
+
+  copy_queue_resume_fixture missing-state
+  resume_log="${state_dir}/queue-resume-missing-state.log"
+  rm -f "${resume_repo}/.work/queue/state.tsv"
+  set +e
+  run_queue_resume_fixture "$resume_log"
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'missing queue state resume exit status'
+  assert_file_contains "$resume_log" 'Missing queue state file required for --resume'
+
+  copy_queue_resume_fixture invalid-cli
+  resume_log="${state_dir}/queue-resume-invalid-cli.log"
+  set +e
+  (
+    cd "$resume_repo"
+    PATH="${stub_dir}:$PATH" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume "$ISSUE_NUMBER"
+  ) > "$resume_log" 2>&1
+  resume_status="$?"
+  set -e
+  assert_equals '1' "$resume_status" 'resume with Issue argument exit status'
+  assert_file_contains "$resume_log" '--resume does not accept Issue numbers or fresh queue options'
+
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+}
+
 run_issue_queue_failure_state_smoke() {
   local batch_dir="${repo_dir}/.work/queue/batches/batch-${ISSUE_NUMBER}-${ISSUE_NUMBER}"
   local failure_log="${state_dir}/queue-forced-failure.log"
@@ -3186,7 +3482,7 @@ run_issue_queue_failure_state_smoke() {
   ) > "$rejected_fresh_log" 2>&1; then
     fail 'fresh queue should refuse to overwrite failed schema-v1 state'
   fi
-  assert_file_contains "$rejected_fresh_log" 'Use --resume when resume support is available.'
+  assert_file_contains "$rejected_fresh_log" 'Use --resume.'
   assert_file_not_contains "$rejected_fresh_log" 'Working tree must be clean'
   assert_file_not_contains "$rejected_fresh_log" 'Local branch already exists'
   assert_equals "$failed_plan" "$(< "${repo_dir}/.work/queue/plan.tsv")" 'failed queue plan is not replaced'
@@ -3297,6 +3593,7 @@ main() {
   run_issue_flow_checkpoint_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
+  run_issue_queue_resume_smoke
   run_batch_resume_helpers_smoke
   run_issue_queue_strict_issue_review_smoke
   run_issue_queue_failure_state_smoke

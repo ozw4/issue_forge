@@ -475,10 +475,17 @@ sync_saved_batch_pr() {
   fi
 
   pr_body_file="$(mktemp)"
-  write_batch_pr_body_file "$first_issue" "$last_issue" "$pr_body_file" "$@"
-  gh pr edit "$saved_pr_url" \
+  if ! write_batch_pr_body_file "$first_issue" "$last_issue" "$pr_body_file" "$@"; then
+    rm -f "$pr_body_file"
+    return 2
+  fi
+  if ! gh pr edit "$saved_pr_url" \
     --title "$pr_title" \
-    --body-file "$pr_body_file" >/dev/null
+    --body-file "$pr_body_file" >/dev/null; then
+    rm -f "$pr_body_file"
+    printf 'Failed to synchronize saved batch PR: %s\n' "$saved_pr_url" >&2
+    return 2
+  fi
   rm -f "$pr_body_file"
 
   printf -v "$pr_number_variable" '%s' "$saved_pr_number"
@@ -506,6 +513,7 @@ publish_batch_results() {
   local published_pr_number
   local published_pr_url
   local pr_action
+  local saved_sync_status
 
   shift 7
 
@@ -522,6 +530,10 @@ publish_batch_results() {
       git push --set-upstream origin "$branch_name" >/dev/null
     fi
   else
+    saved_sync_status="$?"
+    if [[ "$saved_sync_status" -ne 1 ]]; then
+      return "$saved_sync_status"
+    fi
     log_info "pushing batch branch ${branch_name}"
     git push --set-upstream origin "$branch_name" >/dev/null
     sync_batch_pr_for_branch \

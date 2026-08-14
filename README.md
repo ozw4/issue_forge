@@ -160,7 +160,7 @@ run 123
 | `tools/issue/start_from_issue.sh` | `<issue_number>` | Issue context、fixed base commit、Issue branch を準備 |
 | `tools/codex/doctor.sh` | none | runtime preflight |
 | `tools/codex/run_issue_flow.sh` | `[issue_number]` | implementation、checks/review loops、commit、push、PR publish |
-| `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...` | sequential queue、batch checks/review、batch PR publish |
+| `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...` or `--resume` | sequential queue、local checkpoint resume、batch checks/review、batch PR publish |
 | `tools/codex/continue_after_review.sh` | `[issue_number]` | current changes を review follow-up commit にして flow を再実行 |
 | `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | `.work/codex` を消して flow を再実行。`--hard` は repository changes を破棄 |
 | `tools/codex/make_pr_only.sh` | `[issue_number]` | current branch の PR title/body を作成または同期。新規 commit は push しない |
@@ -187,7 +187,13 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
 
 各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
 
-queue 内の per-Issue flow は `implementation`、`checks`、`review`、`commit` を batch-local `state.tsv` に atomic checkpoint し、commit 後は `committed / archive` で queue に戻ります。中断時の dirty implementation、既存 accepted review、commit 済み HEAD を内部的に reconcile できますが、queue CLI の public `--resume` はまだ提供しません。checkpoint 環境変数を指定しない通常の single-Issue flow は clean worktree、publish、artifact path を含む従来の挙動を維持します。
+queue 内の per-Issue flow は `implementation`、`checks`、`review`、`commit` を batch-local `state.tsv` に atomic checkpoint し、commit 後は `committed / archive` で queue に戻ります。中断した同じ local worktree では、保存済み plan と checkpoint だけを使って再開できます。
+
+```bash
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --resume
+```
+
+`--resume` は Issue 番号や fresh-run options と併用できません。dirty worktree は保存済み batch branch 上にある場合だけ許可され、dirty な別 branch、欠落した local branch（`branch` phase で exact saved base から再作成できる場合を除く）、schema-v1 でない plan/state は明示的に拒否します。checkpoint 環境変数を指定しない通常の single-Issue flow は clean worktree、publish、artifact path を含む従来の挙動を維持します。
 
 ```sh
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
@@ -203,9 +209,9 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きしません。`--resume` と `--requeue` はまだ未対応です。
+fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きせず、`--resume` が plan 順に最初の未完了 batch と保存 phase を選びます。`--requeue` は未対応です。
 
-batch checks/review/publish/merge の内部 helper は、Prompt 05 の phase dispatch から再呼び出せる resume-safe contract を持ちます。既存 history から round と累積 fix budget を復元し、clean な accepted review は再利用します。dirty review entry は現在の worktree を checks と新 review で再評価します。publish は保存済み PR metadata または branch/base の open PR を再利用し、merge 済み PR では auto-merge request を再発行しません。これは内部 helper contract であり、現時点の queue CLI に `--resume` を追加するものではありません。
+batch checks/review/publish/merge の内部 helper は queue phase dispatcher から再呼び出されます。既存 history から round と累積 fix budget を復元し、clean な accepted review は再利用します。dirty review entry は現在の worktree を checks と新 review で再評価します。publish は保存済み PR metadata または branch/base の open PR を再利用し、merge 済み PR では auto-merge request を再発行しません。
 
 ## Issue zip import
 
