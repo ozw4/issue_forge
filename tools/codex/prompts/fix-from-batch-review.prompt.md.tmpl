@@ -2,6 +2,8 @@ Use the already-loaded AGENTS.md instructions. Do not re-read AGENTS.md unless y
 Read the issue/review artifact(s) named below:
 - {{BATCH_ISSUES_FILE}}
 - {{BATCH_REVIEW_OUTPUT}}
+- {{PENDING_FINDINGS}}
+- {{REVIEW_SNAPSHOT}}
 Read README.md and docs/README.md only when they are directly relevant to the current issue or review finding. Prefer targeted rg/sed section reads over reading entire files.
 
 You are continuing the implementation session for a sequential batch of GitHub issues after strict batch review.
@@ -34,5 +36,14 @@ Rules:
 - Do not change implementation to satisfy an issue if doing so would violate docs.
 - Do not modify .github/workflows.
 - Do not add Copilot review behavior.
+- Address only findings listed in `{{PENDING_FINDINGS}}`, using the ledger-assigned ID for each one. Do not generate finding IDs.
+- Return one resolution line for every pending ID, whether or not code changes were needed. Do not omit or duplicate IDs and do not include IDs absent from the pending file.
+- Use `fixed` only after making the necessary change, `false_positive` only after confirming the finding is wrong or already satisfied, and `cannot_fix` rather than hiding a constraint with an unsafe fallback.
+- Use a one-line note without literal tabs or the literal delimiter ` | `.
 
 Make the required batch-review fixes, then stop.
+
+Return only this section and no other prose:
+
+resolution:
+- F0001 | fixed | One-line explanation.

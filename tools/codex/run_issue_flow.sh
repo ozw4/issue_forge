@@ -9,10 +9,14 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/history_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "${SCRIPT_DIR}/lib/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/agent_attempts.sh
+source "${SCRIPT_DIR}/lib/agent_attempts.sh"
 # shellcheck source=tools/codex/lib/checks_review_helpers.sh
 source "${SCRIPT_DIR}/lib/checks_review_helpers.sh"
 # shellcheck source=tools/codex/lib/flow_state.sh
 source "${SCRIPT_DIR}/lib/flow_state.sh"
+# shellcheck source=tools/codex/lib/review_snapshots.sh
+source "${SCRIPT_DIR}/lib/review_snapshots.sh"
 # shellcheck source=tools/codex/lib/issue_bootstrap.sh
 source "${SCRIPT_DIR}/lib/issue_bootstrap.sh"
 # shellcheck source=tools/codex/lib/publish_helpers.sh
@@ -30,31 +34,23 @@ log_fail_with_path() {
 }
 
 run_codex_phase() {
-  local mode="$1"
-  local prompt_file="$2"
-  local output_file="$3"
-  local reasoning_effort="$4"
-  local stderr_policy="${5:-combined}"
+  local operation="$1"
+  local round="$2"
+  local mode="$3"
+  local prompt_file="$4"
+  local output_file="$5"
+  local reasoning_effort="$6"
+  local legacy_stderr_policy="${7:-combined}"
+  local snapshot_file="${8:-}"
 
-  case "$stderr_policy" in
-    combined)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file" 2>&1
-      ;;
-    stdout)
-      CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
-        "${ISSUE_FORGE_ENGINE_CODEX_DIR}/run_codex.sh" "$mode" "$prompt_file" > "$output_file"
-      ;;
-    *)
-      printf 'Invalid Codex phase stderr policy: %s\n' "$stderr_policy" >&2
-      exit 1
-      ;;
-  esac
+  CODEX_RUN_REASONING_EFFORT="$reasoning_effort" \
+    run_codex_with_attempt \
+      "$operation" "$round" "$mode" "$prompt_file" "$output_file" "$legacy_stderr_policy" "$snapshot_file"
 }
 
 run_implementation_phase() {
   log_info 'codex implementation'
-  run_codex_phase write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
+  run_codex_phase implementation 0 write "$implement_prompt" "$implementation_log" "$CODEX_FLOW_IMPLEMENTATION_REASONING"
   archive_round_file "$implementation_log" 'implementation' 0 '.log'
   ensure_issue_token_usage_tsv 'implementation' "$issue_number" 0 "$CODEX_FLOW_IMPLEMENTATION_REASONING" "$implementation_log"
 
@@ -113,6 +109,9 @@ mkdir -p "$CODEX_FLOW_CODEX_DIR"
 mkdir -p "$CODEX_FLOW_CODEX_HISTORY_DIR"
 initialize_issue_token_usage_tsv
 
+CODEX_FLOW_CHECK_ATTEMPTS_ROOT="${CODEX_FLOW_CHECK_ATTEMPTS_ROOT:-${CODEX_FLOW_CODEX_DIR}/check-attempts}"
+CODEX_FLOW_CHECKS_MANIFEST="${CODEX_FLOW_CHECKS_MANIFEST:-${CODEX_FLOW_CODEX_DIR}/checks.manifest.tsv}"
+
 implement_prompt="${CODEX_FLOW_CODEX_DIR}/implementation.prompt.md"
 fix_checks_prompt="${CODEX_FLOW_CODEX_DIR}/fix-from-checks.prompt.md"
 review_prompt="${CODEX_FLOW_CODEX_DIR}/review.prompt.md"
@@ -126,6 +125,11 @@ review_untracked="${CODEX_FLOW_CODEX_DIR}/review.untracked.txt"
 review_summary="${CODEX_FLOW_CODEX_DIR}/review.summary.txt"
 review_raw_output="${CODEX_FLOW_CODEX_DIR}/review.raw.txt"
 review_output="${CODEX_FLOW_CODEX_DIR}/review.txt"
+review_findings_ledger="${CODEX_FLOW_CODEX_DIR}/findings.tsv"
+pending_findings="${CODEX_FLOW_CODEX_DIR}/pending-findings.tsv"
+fix_resolution_report="${CODEX_FLOW_CODEX_DIR}/fix-resolution.tsv"
+review_verification="${CODEX_FLOW_CODEX_DIR}/review-verification.tsv"
+review_snapshot="${CODEX_FLOW_CODEX_DIR}/review.snapshot.state"
 fix_review_log="${CODEX_FLOW_CODEX_DIR}/fix-from-review.log"
 history_dir="$CODEX_FLOW_CODEX_HISTORY_DIR"
 
@@ -145,7 +149,11 @@ write_issue_flow_prompt_files \
   "$review_diff" \
   "$review_untracked" \
   "$review_summary" \
-  "$review_output"
+  "$review_output" \
+  "$pending_findings" \
+  "$review_findings_ledger" \
+  "$fix_resolution_report" \
+  "$review_snapshot"
 
 run_implementation_phase
 ensure_checks_pass

@@ -129,6 +129,10 @@ write_issue_flow_prompt_files() {
   local review_untracked="$9"
   local review_summary="${10}"
   local review_output="${11}"
+  local pending_findings="${12}"
+  local findings_ledger="${13}"
+  local fix_resolution="${14}"
+  local review_snapshot="${15}"
   local light_issue_review="${CODEX_FLOW_LIGHT_ISSUE_REVIEW:-0}"
   local review_template='review'
 
@@ -161,6 +165,8 @@ write_issue_flow_prompt_files() {
     REVIEW_DIFF "$review_diff" \
     REVIEW_UNTRACKED "$review_untracked" \
     REVIEW_SUMMARY "$review_summary" \
+    FINDINGS_LEDGER "$findings_ledger" \
+    FIX_RESOLUTION "$fix_resolution" \
     ISSUE_NUMBER "$issue_number"
 
   render_prompt_template \
@@ -168,6 +174,8 @@ write_issue_flow_prompt_files() {
     "$fix_review_prompt" \
     ISSUE_FILE "$issue_file" \
     REVIEW_OUTPUT "$review_output" \
+    PENDING_FINDINGS "$pending_findings" \
+    REVIEW_SNAPSHOT "$review_snapshot" \
     ISSUE_NUMBER "$issue_number"
 }
 
@@ -177,6 +185,8 @@ write_batch_review_prompt_file() {
   local batch_untracked="$3"
   local batch_summary="$4"
   local output_path="$5"
+  local findings_ledger="$6"
+  local fix_resolution="$7"
 
   render_prompt_template \
     "$(prompt_template_path batch-review)" \
@@ -184,19 +194,25 @@ write_batch_review_prompt_file() {
     BATCH_ISSUES_FILE "$issues_file" \
     BATCH_DIFF "$batch_diff" \
     BATCH_UNTRACKED "$batch_untracked" \
-    BATCH_SUMMARY "$batch_summary"
+    BATCH_SUMMARY "$batch_summary" \
+    FINDINGS_LEDGER "$findings_ledger" \
+    FIX_RESOLUTION "$fix_resolution"
 }
 
 write_fix_from_batch_review_prompt_file() {
   local issues_file="$1"
   local batch_review_output="$2"
   local output_path="$3"
+  local pending_findings="$4"
+  local review_snapshot="$5"
 
   render_prompt_template \
     "$(prompt_template_path fix-from-batch-review)" \
     "$output_path" \
     BATCH_ISSUES_FILE "$issues_file" \
-    BATCH_REVIEW_OUTPUT "$batch_review_output"
+    BATCH_REVIEW_OUTPUT "$batch_review_output" \
+    PENDING_FINDINGS "$pending_findings" \
+    REVIEW_SNAPSHOT "$review_snapshot"
 }
 
 write_fix_from_batch_checks_prompt_file() {

@@ -4,6 +4,9 @@ Read the issue/review artifact(s) named below:
 - {{BATCH_DIFF}}
 - {{BATCH_UNTRACKED}}
 - {{BATCH_SUMMARY}}
+If they exist, also read these lifecycle artifacts. A missing file means there is nothing to verify yet:
+- {{FINDINGS_LEDGER}}
+- {{FIX_RESOLUTION}}
 Read README.md and docs/README.md only when they are directly relevant to the current issue, review finding, or diff. Prefer targeted rg/sed section reads over reading entire files.
 
 You are the strict batch review session for a sequential batch of GitHub issues.
@@ -35,9 +38,14 @@ Rules:
 - Accept changes that remain consistent with docs even if issue wording is slightly broader.
 - Use normal strict acceptance.
 - accept: yes is allowed only when blocker and major contain no real findings.
+- If `accept: no`, at least one real finding must appear in blocker, major, or minor.
 - minor findings may remain, but they must be concrete and useful.
 - Focus on correctness, regressions, cross-issue interaction, issue scope consistency, tests and coverage, architecture and maintainability, docs and consumer contract consistency, shell safety and failure behavior, and security or GitHub CLI merge risk.
 - Prefix each finding with one of these tags: [correctness], [regression], [cross-issue], [scope], [tests], [architecture], [docs-contract], [shell-safety], [security-ops].
+- If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
+- Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note without literal tabs or the literal delimiter ` | `.
+- For `unresolved`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For `resolved` or `invalid`, do not repeat that text there.
+- Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist, output only `- none` under `verification:`.
 
 Return exactly this format:
 accept: yes/no
@@ -50,3 +58,6 @@ major:
 
 minor:
 - concrete minor finding
+
+verification:
+- none

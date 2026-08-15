@@ -29,6 +29,9 @@ external consumer は engine を `vendor/issue_forge` に bind mount または s
 - `tr`
 - `cut`
 - `mktemp`
+- `cmp`
+- `find`
+- `sha256sum`
 
 加えて、GitHub CLI が対象 repository に対して認証済みである必要があります。
 
@@ -36,7 +39,7 @@ external consumer は engine を `vendor/issue_forge` に bind mount または s
 gh auth status
 ```
 
-`tools/issue/create_from_zip.sh` を使う場合は `unzip`、`find`、`sort` も必要です。self-hosting tests を実行する場合は Python と `pytest` が必要です。
+`tools/issue/create_from_zip.sh` を使う場合は `unzip` と `sort` も必要です。self-hosting tests を実行する場合は Python と `pytest` が必要です。
 
 > [!CAUTION]
 > default の Codex write/read sandbox はどちらも `danger-full-access` です。また、通常 flow は branch push と PR 作成・更新を行います。queue の `--auto-merge` は batch PR の auto-merge を有効化します。利用環境の security policy に合わせて `.issue_forge/project.sh` を明示的に設定してください。
@@ -183,6 +186,9 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
 ./vendor/issue_forge/tools/codex/run_issue_queue.sh \
   --review-every 3 \
   123 124 125
+
+# Resume unfinished work, or finalize a completed run's stale control plane
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --resume <run_id>
 ```
 
 各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
@@ -198,8 +204,16 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--batch-fix-effort VALUE`: batch review/checks fix の reasoning override
 - `--draft`: batch PR を draft で作成
 - `--auto-merge`: batch PR に squash auto-merge と branch delete を設定
+- `--resume RUN_ID|current`: unfinished run は保存済み manifest の順序・effective options で再開し、completed run は cleanup-only finalization
+- `--take-over-lease`: 別 host / 検証不能な lease を明示的に引き継ぐ resume 専用 option
 
-branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
+branch は `batch/<first_issue>-<last_issue>`、batch compatibility artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。Issue の authoritative archive と durable context は run 固有の `.work/queue/runs/<run_id>/` 配下に置かれます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
+
+各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v3 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest、最小 `run.state`、manifest-derived entity graph は unadvertised candidate です。resume は graph、strict state/field transition、保存 base、direct-child Issue commit、run-owned archive manifest/hash、accepted batch head を mutation 前に検証します。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
+
+serialization anchor は agent cleanup 対象外の `<git-common-dir>/issue-forge/queue/control.guard` です。ただし authoritative lease/current/run state は worktree-local なので、queue は `.work/queue` や common control path に触れる前に absolute Git dir と Git common dir を比較し、linked worktree からの fresh/resume を拒否します。primary worktree（他の linked worktree が登録済みでも可）または separate clone を使います。この local lease は separate clone/machine を協調しません。guard 取得は 1 秒で timeout し、busy 時は lease と active phase、controlled child PID/PGID/process-start identity、safe recovery action を表示します。repository/GitHub を変更する batch worker は親/worker の PID・PGID・process-start identity と lease token/generation を registration に記録し、親が distinct PGID と durable `active-process.state` を検証して matching authorization を publish するまで mutation を開始しません。authorization 前に親 identity が消えた worker は mutation なしで終了します。authorization 後に親が `SIGKILL` されても child/descendant が生きる間は inherited guard が takeover を拒否し、group 終了後は同じ run ID の resume が回復します。worker の terminal result は実際の failure/signal phase を親 checkpoint に伝えます。
+
+`run.state=completed` の publish 後に owner が停止した場合は、`--resume current` または `--resume <completed_run_id>` が work を再実行せず control plane だけを finalize します。Git common directory の strict cleanup marker が `planned → lease_retired → batch_pointer_removed → current_removed → completed` を記録し、各 phase で required audit／lease absence／captured `current_batch` absence／fencing-matching `current` absence／same-run active-process absenceを実体と照合します。完全一致で再出現した pointer は idempotently remove し、missing audit や異なる identity は fail closed します。全 terminal postcondition の再検証後に per-run terminal state を publish/accept し、global marker を最後に削除するため、各 mutation 境界の `SIGKILL` 後も discoverable です。queue startup は project shell を source して repo を解決しますが、completed run と判明するまでは work defaults/validation を適用しません。cleanup は immutable manifest の run/repository identity だけを使い、現在の base branch/ref、checks、reasoning、prompt、review/draft/merge 設定には依存しません。fresh/nonterminal path は従来の full validation を行います。finalized A の明示 command も A residue を先に点検し、A residue がなく B の ownership だけなら busy guard を取得せず B を変更せず成功します。completed run に work-resume command は表示されません。singleton state path は regular file だけを受け付け、directory、symlink、FIFO/device/socket、unexpected hard link を read/replace/remove 前に拒否します。private guard/reentrancy state は environment や `.issue_forge/project.sh` の設定として受け付けません。test hook は明示的な `CODEX_FLOW_QUEUE_TEST_MODE=1` invocation にだけ有効です。credential-free repository identity は standard SSH/HTTP(S) endpoint を同一視し、non-default port は identity に保持します。
 
 ## Issue zip import
 
@@ -235,6 +249,11 @@ single-Issue flow の主要 artifacts は次のとおりです。
 │  ├─ review.prompt.md
 │  ├─ fix-from-review.prompt.md
 │  ├─ checks.log
+│  ├─ checks.manifest.tsv
+│  ├─ check-attempts/
+│  │  └─ issue-checks/
+│  │     ├─ attempt-NNNN.running/
+│  │     └─ attempt-NNNN/
 │  ├─ implementation.log
 │  ├─ fix-from-checks.log
 │  ├─ review.diff
@@ -270,6 +289,10 @@ minor:
 Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
 
 `.work` と consumer-local `vendor/issue_forge` は git discovery、diff、staging、clean から engine が明示的に除外します。`.gitignore` は local hygiene のための追加措置です。
+
+Issue checks は `.work/codex/check-attempts/issue-checks/attempt-NNNN/` に request、既存形式の review snapshot、exact argv、combined log、result、artifact hashes を terminal attempt として保存します。`.work/codex/checks.manifest.tsv` が合否と provenance の source of truth です。`.work/codex/checks.log` と `history/checks.round-NN.log` は terminal attempt の `combined.log` から atomic に公開する compatibility view です。
+
+Queue では Issue check attempt を run-owned Batch state の `check-attempts/issue-<issue>/` と `checks/issue-<issue>.manifest.tsv` に保持し、Issue archive の `codex/` に self-contained copy を含めます。Batch checks は同じ helper を使い、run-owned Batch state の `check-attempts/batch/` と `checks/batch.manifest.tsv` を authoritative store にします。`.work/queue/batches/<batch>/checks.log` と round history は従来どおり残ります。
 
 ## PR publishing
 
@@ -337,6 +360,8 @@ Runtime-only overrides は次のとおりです。
 | `CODEX_FLOW_SKIP_PUBLISH` | non-zero で single-Issue flow の push/PR publish を skip |
 
 consumer-specific prompt templates を使う場合だけ `CODEX_FLOW_PROMPTS_DIR` を override します。queue を使う custom prompt set には batch templates と、light review を有効にする場合は `review-light.prompt.md.tmpl` も必要です。
+
+`QUEUE_STATE_GUARD_DEPTH`、`QUEUE_STATE_GUARD_FD`、`QUEUE_STATE_ASSERT_IN_PROGRESS` と `ISSUE_FORGE_INTERNAL_QUEUE_*` は supported configuration ではなく private process state です。environment からの legacy values は queue startup が neutralize し、consumer config による readonly/non-resettable injection は `.work/queue` を変更する前に失敗します。
 
 ## Git hygiene
 

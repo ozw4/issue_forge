@@ -29,6 +29,10 @@ review_finding_count_numbers() {
       section = "minor"
       next
     }
+    $0 == "verification:" {
+      section = ""
+      next
+    }
     /^- / {
       item = substr($0, 3)
       if (is_placeholder_item(item)) {

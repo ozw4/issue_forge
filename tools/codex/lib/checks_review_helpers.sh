@@ -8,6 +8,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_semantics.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh"
 # shellcheck source=tools/codex/lib/token_usage_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
+# shellcheck source=tools/codex/lib/finding_ledger.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_ledger.sh"
+# shellcheck source=tools/codex/lib/check_attempts.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
 
 generate_review_material() {
   local has_material=0
@@ -50,12 +54,25 @@ run_checks_round() {
   round="$checks_run_round"
   base_commit="$(resolve_fixed_base_commit_from_state "Missing ${CODEX_FLOW_BASE_COMMIT_FILE}. Run the issue bootstrap entrypoint first.")"
 
-  set +e
-  "$CODEX_FLOW_CHECKS_COMMAND" "$base_commit" > "$checks_log" 2>&1
-  status=$?
-  set -e
+  if run_check_attempt \
+    "$CODEX_FLOW_CHECK_ATTEMPTS_ROOT" \
+    "$CODEX_FLOW_CHECKS_MANIFEST" \
+    "$checks_log" \
+    issue \
+    "$issue_number" \
+    issue-checks \
+    "$round" \
+    "$base_commit" \
+    "$CODEX_FLOW_CHECKS_COMMAND" \
+    "$base_commit"; then
+    status=0
+  else
+    status=$?
+  fi
 
-  archive_round_file "$checks_log" "checks" "$round" ".log"
+  if [[ -n "${CHECK_ATTEMPT_LAST_LOG:-}" && -f "$CHECK_ATTEMPT_LAST_LOG" ]]; then
+    archive_round_file "$CHECK_ATTEMPT_LAST_LOG" "checks" "$round" ".log"
+  fi
 
   return "$status"
 }
@@ -65,7 +82,7 @@ run_fix_from_checks_round() {
 
   fix_checks_round=$((fix_checks_round + 1))
   log_info "codex fix from checks (round ${fix_round})"
-  run_codex_phase write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
+  run_codex_phase fix-from-checks "$fix_checks_round" write "$fix_checks_prompt" "$fix_checks_log" "$CODEX_FLOW_CHECK_FIX_REASONING"
   archive_round_file "$fix_checks_log" "fix-from-checks" "$fix_checks_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-checks' "$issue_number" "$fix_checks_round" "$CODEX_FLOW_CHECK_FIX_REASONING" "$fix_checks_log"
 }
@@ -80,6 +97,22 @@ ensure_checks_pass() {
       log_info "checks passed"
       return 0
     fi
+
+    if [[ "${CHECK_ATTEMPT_LAST_PUBLISH_ERROR:-0}" -eq 1 ]]; then
+      log_fail_with_path 'checks completed but legacy log publication failed' "$CHECK_ATTEMPT_LAST_DIR"
+      return 1
+    fi
+
+    case "${CHECK_ATTEMPT_LAST_STATUS:-}" in
+      invalid)
+        log_fail_with_path 'checks changed the repository and were recorded as invalid' "$CHECK_ATTEMPT_LAST_DIR"
+        return 1
+        ;;
+      interrupted)
+        log_fail_with_path 'checks were interrupted' "$CHECK_ATTEMPT_LAST_DIR"
+        return "${CHECK_ATTEMPT_LAST_EXIT_STATUS:-1}"
+        ;;
+    esac
 
     if [[ "$fix_round" -ge "$CODEX_FLOW_MAX_CHECK_FIX_ROUNDS" ]]; then
       log_fail_with_path "checks failed after ${CODEX_FLOW_MAX_CHECK_FIX_ROUNDS} fix rounds" "$checks_log"
@@ -146,6 +179,15 @@ sanitize_codex_runtime_logs() {
   local raw_output_file="$1"
 
   awk '
+    /^\[codex\] starting attempt [1-9][0-9]*$/ {
+      next
+    }
+    /^\[codex\] transient Codex failure detected; retrying attempt [1-9][0-9]*\/[1-9][0-9]* after [0-9]+ seconds$/ {
+      next
+    }
+    /^\[codex\] transient Codex failure persisted after [1-9][0-9]* attempts; giving up$/ {
+      next
+    }
     /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:/ {
       next
     }
@@ -280,6 +322,26 @@ extract_review_candidate_from_line() {
       next
     }
     state == "minor" {
+      if ($0 == "") {
+        print
+        state = "verification-header"
+        next
+      }
+      if ($0 ~ /^- /) {
+        print
+        next
+      }
+      exit 1
+    }
+    state == "verification-header" {
+      if ($0 != "verification:") {
+        exit 1
+      }
+      print
+      state = "verification"
+      next
+    }
+    state == "verification" {
       if ($0 == "" || $0 ~ /^- /) {
         print
         next
@@ -290,7 +352,7 @@ extract_review_candidate_from_line() {
       exit 1
     }
     END {
-      if (state != "minor") {
+      if (state != "verification") {
         exit 1
       }
     }
@@ -317,32 +379,28 @@ extract_review_output() {
 }
 
 run_review_round() {
-  local before_status
-  local after_status
-
   review_run_round=$((review_run_round + 1))
   generate_review_material
   archive_round_file "$review_diff" "review-diff" "$review_run_round" ".txt"
   archive_round_file "$review_untracked" "review-untracked" "$review_run_round" ".txt"
   archive_round_file "$review_summary" "review-summary" "$review_run_round" ".txt"
-  before_status="$(status_outside_work)"
+  capture_review_snapshot "$review_snapshot"
   log_info "codex review"
-  run_codex_phase read "$review_prompt" "$review_raw_output" "$CODEX_FLOW_REVIEW_REASONING" stdout
+  run_codex_phase \
+    review "$review_run_round" read "$review_prompt" "$review_raw_output" \
+    "$CODEX_FLOW_REVIEW_REASONING" stdout "$review_snapshot"
+  assert_review_snapshot_matches "$review_snapshot" "after issue review"
   archive_round_file "$review_raw_output" "review-raw" "$review_run_round" ".txt"
   ensure_issue_token_usage_tsv 'review' "$issue_number" "$review_run_round" "$CODEX_FLOW_REVIEW_REASONING" "$review_raw_output"
-  after_status="$(status_outside_work)"
-
-  if [[ "$before_status" != "$after_status" ]]; then
-    printf 'Review session modified repository files.\n' >&2
-    printf 'Review raw log: %s\n' "$review_raw_output" >&2
-    exit 1
-  fi
 
   if ! extract_review_output; then
     printf 'Failed to extract structured review output.\n' >&2
     printf 'Review raw log: %s\n' "$review_raw_output" >&2
     exit 1
   fi
+
+  ensure_valid_review_output
+  record_issue_review_findings
 }
 
 validate_review_output() {
@@ -403,16 +461,47 @@ validate_review_output() {
       next
     }
     state == "minor" {
-      if ($0 != "" && $0 !~ /^- /) {
+      if ($0 == "") {
+        state = "minor-gap"
+        next
+      }
+      if ($0 !~ /^- /) {
         exit 1
       }
+      next
+    }
+    state == "minor-gap" {
+      if ($0 != "verification:") {
+        exit 1
+      }
+      state = "verification"
+      next
+    }
+    state == "verification" {
+      if ($0 == "") {
+        next
+      }
+      if ($0 == "- none") {
+        verification_none += 1
+        verification_items += 1
+        next
+      }
+      if ($0 !~ /^- F[0-9][0-9][0-9][0-9][0-9]* \| (resolved|invalid|unresolved) \| .+$/ || $0 ~ /\t/) {
+        exit 1
+      }
+      verification_body = substr($0, 3)
+      if (split(verification_body, verification_parts, / \| /) != 3) {
+        exit 1
+      }
+      verification_records += 1
+      verification_items += 1
       next
     }
     {
       exit 1
     }
     END {
-      if (state != "minor") {
+      if (state != "verification" || verification_items == 0 || (verification_none > 0 && verification_records > 0)) {
         exit 1
       }
     }
@@ -422,11 +511,23 @@ validate_review_output() {
 validate_review_output_semantics() {
   local file="$1"
   local accept_line
+  local count_numbers
+  local blocker_count
+  local major_count
+  local minor_count
 
   if ! IFS= read -r accept_line < "$file"; then
     return 1
   fi
-  if [[ "$accept_line" == 'accept: yes' ]] && review_has_blocker_or_major_findings "$file"; then
+  count_numbers="$(review_finding_count_numbers "$file")"
+  read -r blocker_count major_count minor_count <<< "$count_numbers"
+
+  if [[ "$accept_line" == 'accept: yes' ]] \
+    && [[ "$blocker_count" -gt 0 || "$major_count" -gt 0 ]]; then
+    return 1
+  fi
+  if [[ "$accept_line" == 'accept: no' ]] \
+    && [[ $((blocker_count + major_count + minor_count)) -eq 0 ]]; then
     return 1
   fi
 }
@@ -441,6 +542,25 @@ ensure_valid_review_output() {
     log_fail_with_path "review output is inconsistent with acceptance" "$review_raw_output"
     exit 1
   fi
+}
+
+record_issue_review_findings() {
+  local fix_resolution_input=''
+
+  if [[ -f "$fix_resolution_report" ]]; then
+    fix_resolution_input="$fix_resolution_report"
+  fi
+  extract_review_verification \
+    "$review_output" \
+    "$review_findings_ledger" \
+    "$fix_resolution_input" \
+    "$review_verification"
+  update_finding_ledger \
+    "$review_output" \
+    "$review_findings_ledger" \
+    "$review_run_round" \
+    "$review_verification"
+  archive_round_file "$review_findings_ledger" "findings" "$review_run_round" ".tsv"
 }
 
 review_output_accepted() {
@@ -469,18 +589,23 @@ review_accepted() {
 run_fix_from_review_round() {
   local review_fix_round="$1"
 
+  write_pending_findings "$review_findings_ledger" "$pending_findings"
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
-  run_codex_phase write "$fix_review_prompt" "$fix_review_log" "$CODEX_FLOW_REVIEW_FIX_REASONING"
+  assert_review_snapshot_matches "$review_snapshot" "before issue review fix"
+  run_codex_phase \
+    fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
+    "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$review_snapshot"
   archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
   ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
+  extract_fix_resolution_report "$fix_review_log" "$pending_findings" "$fix_resolution_report"
+  archive_round_file "$fix_resolution_report" "fix-resolution" "$fix_review_round" ".tsv"
 }
 
 ensure_review_accepted() {
   local review_fix_round=0
 
   run_review_round
-  ensure_valid_review_output
 
   while ! review_accepted; do
     if [[ "$review_fix_round" -ge "$CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS" ]]; then
@@ -492,6 +617,5 @@ ensure_review_accepted() {
     run_fix_from_review_round "$review_fix_round"
     ensure_checks_pass
     run_review_round
-    ensure_valid_review_output
   done
 }

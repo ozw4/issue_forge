@@ -4,6 +4,9 @@ Read the issue/review artifact(s) named below:
 - {{REVIEW_DIFF}}
 - {{REVIEW_UNTRACKED}}
 - {{REVIEW_SUMMARY}}
+If they exist, also read these lifecycle artifacts. A missing file means there is nothing to verify yet:
+- {{FINDINGS_LEDGER}}
+- {{FIX_RESOLUTION}}
 Do not re-read README.md or docs/README.md unless the diff appears to violate a named rule or presents a source-of-truth conflict.
 
 You are the queue smoke review for issue #{{ISSUE_NUMBER}}.
@@ -20,12 +23,17 @@ Rules:
 - If issue and docs conflict, docs win.
 - Focus on clear blockers and major regressions in the provided material; leave broad cross-issue analysis to strict batch review.
 - If there is any real blocker or major finding, set `accept: no`.
+- If `accept: no`, at least one real finding must appear in blocker, major, or minor.
 - If there are only minor findings, `accept: yes` is allowed.
 - If `accept: yes`, then `blocker:` and `major:` must contain only `- none`.
 - Use the exact lowercase placeholder `none` for any empty section.
 - Never output `...` or `- ...`.
 - Do not add any prose before or after the required format.
 - Every real finding must be a single `- ` bullet in the correct section.
+- If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
+- Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note without literal tabs or the literal delimiter ` | `.
+- For `unresolved`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For `resolved` or `invalid`, do not repeat that text there.
+- Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist, output only `- none` under `verification:`.
 
 Return exactly this format and nothing else:
 
@@ -38,4 +46,7 @@ major:
 - none
 
 minor:
+- none
+
+verification:
 - none

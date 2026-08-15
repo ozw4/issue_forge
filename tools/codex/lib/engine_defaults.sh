@@ -7,6 +7,7 @@ readonly CODEX_FLOW_ISSUE_DIR='.work/issues'
 readonly CODEX_FLOW_CODEX_DIR='.work/codex'
 readonly CODEX_FLOW_HISTORY_DIR='.work/codex/history'
 readonly CODEX_FLOW_QUEUE_DIR='.work/queue'
+readonly CODEX_FLOW_QUEUE_RUNS_DIR='.work/queue/runs'
 
 readonly CODEX_FLOW_BRANCH_SLUG_MAXLEN=48
 readonly CODEX_FLOW_CHECK_MAX_ROUNDS=20

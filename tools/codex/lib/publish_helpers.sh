@@ -35,11 +35,15 @@ current_pr_number_url_for_branch() {
       --base "$CODEX_FLOW_BASE_BRANCH" \
       --state open \
       --json number,url \
-      --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].url)" end'
+      --jq 'if length == 0 then "" elif length == 1 then "\(.[0].number)\t\(.[0].url)" else "AMBIGUOUS\t\(length)" end'
   )"
 
   if [[ -n "$pr_line" ]]; then
     IFS=$'\t' read -r pr_number pr_url <<< "$pr_line"
+    if [[ "$pr_number" == AMBIGUOUS ]]; then
+      printf 'Ambiguous PR lookup for head %s and base %s: %s open PRs\n' "$branch_name" "$CODEX_FLOW_BASE_BRANCH" "$pr_url" >&2
+      exit 1
+    fi
     if [[ -z "$pr_number" || -z "$pr_url" ]]; then
       printf 'Malformed PR lookup result for branch %s: %s\n' "$branch_name" "$pr_line" >&2
       exit 1
