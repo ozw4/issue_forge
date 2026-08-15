@@ -1217,7 +1217,7 @@ requeue_current_failed_issue() {
 
   rm -rf -- "$CODEX_FLOW_CODEX_DIR" "${issue_dir}/codex"
   find "$issue_dir" -mindepth 1 -maxdepth 1 -type d -name '.codex.tmp.*' -exec rm -rf -- {} +
-  rm -f -- "${issue_dir}/head_commit" "${issue_dir}/base_commit" "$CODEX_FLOW_BASE_COMMIT_FILE"
+  rm -f -- "${issue_dir}/head_commit"
   rm -f -- \
     "${batch_dir}/head_commit" \
     "${batch_dir}/changed-files.txt" \
@@ -1233,6 +1233,7 @@ requeue_current_failed_issue() {
   write_batch_state "$batch_id" failed issues "$requeue_issue_number" ''
   write_atomic_value "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id"
   write_queue_state failed batch "$batch_id" ''
+  rm -f -- "${issue_dir}/base_commit" "$CODEX_FLOW_BASE_COMMIT_FILE"
 
   log_info "Issue ${requeue_issue_number} is queued at context; run run_issue_queue.sh --resume to restart it"
 }

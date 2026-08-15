@@ -3244,6 +3244,45 @@ prepare_current_failed_requeue_fixture() {
   write_resume_queue_state failed batch "$resume_batch_id" 42
 }
 
+prepare_interrupted_requeue_fixture() {
+  local fixture_name="$1"
+  local target_base_commit
+
+  prepare_current_failed_requeue_fixture "$fixture_name"
+  target_base_commit="$(< "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit")"
+  "${REAL_GIT}" -C "$resume_repo" reset --hard "$target_base_commit" >/dev/null
+  rm -f "${resume_repo}/partial-requeue.txt"
+  rm -rf \
+    "${resume_repo}/.work/codex" \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/codex"
+  find "${resume_batch_dir}/issues/${ISSUE_NUMBER}" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -type d \
+    -name '.codex.tmp.*' \
+    -exec rm -rf -- {} +
+  rm -f \
+    "${resume_batch_dir}/issues/${ISSUE_NUMBER}/head_commit" \
+    "${resume_batch_dir}/head_commit" \
+    "${resume_batch_dir}/changed-files.txt" \
+    "${resume_batch_dir}/checks.log" \
+    "${resume_batch_dir}/batch-review.txt" \
+    "${resume_batch_dir}/batch-review.raw.txt" \
+    "${resume_batch_dir}/pr_number" \
+    "${resume_batch_dir}/pr_url"
+  printf '%s\n' "$target_base_commit" > "${resume_repo}/.work/base_commit"
+}
+
+prepare_requeue_resume_remote() {
+  local fixture_name="$1"
+  local requeue_remote="${temp_root}/queue-requeue-${fixture_name}-remote.git"
+
+  "${REAL_GIT}" clone --bare "$remote_dir" "$requeue_remote" >/dev/null
+  "${REAL_GIT}" --git-dir="$requeue_remote" \
+    update-ref -d "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  "${REAL_GIT}" -C "$resume_repo" remote set-url origin "$requeue_remote"
+}
+
 run_issue_queue_requeue_smoke() {
   local requeue_log
   local resume_log
@@ -3307,10 +3346,7 @@ run_issue_queue_requeue_smoke() {
   printf '1\n' > "${state_dir}/checks-count.txt"
   printf '1\n' > "${state_dir}/review-count.txt"
   printf '1\n' > "${state_dir}/batch-review-count.txt"
-  "${REAL_GIT}" clone --bare "$remote_dir" "${temp_root}/queue-requeue-remote.git" >/dev/null
-  "${REAL_GIT}" --git-dir="${temp_root}/queue-requeue-remote.git" \
-    update-ref -d "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
-  "${REAL_GIT}" -C "$resume_repo" remote set-url origin "${temp_root}/queue-requeue-remote.git"
+  prepare_requeue_resume_remote current-failed
   if ! run_queue_resume_fixture "$resume_log"; then
     cat "$resume_log" >&2
     fail 'resume should succeed after explicit requeue'
@@ -3320,6 +3356,40 @@ run_issue_queue_requeue_smoke() {
   assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
   issues_section_count="$(grep -Fxc "## Issue #${ISSUE_NUMBER}" "${resume_batch_dir}/issues.txt" || true)"
   assert_equals '1' "$issues_section_count" 'requeued Issue context section count'
+
+  prepare_interrupted_requeue_fixture interrupted-before-state
+  requeue_log="${state_dir}/queue-requeue-interrupted-before-state.log"
+  resume_log="${state_dir}/queue-requeue-interrupted-resume.log"
+  target_base_commit="$(< "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit")"
+  assert_equals "$target_base_commit" "$("${REAL_GIT}" -C "$resume_repo" rev-parse HEAD)" \
+    'interrupted requeue reset HEAD'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tfailed'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\timplementation'
+  assert_file_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit"
+  assert_file_exists "${resume_repo}/.work/base_commit"
+  assert_path_not_exists "${resume_repo}/.work/codex"
+  assert_path_not_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/codex"
+  clear_command_logs
+  reset_flow_counters
+  if ! run_queue_requeue_fixture "$ISSUE_NUMBER" "$requeue_log"; then
+    cat "$requeue_log" >&2
+    fail 'requeue should recover after interruption before durable state update'
+  fi
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tqueued'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tcontext'
+  assert_path_not_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit"
+  assert_path_not_exists "${resume_repo}/.work/base_commit"
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/review-count.txt"
+  printf '1\n' > "${state_dir}/batch-review-count.txt"
+  prepare_requeue_resume_remote interrupted-before-state
+  if ! run_queue_resume_fixture "$resume_log"; then
+    cat "$resume_log" >&2
+    fail 'resume should succeed after interrupted requeue recovery'
+  fi
+  assert_equals '1' "$(< "${state_dir}/implementation-count.txt")" \
+    'interrupted requeue fresh implementation count'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
 
   copy_queue_resume_fixture committed-rejection
   rejection_log="${state_dir}/queue-requeue-committed.log"
