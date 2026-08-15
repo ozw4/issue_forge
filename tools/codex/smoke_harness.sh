@@ -3214,6 +3214,168 @@ run_queue_resume_fixture() {
   ) > "$output_log" 2>&1
 }
 
+run_queue_requeue_fixture() {
+  local issue_number="$1"
+  local output_log="$2"
+
+  (
+    cd "$resume_repo"
+    PATH="${stub_dir}:$PATH" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --requeue "$issue_number"
+  ) > "$output_log" 2>&1
+}
+
+prepare_current_failed_requeue_fixture() {
+  local fixture_name="$1"
+  local target_base_commit
+
+  copy_queue_resume_fixture "$fixture_name"
+  target_base_commit="$(< "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit")"
+  "${REAL_GIT}" -C "$resume_repo" reset --hard "$target_base_commit" >/dev/null
+  rm -f "${resume_batch_dir}/pr_url"
+  mkdir -p "${resume_repo}/.work/codex"
+  printf 'active failed attempt\n' > "${resume_repo}/.work/codex/requeue-marker.txt"
+  printf 'preserve work root\n' > "${resume_repo}/.work/requeue-preserved.txt"
+  printf 'partial tracked edit\n' >> "${resume_repo}/smoke-target.txt"
+  printf 'partial untracked edit\n' > "${resume_repo}/partial-requeue.txt"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" failed implementation 42
+  write_resume_batch_state failed issues "$ISSUE_NUMBER" 42
+  write_resume_queue_state failed batch "$resume_batch_id" 42
+}
+
+run_issue_queue_requeue_smoke() {
+  local requeue_log
+  local resume_log
+  local rejection_log
+  local requeue_status
+  local target_base_commit
+  local issues_section_count
+
+  log 'running explicit queue requeue smoke'
+
+  prepare_current_failed_requeue_fixture current-failed
+  requeue_log="${state_dir}/queue-requeue-current-failed.log"
+  resume_log="${state_dir}/queue-requeue-resume.log"
+  target_base_commit="$(< "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit")"
+  printf '99999999\n' > "${resume_repo}/.work/queue/lock"
+  clear_command_logs
+  reset_flow_counters
+  if ! run_queue_requeue_fixture "$ISSUE_NUMBER" "$requeue_log"; then
+    cat "$requeue_log" >&2
+    fail 'requeue should succeed for the current failed Issue'
+  fi
+
+  assert_file_contains "$requeue_log" 'reclaiming stale queue lock'
+  assert_file_contains "$requeue_log" "destructively requeueing Issue ${ISSUE_NUMBER}"
+  assert_file_contains "$requeue_log" 'run run_issue_queue.sh --resume to restart it'
+  assert_equals "$target_base_commit" "$("${REAL_GIT}" -C "$resume_repo" rev-parse HEAD)" 'requeue reset HEAD'
+  assert_file_not_contains "${resume_repo}/smoke-target.txt" 'partial tracked edit'
+  assert_path_not_exists "${resume_repo}/partial-requeue.txt"
+  assert_file_exists "${resume_repo}/.work/requeue-preserved.txt"
+  if [[ ! -L "${resume_repo}/${FIXTURE_ENGINE_PATH}" ]]; then
+    fail 'requeue should preserve the logical vendor/issue_forge engine path'
+  fi
+  assert_path_not_exists "${resume_repo}/.work/codex"
+  assert_path_not_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/codex"
+  assert_path_not_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/head_commit"
+  assert_path_not_exists "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit"
+  assert_path_not_exists "${resume_batch_dir}/head_commit"
+  assert_path_not_exists "${resume_batch_dir}/changed-files.txt"
+  assert_path_not_exists "${resume_batch_dir}/checks.log"
+  assert_path_not_exists "${resume_batch_dir}/batch-review.txt"
+  assert_path_not_exists "${resume_batch_dir}/batch-review.raw.txt"
+  assert_path_not_exists "${resume_batch_dir}/pr_number"
+  assert_path_not_exists "${resume_batch_dir}/pr_url"
+  assert_file_exists "${resume_batch_dir}/history/batch-review.round-01.txt"
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tqueued'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tcontext'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'lease_owner\tbatch-41-40'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'exit_code\t'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'status\tfailed'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'phase\tissues'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'current_issue\t40'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tfailed'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'phase\tbatch'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'current_batch\tbatch-41-40'
+  assert_equals 'batch-41-40' "$(< "${resume_repo}/.work/queue/current_batch")" 'requeue current batch metadata'
+  assert_path_not_exists "${resume_repo}/.work/queue/lock"
+  assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_file_contains "${state_dir}/git.log" "reset --hard ${target_base_commit}"
+  assert_file_contains "${state_dir}/git.log" 'clean -fd -e vendor/issue_forge -- . :(exclude).work'
+
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf '1\n' > "${state_dir}/review-count.txt"
+  printf '1\n' > "${state_dir}/batch-review-count.txt"
+  "${REAL_GIT}" clone --bare "$remote_dir" "${temp_root}/queue-requeue-remote.git" >/dev/null
+  "${REAL_GIT}" --git-dir="${temp_root}/queue-requeue-remote.git" \
+    update-ref -d "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  "${REAL_GIT}" -C "$resume_repo" remote set-url origin "${temp_root}/queue-requeue-remote.git"
+  if ! run_queue_resume_fixture "$resume_log"; then
+    cat "$resume_log" >&2
+    fail 'resume should succeed after explicit requeue'
+  fi
+  assert_equals '1' "$(< "${state_dir}/implementation-count.txt")" 'requeued Issue fresh implementation count'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  issues_section_count="$(grep -Fxc "## Issue #${ISSUE_NUMBER}" "${resume_batch_dir}/issues.txt" || true)"
+  assert_equals '1' "$issues_section_count" 'requeued Issue context section count'
+
+  copy_queue_resume_fixture committed-rejection
+  rejection_log="${state_dir}/queue-requeue-committed.log"
+  set +e
+  run_queue_requeue_fixture "$ISSUE_NUMBER" "$rejection_log"
+  requeue_status="$?"
+  set -e
+  assert_equals '1' "$requeue_status" 'committed Issue requeue exit status'
+  assert_file_contains "$rejection_log" 'already committed/acked'
+
+  copy_queue_resume_fixture plan-rejection
+  rejection_log="${state_dir}/queue-requeue-plan.log"
+  set +e
+  run_queue_requeue_fixture 999 "$rejection_log"
+  requeue_status="$?"
+  set -e
+  assert_equals '1' "$requeue_status" 'unplanned Issue requeue exit status'
+  assert_file_contains "$rejection_log" 'is not present in the saved queue plan'
+
+  copy_queue_resume_fixture later-progress-rejection
+  rejection_log="${state_dir}/queue-requeue-later-progress.log"
+  rm -f "${resume_batch_dir}/pr_number" "${resume_batch_dir}/pr_url"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" failed implementation 42
+  write_resume_issue_state "$ISSUE_NUMBER" leased checks
+  write_resume_batch_state failed issues "$QUEUE_ISSUE_NUMBER" 42
+  write_resume_queue_state failed batch "$resume_batch_id" 42
+  set +e
+  run_queue_requeue_fixture "$QUEUE_ISSUE_NUMBER" "$rejection_log"
+  requeue_status="$?"
+  set -e
+  assert_equals '1' "$requeue_status" 'later progressed Issue requeue exit status'
+  assert_file_contains "$rejection_log" "Later Issue ${ISSUE_NUMBER} has already progressed"
+
+  prepare_current_failed_requeue_fixture live-lock-rejection
+  rejection_log="${state_dir}/queue-requeue-live-lock.log"
+  printf '%s\n' "$$" > "${resume_repo}/.work/queue/lock"
+  set +e
+  run_queue_requeue_fixture "$ISSUE_NUMBER" "$rejection_log"
+  requeue_status="$?"
+  set -e
+  assert_equals '1' "$requeue_status" 'live lock requeue exit status'
+  assert_file_contains "$rejection_log" 'Queue lock belongs to a live local process'
+  assert_file_exists "${resume_repo}/.work/queue/lock"
+
+  prepare_current_failed_requeue_fixture missing-base-rejection
+  rejection_log="${state_dir}/queue-requeue-missing-base.log"
+  rm -f "${resume_batch_dir}/issues/${ISSUE_NUMBER}/base_commit"
+  set +e
+  run_queue_requeue_fixture "$ISSUE_NUMBER" "$rejection_log"
+  requeue_status="$?"
+  set -e
+  assert_equals '1' "$requeue_status" 'missing Issue base requeue exit status'
+  assert_file_contains "$rejection_log" "Missing Issue ${ISSUE_NUMBER} base commit required for requeue"
+  assert_path_not_exists "${resume_repo}/.work/queue/lock"
+}
+
 run_issue_queue_resume_smoke() {
   local resume_log
   local resume_status
@@ -3677,6 +3839,7 @@ main() {
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
   run_issue_queue_resume_smoke
+  run_issue_queue_requeue_smoke
   run_batch_resume_helpers_smoke
   run_issue_queue_strict_issue_review_smoke
   run_issue_queue_failure_state_smoke

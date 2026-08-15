@@ -29,6 +29,8 @@ batch_current_issue=''
 history_allow_overwrite=1
 queue_resume_mode=0
 queue_resume_complete=0
+queue_requeue_mode=0
+requeue_issue_number=''
 
 log_info() {
   printf '[queue] %s\n' "$1"
@@ -43,6 +45,7 @@ usage() {
   cat <<'EOF'
 Usage: tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
        tools/codex/run_issue_queue.sh --resume
+       tools/codex/run_issue_queue.sh --requeue <issue_number>
 
 Options:
   --review-every <positive_integer>
@@ -51,6 +54,8 @@ Options:
   --auto-merge
   --draft
   --resume
+  --requeue <issue_number>  Destructively discard the current failed Issue attempt;
+                            run --resume separately to restart queue processing.
   --help
 EOF
 }
@@ -165,6 +170,16 @@ parse_queue_cli() {
     return 0
   fi
 
+  if [[ "${1:-}" == '--requeue' ]]; then
+    if [[ "$#" -ne 2 ]]; then
+      fail '--requeue requires exactly one Issue number and cannot be combined with --resume, fresh Issue numbers, or other queue options'
+    fi
+    require_numeric_issue_number "$2"
+    queue_requeue_mode=1
+    requeue_issue_number="$2"
+    return 0
+  fi
+
   parse_queue_arguments "$@"
 }
 
@@ -181,6 +196,9 @@ read_queue_plan() {
   local auto_merge_count=0
 
   if [[ ! -f "$CODEX_FLOW_QUEUE_PLAN_FILE" ]]; then
+    if [[ "$queue_requeue_mode" -eq 1 ]]; then
+      fail "Missing queue plan file required for --requeue: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
+    fi
     fail "Missing queue plan file required for --resume: ${CODEX_FLOW_QUEUE_PLAN_FILE}"
   fi
 
@@ -337,7 +355,7 @@ create_queue_lock() {
   queue_lock="${CODEX_FLOW_QUEUE_DIR}/lock"
 
   if [[ -e "$queue_lock" ]]; then
-    if [[ "$queue_resume_mode" -ne 1 ]]; then
+    if [[ "$queue_resume_mode" -ne 1 && "$queue_requeue_mode" -ne 1 ]]; then
       fail "Queue lock already exists: ${queue_lock}"
     fi
 
@@ -1071,12 +1089,152 @@ validate_resume_queue_artifacts() {
 
 validate_resume_queue_state_file() {
   if [[ ! -f "$CODEX_FLOW_QUEUE_STATE_FILE" ]]; then
+    if [[ "$queue_requeue_mode" -eq 1 ]]; then
+      fail "Missing queue state file required for --requeue: ${CODEX_FLOW_QUEUE_STATE_FILE}"
+    fi
     fail "Missing queue state file required for --resume: ${CODEX_FLOW_QUEUE_STATE_FILE}"
   fi
   read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" status >/dev/null
   read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" phase >/dev/null
   read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" current_batch >/dev/null
   read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" exit_code >/dev/null
+}
+
+requeue_current_failed_issue() {
+  local target_index=-1
+  local batch_start_index
+  local batch_end_index
+  local first_issue
+  local last_issue
+  local batch_id
+  local batch_dir
+  local expected_branch
+  local saved_branch
+  local issue_dir
+  local issue_status
+  local issue_phase
+  local queue_status
+  local first_unfinished_issue=''
+  local later_issue
+  local later_status
+  local current_branch
+  local worktree_status
+  local issue_base_commit
+  local index
+
+  for index in "${!issue_numbers[@]}"; do
+    if [[ "${issue_numbers[$index]}" == "$requeue_issue_number" ]]; then
+      target_index="$index"
+      break
+    fi
+  done
+  if [[ "$target_index" -lt 0 ]]; then
+    fail "Issue ${requeue_issue_number} is not present in the saved queue plan"
+  fi
+
+  batch_start_index=$(((target_index / review_every) * review_every))
+  batch_end_index=$((batch_start_index + review_every))
+  if [[ "$batch_end_index" -gt "${#issue_numbers[@]}" ]]; then
+    batch_end_index="${#issue_numbers[@]}"
+  fi
+  first_issue="${issue_numbers[$batch_start_index]}"
+  last_issue="${issue_numbers[$((batch_end_index - 1))]}"
+  batch_id="$(batch_id_for_range "$first_issue" "$last_issue")"
+  batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
+  expected_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
+  issue_dir="${batch_dir}/issues/${requeue_issue_number}"
+
+  issue_status="$(read_state_tsv_value "${issue_dir}/state.tsv" status)"
+  issue_phase="$(read_state_tsv_value "${issue_dir}/state.tsv" phase)"
+  case "$issue_status" in
+    committed|acked)
+      fail "Issue ${requeue_issue_number} is already committed/acked and cannot be requeued"
+      ;;
+    failed|leased) ;;
+    *)
+      fail "Issue ${requeue_issue_number} is not the current failed Issue: ${issue_status} / ${issue_phase}"
+      ;;
+  esac
+
+  for ((index = batch_start_index; index < batch_end_index; index += 1)); do
+    later_issue="${issue_numbers[$index]}"
+    later_status="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$later_issue")" status)"
+    if [[ -z "$first_unfinished_issue" && "$later_status" != 'committed' && "$later_status" != 'acked' ]]; then
+      first_unfinished_issue="$later_issue"
+    fi
+  done
+  if [[ "$first_unfinished_issue" != "$requeue_issue_number" ]]; then
+    fail "Issue ${requeue_issue_number} is not the current failed Issue; first unfinished Issue in ${batch_id} is ${first_unfinished_issue:-none}"
+  fi
+
+  for ((index = target_index + 1; index < batch_end_index; index += 1)); do
+    later_issue="${issue_numbers[$index]}"
+    later_status="$(read_state_tsv_value "$(issue_state_file "$batch_id" "$later_issue")" status)"
+    case "$later_status" in
+      leased|committed|acked|failed)
+        fail "Later Issue ${later_issue} has already progressed with status ${later_status}; refusing to requeue Issue ${requeue_issue_number}"
+        ;;
+    esac
+  done
+
+  queue_status="$(read_state_tsv_value "$CODEX_FLOW_QUEUE_STATE_FILE" status)"
+  case "$queue_status" in
+    running|failed) ;;
+    *)
+      fail "Issue ${requeue_issue_number} is not the current failed Issue because queue status is ${queue_status}"
+      ;;
+  esac
+
+  if [[ ! -f "${batch_dir}/branch" ]]; then
+    fail "Missing saved local batch branch metadata for requeue: ${batch_dir}/branch"
+  fi
+  saved_branch="$(< "${batch_dir}/branch")"
+  if [[ "$saved_branch" != "$expected_branch" ]]; then
+    fail "Saved batch branch does not match the queue plan for ${batch_id}: ${saved_branch} != ${expected_branch}"
+  fi
+  if ! git show-ref --verify --quiet "refs/heads/${saved_branch}"; then
+    fail "Missing local batch branch required for requeue: ${saved_branch}"
+  fi
+  issue_base_commit="$(resolve_commit_file "${issue_dir}/base_commit" "Issue ${requeue_issue_number} base commit required for requeue")"
+
+  if [[ -f "${batch_dir}/pr_number" && -f "${batch_dir}/pr_url" ]]; then
+    fail "Batch ${batch_id} already has published PR metadata; requeue after PR publication is not supported"
+  fi
+
+  current_branch="$(git branch --show-current)"
+  worktree_status="$(status_outside_work)"
+  if [[ -n "$worktree_status" && "$current_branch" != "$saved_branch" ]]; then
+    fail "Cannot requeue Issue ${requeue_issue_number} from dirty branch ${current_branch:-detached}; expected ${saved_branch}"
+  fi
+  if [[ -z "$worktree_status" && "$current_branch" != "$saved_branch" ]]; then
+    log_info "switching to saved batch branch ${saved_branch}"
+    git switch "$saved_branch"
+  fi
+
+  log_info "destructively requeueing Issue ${requeue_issue_number} from ${issue_base_commit}"
+  git reset --hard "$issue_base_commit"
+  git clean -fd "${CODEX_FLOW_CLEAN_EXCLUDE_ARGS[@]}" -- . "$CODEX_FLOW_WORKTREE_EXCLUDE_PATHSPEC"
+
+  rm -rf -- "$CODEX_FLOW_CODEX_DIR" "${issue_dir}/codex"
+  find "$issue_dir" -mindepth 1 -maxdepth 1 -type d -name '.codex.tmp.*' -exec rm -rf -- {} +
+  rm -f -- "${issue_dir}/head_commit" "${issue_dir}/base_commit" "$CODEX_FLOW_BASE_COMMIT_FILE"
+  rm -f -- \
+    "${batch_dir}/head_commit" \
+    "${batch_dir}/changed-files.txt" \
+    "${batch_dir}/checks.log" \
+    "${batch_dir}/batch-review.txt" \
+    "${batch_dir}/batch-review.raw.txt" \
+    "${batch_dir}/pr_number" \
+    "${batch_dir}/pr_url"
+
+  write_atomic_value "$CODEX_FLOW_CURRENT_ISSUE_FILE" "$requeue_issue_number"
+  write_atomic_value "$CODEX_FLOW_CURRENT_BRANCH_FILE" "$saved_branch"
+  write_issue_state "$batch_id" "$requeue_issue_number" queued context ''
+  write_batch_state "$batch_id" failed issues "$requeue_issue_number" ''
+  write_atomic_value "${CODEX_FLOW_QUEUE_DIR}/current_batch" "$batch_id"
+  write_queue_state failed batch "$batch_id" ''
+
+  log_info "Issue ${requeue_issue_number} is queued at context; run run_issue_queue.sh --resume to restart it"
 }
 
 resume_queue_state() {
@@ -1145,14 +1303,26 @@ main() {
 
   parse_queue_cli "$@"
 
+  require_command git
+  require_command mktemp
+
+  enter_repo_root
+
+  if [[ "$queue_requeue_mode" -eq 1 ]]; then
+    require_command find
+    read_queue_plan
+    ensure_unique_issues
+    validate_resume_queue_state_file
+    create_queue_lock
+    validate_resume_queue_artifacts
+    requeue_current_failed_issue
+    return 0
+  fi
+
   require_command awk
   require_command find
   require_command gh
-  require_command git
-  require_command mktemp
   require_command sed
-
-  enter_repo_root
   require_queue_prompt_templates
 
   if [[ "$queue_resume_mode" -eq 1 ]]; then

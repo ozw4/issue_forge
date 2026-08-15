@@ -160,7 +160,7 @@ run 123
 | `tools/issue/start_from_issue.sh` | `<issue_number>` | Issue context、fixed base commit、Issue branch を準備 |
 | `tools/codex/doctor.sh` | none | runtime preflight |
 | `tools/codex/run_issue_flow.sh` | `[issue_number]` | implementation、checks/review loops、commit、push、PR publish |
-| `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...` or `--resume` | sequential queue、local checkpoint resume、batch checks/review、batch PR publish |
+| `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...`、`--resume`、または `--requeue <issue_number>` | sequential queue、local checkpoint resume、current failed Issue の明示的な破棄/requeue、batch checks/review、batch PR publish |
 | `tools/codex/continue_after_review.sh` | `[issue_number]` | current changes を review follow-up commit にして flow を再実行 |
 | `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | `.work/codex` を消して flow を再実行。`--hard` は repository changes を破棄 |
 | `tools/codex/make_pr_only.sh` | `[issue_number]` | current branch の PR title/body を作成または同期。新規 commit は push しない |
@@ -195,6 +195,17 @@ queue 内の per-Issue flow は `implementation`、`checks`、`review`、`commit
 
 `--resume` は Issue 番号や fresh-run options と併用できません。dirty worktree は保存済み batch branch 上にある場合だけ許可され、dirty な別 branch、欠落した local branch（`branch` phase で exact saved base から再作成できる場合を除く）、schema-v1 でない plan/state は明示的に拒否します。checkpoint 環境変数を指定しない通常の single-Issue flow は clean worktree、publish、artifact path を含む従来の挙動を維持します。
 
+partial work を checkpoint から継続せず、current failed Issue を開始点からやり直す場合は、destructive な `--requeue` と `--resume` を明示的に2段階で実行します。`--requeue` 自体は queue を再開しません。
+
+```bash
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --requeue 124
+./vendor/issue_forge/tools/codex/run_issue_queue.sh --resume
+```
+
+`--requeue` は saved plan 内の exactly 1 Issue だけを受け、他の option、fresh Issue 列、`--resume` とは併用できません。対象は `failed` または `leased` で、その batch の最初の未完了 Issue かつ後続 Issue が未着手の場合に限ります。`committed` / `acked` Issue、plan 外 Issue、local batch branch または Issue-local `base_commit` が無い場合、live queue lock がある場合は拒否します。
+
+許可された requeue は Issue-local `base_commit` へ `reset --hard` と exclusion-aware `clean` を行うため、partial tracked/untracked change と failed attempt artifacts を破棄します。`.work`、logical `vendor/issue_forge`、先行する committed Issue の commit/archive、batch history は保持します。target Issue の active/unfinished Codex artifacts、Issue `head_commit` / `base_commit`、current batch の head/changed-files/checks/review/PR metadata は無効化します。Issue は `queued / context` に戻りますが、queue と batch は `failed` のままで、続く `--resume` が fresh lease として実装を再実行します。
+
 ```sh
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 ```
@@ -209,7 +220,7 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 
 branch は `batch/<first_issue>-<last_issue>`、artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
 
-fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きせず、`--resume` が plan 順に最初の未完了 batch と保存 phase を選びます。`--requeue` は未対応です。
+fresh queue は validated plan と queue/batch/Issue の明示 state を branch 作成前に保存します。Issue は `queued`、`leased`、`committed`、`acked` と進み、queue と batch は成功時に `succeeded / done`、失敗時に最後の phase を保った `failed` で停止します。schema-v1 の `running` または `failed` queue は fresh run で上書きせず、`--resume` が plan 順に最初の未完了 batch と保存 phase を選びます。`--requeue` は current failed Issue だけを destructive に `queued / context` へ戻します。
 
 batch checks/review/publish/merge の内部 helper は queue phase dispatcher から再呼び出されます。既存 history から round と累積 fix budget を復元し、clean な accepted review は再利用します。dirty review entry は現在の worktree を checks と新 review で再評価します。publish は保存済み PR metadata または branch/base の open PR を再利用し、merge 済み PR では auto-merge request を再発行しません。
 
