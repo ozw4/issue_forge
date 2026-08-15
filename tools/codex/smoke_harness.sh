@@ -891,9 +891,21 @@ fi
 if [[ "\$#" -ge 2 && "\$1" == "pr" && "\$2" == "create" ]]; then
   head_value="\$(flag_value '--head' "\$@" || true)"
   if [[ "\$head_value" == batch/* ]]; then
+    incremented_create_count=0
+    if [[ -f "${state_dir}/batch-pr-create-count.txt" ]]; then
+      incremented_create_count="\$(< "${state_dir}/batch-pr-create-count.txt")"
+    fi
+    incremented_create_count=\$((incremented_create_count + 1))
+    printf '%s\n' "\$incremented_create_count" > "${state_dir}/batch-pr-create-count.txt"
     copy_flag_value_to_file '--body-file' "${state_dir}/batch-pr-create-body.txt" "\$@"
     write_flag_value_to_file '--title' "${state_dir}/batch-pr-create-title.txt" "\$@"
     printf 'https://example.test/pr/400\n' > "${state_dir}/batch-pr-url.txt"
+    if [[ "\${SMOKE_FAIL_BATCH_PR_CREATE_ONCE_AFTER_SIDE_EFFECT:-0}" -ne 0 \
+      && ! -f "${state_dir}/batch-pr-create-failed-once.txt" ]]; then
+      printf 'failed once\n' > "${state_dir}/batch-pr-create-failed-once.txt"
+      printf 'forced interrupted batch PR create after side effect\n' >&2
+      exit 45
+    fi
     cat "${state_dir}/batch-pr-url.txt"
     exit 0
   fi
@@ -1097,6 +1109,12 @@ OUT
   *"Make the required changes, then stop."*)
     implementation_count="\$(increment_counter "${state_dir}/implementation-count.txt")"
     printf 'implementation round %s\n' "\$implementation_count" >> smoke-target.txt
+    if [[ "\${SMOKE_FAIL_IMPLEMENTATION_ONCE_AFTER_EDIT:-0}" -ne 0 \
+      && ! -f "${state_dir}/implementation-failed-once.txt" ]]; then
+      printf 'failed once\n' > "${state_dir}/implementation-failed-once.txt"
+      printf 'forced interrupted implementation once after edit\n' >&2
+      exit 42
+    fi
     if [[ "\${SMOKE_FAIL_IMPLEMENTATION_AFTER_EDIT:-0}" -ne 0 ]]; then
       printf 'forced interrupted implementation after edit\n' >&2
       exit 42
@@ -2602,6 +2620,7 @@ run_issue_flow_checkpoint_smoke() {
   local review_budget_log="${state_dir}/checkpoint-review-budget.log"
   local interrupted_status
   local budget_status
+  local commit_count_before_resume
   local round
 
   log 'running Issue phase checkpoint smoke'
@@ -2682,8 +2701,12 @@ EOF
   printf 'commit reconciliation change\n' >> "${checkpoint_repo}/smoke-target.txt"
   "${REAL_GIT}" -C "$checkpoint_repo" add smoke-target.txt
   "${REAL_GIT}" -C "$checkpoint_repo" commit -m 'fixture: interrupted after commit' >/dev/null
+  commit_count_before_resume="$("${REAL_GIT}" -C "$checkpoint_repo" rev-list --count HEAD)"
   run_checkpoint_flow > "$commit_log" 2>&1
   assert_file_contains "$commit_log" 'reconciled Issue commit completed before phase checkpoint'
+  assert_equals "$commit_count_before_resume" \
+    "$("${REAL_GIT}" -C "$checkpoint_repo" rev-list --count HEAD)" \
+    'commit reconciliation must not create a duplicate commit'
   assert_path_not_exists "${state_dir}/implementation-count.txt"
   assert_path_not_exists "${state_dir}/checks-count.txt"
   assert_path_not_exists "${state_dir}/review-count.txt"
@@ -2827,8 +2850,12 @@ EOF
   assert_file_contains "${batch_dir}/state.tsv" $'phase\tdone'
   assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
   assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+  assert_file_contains "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" \
+    $'lease_owner\tbatch-41-40'
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
   assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+  assert_file_contains "${batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" \
+    $'lease_owner\tbatch-41-40'
 
   assert_file_exists "${batch_dir}/issues.txt"
   assert_file_order "${batch_dir}/issues.txt" "# Issue #${QUEUE_ISSUE_NUMBER}" "# Issue #${ISSUE_NUMBER}"
@@ -3169,6 +3196,153 @@ copy_queue_resume_fixture() {
   cp -R "${repo_dir}" "$resume_repo"
 }
 
+prepare_fresh_queue_fault_fixture() {
+  local fixture_name="$1"
+  local issue_number="$2"
+
+  fault_repo="${temp_root}/queue-fault-${fixture_name}"
+  fault_remote="${temp_root}/queue-fault-${fixture_name}-remote.git"
+  fault_batch_id="batch-${issue_number}-${issue_number}"
+  fault_batch_dir="${fault_repo}/.work/queue/batches/${fault_batch_id}"
+
+  "${REAL_GIT}" clone --bare "$remote_dir" "$fault_remote" >/dev/null
+  "${REAL_GIT}" --git-dir="$fault_remote" \
+    update-ref -d "refs/heads/batch/${issue_number}-${issue_number}"
+  "${REAL_GIT}" clone --branch main "$fault_remote" "$fault_repo" >/dev/null
+  "${REAL_GIT}" -C "$fault_repo" config user.name 'Smoke Harness'
+  "${REAL_GIT}" -C "$fault_repo" config user.email 'smoke@example.test'
+  ln -s "$REPO_ROOT" "${fault_repo}/${FIXTURE_ENGINE_PATH}"
+
+  rm -f \
+    "${state_dir}/batch-pr-create-count.txt" \
+    "${state_dir}/batch-pr-create-failed-once.txt" \
+    "${state_dir}/batch-pr-url.txt" \
+    "${state_dir}/implementation-failed-once.txt"
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+}
+
+run_fresh_queue_fault_fixture() {
+  local issue_number="$1"
+  local output_log="$2"
+  shift 2
+
+  (
+    cd "$fault_repo"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "$@" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" \
+        --review-every 1 "$issue_number"
+  ) > "$output_log" 2>&1
+}
+
+run_fault_queue_resume_fixture() {
+  local output_log="$1"
+  shift
+
+  (
+    cd "$fault_repo"
+    PATH="${stub_dir}:$PATH" \
+      SMOKE_CHECKS_COUNT_FILE="${state_dir}/checks-count.txt" \
+      SMOKE_RUN_CHANGED_ARGS_FILE="${state_dir}/run-changed-args.txt" \
+      "$@" \
+      "./${FIXTURE_ENGINE_CODEX_PATH}/run_issue_queue.sh" --resume
+  ) > "$output_log" 2>&1
+}
+
+run_issue_queue_fault_injection_smoke() {
+  local failure_log
+  local resume_log
+  local failure_status
+  local implementation_count
+
+  log 'running end-to-end queue fault injection smoke'
+
+  prepare_fresh_queue_fault_fixture implementation "$ISSUE_NUMBER"
+  failure_log="${state_dir}/queue-fault-implementation.log"
+  resume_log="${state_dir}/queue-fault-implementation-resume.log"
+  mkdir -p "${fault_repo}/.work/queue"
+  printf '99999999\n' > "${fault_repo}/.work/queue/lock"
+  set +e
+  run_fresh_queue_fault_fixture "$ISSUE_NUMBER" "${state_dir}/queue-fresh-existing-lock.log"
+  failure_status="$?"
+  set -e
+  assert_equals '1' "$failure_status" 'fresh queue existing lock exit status'
+  assert_file_contains "${state_dir}/queue-fresh-existing-lock.log" 'Queue lock already exists'
+  rm -rf "${fault_repo}/.work/queue"
+
+  clear_command_logs
+  reset_flow_counters
+  set +e
+  run_fresh_queue_fault_fixture "$ISSUE_NUMBER" "$failure_log" \
+    env SMOKE_FAIL_IMPLEMENTATION_ONCE_AFTER_EDIT=1
+  failure_status="$?"
+  set -e
+  assert_equals '42' "$failure_status" 'queue implementation post-edit failure status'
+  assert_file_contains "${fault_repo}/.work/codex/implementation.log" \
+    'forced interrupted implementation once after edit'
+  assert_file_contains "${fault_repo}/smoke-target.txt" 'implementation round 1'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'status\tfailed'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'phase\tbatch'
+  assert_file_contains "${fault_batch_dir}/state.tsv" $'status\tfailed'
+  assert_file_contains "${fault_batch_dir}/state.tsv" $'phase\tissues'
+  assert_file_contains "${fault_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tfailed'
+  assert_file_contains "${fault_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\timplementation'
+  assert_file_contains "${fault_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" \
+    $'lease_owner\tbatch-40-40'
+  implementation_count="$(< "${state_dir}/implementation-count.txt")"
+
+  run_fault_queue_resume_fixture "$resume_log" \
+    env SMOKE_FAIL_IMPLEMENTATION_ONCE_AFTER_EDIT=1
+  assert_file_contains "$resume_log" \
+    'reconciled interrupted implementation changes; continuing with checks'
+  assert_equals "$implementation_count" "$(< "${state_dir}/implementation-count.txt")" \
+    'queue resume must not rerun interrupted implementation'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'phase\tdone'
+  assert_file_contains "${fault_batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${fault_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${fault_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'phase\tdone'
+
+  prepare_fresh_queue_fault_fixture publish "$QUEUE_ISSUE_NUMBER"
+  failure_log="${state_dir}/queue-fault-pr-create.log"
+  resume_log="${state_dir}/queue-fault-pr-create-resume.log"
+  clear_command_logs
+  reset_flow_counters
+  set +e
+  run_fresh_queue_fault_fixture "$QUEUE_ISSUE_NUMBER" "$failure_log" \
+    env SMOKE_FAIL_BATCH_PR_CREATE_ONCE_AFTER_SIDE_EFFECT=1
+  failure_status="$?"
+  set -e
+  assert_equals '45' "$failure_status" 'queue PR create post-side-effect failure status'
+  assert_file_contains "$failure_log" 'forced interrupted batch PR create after side effect'
+  assert_file_exists "${state_dir}/batch-pr-url.txt"
+  assert_equals '1' "$(< "${state_dir}/batch-pr-create-count.txt")" \
+    'interrupted batch PR create count'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'status\tfailed'
+  assert_file_contains "${fault_batch_dir}/state.tsv" $'status\tfailed'
+  assert_file_contains "${fault_batch_dir}/state.tsv" $'phase\tpublish'
+  assert_path_not_exists "${fault_batch_dir}/pr_number"
+  assert_path_not_exists "${fault_batch_dir}/pr_url"
+
+  clear_command_logs
+  run_fault_queue_resume_fixture "$resume_log" \
+    env SMOKE_FAIL_BATCH_PR_CREATE_ONCE_AFTER_SIDE_EFFECT=1
+  assert_file_contains "${state_dir}/gh.log" \
+    "pr list --head batch/${QUEUE_ISSUE_NUMBER}-${QUEUE_ISSUE_NUMBER} --base main --state open"
+  assert_file_contains "${state_dir}/gh.log" 'pr edit https://example.test/pr/400'
+  assert_file_not_contains "${state_dir}/gh.log" 'pr create'
+  assert_equals '1' "$(< "${state_dir}/batch-pr-create-count.txt")" \
+    'resumed batch PR create count'
+  assert_equals '400' "$(< "${fault_batch_dir}/pr_number")" \
+    'resumed batch PR number'
+  assert_equals 'https://example.test/pr/400' "$(< "${fault_batch_dir}/pr_url")" \
+    'resumed batch PR URL'
+  assert_file_contains "${fault_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${fault_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+}
+
 write_resume_queue_state() {
   local status="$1"
   local phase="$2"
@@ -3453,6 +3627,7 @@ run_issue_queue_resume_smoke() {
   local first_issue_head
   local completed_batch_id
   local completed_batch_dir
+  local preserved_review_round
 
   log 'running queue-level resume smoke'
 
@@ -3539,6 +3714,46 @@ EOF
   assert_file_not_contains "${state_dir}/gh.log" "issue view ${ISSUE_NUMBER}"
   assert_file_contains "${state_dir}/gh.log" "issue view ${QUEUE_ISSUE_NUMBER}"
 
+  copy_queue_resume_fixture saved-base-missing-branch
+  resume_log="${state_dir}/queue-resume-saved-base-missing-branch.log"
+  batch_base_commit="$(< "${resume_batch_dir}/base_commit")"
+  "${REAL_GIT}" -C "$resume_repo" switch main >/dev/null
+  "${REAL_GIT}" -C "$resume_repo" branch -D \
+    "batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}" >/dev/null
+  if "${REAL_GIT}" -C "$resume_repo" show-ref --verify --quiet \
+    "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"; then
+    fail 'saved-base branch recreation fixture still has the local batch branch'
+  fi
+  write_resume_batch_state planned branch
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "$resume_log" \
+    "recreating batch branch batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} from saved base commit"
+  assert_file_contains "${state_dir}/git.log" \
+    "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER} ${batch_base_commit}"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+
+  copy_queue_resume_fixture saved-base-existing-branch
+  resume_log="${state_dir}/queue-resume-saved-base-existing-branch.log"
+  if ! "${REAL_GIT}" -C "$resume_repo" show-ref --verify --quiet \
+    "refs/heads/batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"; then
+    fail 'existing-branch reconciliation fixture is missing the local batch branch'
+  fi
+  write_resume_batch_state planned branch
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_not_contains "${state_dir}/git.log" \
+    "switch --create batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+
   copy_queue_resume_fixture committed-next
   resume_log="${state_dir}/queue-resume-committed-next.log"
   first_issue_head="$(< "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/head_commit")"
@@ -3576,6 +3791,83 @@ EOF
   assert_path_not_exists "${state_dir}/implementation-count.txt"
   assert_path_not_exists "${state_dir}/batch-review-count.txt"
   assert_file_not_contains "${state_dir}/gh.log" 'issue view'
+
+  copy_queue_resume_fixture accepted-review
+  resume_log="${state_dir}/queue-resume-accepted-review.log"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed review '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_file_contains "$resume_log" 'reusing valid accepted batch review checkpoint'
+  assert_path_not_exists "${state_dir}/batch-review-count.txt"
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
+
+  copy_queue_resume_fixture malformed-review
+  resume_log="${state_dir}/queue-resume-malformed-review.log"
+  preserved_review_round="$(< "${resume_batch_dir}/history/batch-review.round-02.txt")"
+  printf 'malformed raw-only interrupted review\n' \
+    > "${resume_batch_dir}/batch-review.raw.txt"
+  cp "${resume_batch_dir}/batch-review.raw.txt" \
+    "${resume_batch_dir}/history/batch-review-raw.round-03.txt"
+  rm -f "${resume_batch_dir}/batch-review.txt"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed batch
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed review '' 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "$resume_log"
+  assert_equals '2' "$(< "${state_dir}/batch-review-count.txt")" \
+    'malformed raw-only review starts fresh review rounds'
+  assert_equals 'malformed raw-only interrupted review' \
+    "$(< "${resume_batch_dir}/history/batch-review-raw.round-03.txt")" \
+    'raw-only interrupted review history is preserved'
+  assert_equals "$preserved_review_round" \
+    "$(< "${resume_batch_dir}/history/batch-review.round-02.txt")" \
+    'existing accepted review history is not overwritten'
+  assert_file_exists "${resume_batch_dir}/history/batch-review.round-04.txt"
+  assert_file_exists "${resume_batch_dir}/history/batch-review.round-05.txt"
+  assert_file_contains "${resume_batch_dir}/history/batch-review.round-05.txt" 'accept: yes'
+
+  copy_queue_resume_fixture archive-reconcile
+  resume_log="${state_dir}/queue-resume-archive-reconcile.log"
+  mkdir -p "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/.codex.tmp.interrupted"
+  printf 'leftover archive copy\n' \
+    > "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/.codex.tmp.interrupted/marker.txt"
+  rm -rf "${resume_repo}/.work/codex"
+  write_resume_issue_state "$QUEUE_ISSUE_NUMBER" committed archive
+  write_resume_issue_state "$ISSUE_NUMBER" committed batch
+  write_resume_batch_state failed issues "$QUEUE_ISSUE_NUMBER" 1
+  write_resume_queue_state failed batch "$resume_batch_id" 1
+  clear_command_logs
+  reset_flow_counters
+  printf '1\n' > "${state_dir}/checks-count.txt"
+  printf 'OPEN\t\n' > "${state_dir}/batch-pr-state.txt"
+  set +e
+  run_queue_resume_fixture "$resume_log" env SMOKE_FORCE_BATCH_PR_PUBLISH_FAILURE=1
+  resume_status="$?"
+  set -e
+  assert_equals '2' "$resume_status" 'archive reconciliation follow-up publish failure status'
+  assert_file_contains "$resume_log" \
+    "reusing completed Codex archive for issue ${QUEUE_ISSUE_NUMBER}"
+  assert_path_not_exists \
+    "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/.codex.tmp.interrupted"
+  assert_file_exists "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/implementation.log"
+  assert_path_not_exists "${state_dir}/implementation-count.txt"
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" \
+    $'status\tcommitted'
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" \
+    $'phase\tbatch'
+  clear_command_logs
+  printf 'MERGED\t2026-08-14T00:00:00Z\n' > "${state_dir}/batch-pr-state.txt"
+  run_queue_resume_fixture "${state_dir}/queue-resume-archive-finish.log"
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
 
   copy_queue_resume_fixture publish
   resume_log="${state_dir}/queue-resume-publish-failed.log"
@@ -3634,6 +3926,10 @@ EOF
   assert_file_not_contains "${state_dir}/gh.log" 'pr merge'
   assert_path_not_exists "${state_dir}/batch-pr-merge.txt"
   assert_file_contains "${state_dir}/git.log" 'fetch origin main'
+  assert_file_contains "${resume_batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${resume_batch_dir}/issues/${ISSUE_NUMBER}/state.tsv" $'status\tacked'
+  assert_file_contains "${resume_batch_dir}/state.tsv" $'status\tsucceeded'
+  assert_file_contains "${resume_repo}/.work/queue/state.tsv" $'status\tsucceeded'
 
   copy_queue_resume_fixture merge-open
   resume_log="${state_dir}/queue-resume-merge-open.log"
@@ -3908,6 +4204,7 @@ main() {
   run_issue_flow_checkpoint_smoke
   run_issue_queue_fail_fast_smoke
   run_issue_queue_smoke
+  run_issue_queue_fault_injection_smoke
   run_issue_queue_resume_smoke
   run_issue_queue_requeue_smoke
   run_batch_resume_helpers_smoke

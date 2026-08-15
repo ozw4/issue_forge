@@ -113,3 +113,5 @@ repo 固有のルールや docs を engine 側の暗黙知に押し込まない�
 - 可能な限り checked-in の `tools/checks/run_changed.sh` を `.issue_forge/checks/run_changed.sh` としてコピーして使います。
 - init smoke は no-flag で run convenience files が作られないこと、`--scaffold-run` でだけ作られること、source snippet が subdirectory から `run 5` を wrapper に転送することを検証します。
 - PR create path と existing PR update path の body 内容を検証し、missing artifact と checks/review artifact ありの両方を coverage に含めます。
+- queue fault fixture は stub Codex/checks/`gh` が副作用後に一度だけ失敗する形、またはvalid artifact/stateを組み立てる形で通常中断窓を再現します。production runtimeに汎用phase failure hookやtest-only state enumを追加しません。
+- queue reliability coverageでもlocal single-worker、same-worktree resume、batch-owned leaseというPoC境界を維持し、daemon、DB、GitHub label、Actions workflow、migration compatibility layerを追加しません。
