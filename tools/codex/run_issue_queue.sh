@@ -1355,6 +1355,7 @@ process_batch_body() {
   local index
   local -a batch_issues=()
   local batch_state_file batch_state
+  local batch_state_dir batch_checks_manifest
   local publish_state_file published_state
   local CODEX_FLOW_AGENT_ATTEMPTS_ROOT
 
@@ -1363,9 +1364,11 @@ process_batch_body() {
   batch_dir="${CODEX_FLOW_QUEUE_DIR}/batches/${batch_id}"
   batch_branch="$(batch_branch_name_for_range "$first_issue" "$last_issue")"
   current_batch_id="$batch_id"
-  CODEX_FLOW_AGENT_ATTEMPTS_ROOT="${run_state_dir}/batches/${batch_id}/attempts/batch"
-  batch_state_file="${run_state_dir}/batches/${batch_id}/batch.state"
-  publish_state_file="${run_state_dir}/batches/${batch_id}/publish.state"
+  batch_state_dir="${run_state_dir}/batches/${batch_id}"
+  batch_checks_manifest="${batch_state_dir}/checks/batch.manifest.tsv"
+  CODEX_FLOW_AGENT_ATTEMPTS_ROOT="${batch_state_dir}/attempts/batch"
+  batch_state_file="${batch_state_dir}/batch.state"
+  publish_state_file="${batch_state_dir}/publish.state"
   batch_state="$(queue_state_read_field "$batch_state_file" batch state)"
   if [[ "$batch_state" == completed ]]; then return 0; fi
   issues_file="${batch_dir}/issues.txt"
@@ -1421,7 +1424,9 @@ process_batch_body() {
   if [[ "$batch_state" == checks_running ]]; then
     queue_set_active_phase batch_checks; queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks before
     queue_failpoint fail_batch_checks
-    ensure_batch_checks_pass "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" "$batch_issues_label" "$batch_check_fix_effort" "${run_state_dir}/batches/${batch_id}"
+    ensure_batch_checks_pass \
+      "$batch_dir" "$issues_file" "$batch_base_commit" "$first_issue" "$last_issue" \
+      "$batch_issues_label" "$batch_check_fix_effort" "$batch_state_dir" "$batch_checks_manifest"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_checks after
     queue_state_transition "$batch_state_file" batch "$batch_id" checks_running review_running; batch_state=review_running
   fi
@@ -1438,7 +1443,8 @@ process_batch_body() {
     "$batch_review_effort" \
     "$batch_review_fix_effort" \
     "$batch_check_fix_effort" \
-    "${run_state_dir}/batches/${batch_id}"
+    "$batch_state_dir" \
+    "$batch_checks_manifest"
     queue_state_checkpoint "${run_state_dir}/checkpoint.state" "$run_id" "$batch_id" batch_review after
     batch_head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
     queue_state_mark_batch_accepted "$batch_state_file" "$batch_id" "$batch_head_commit"; batch_state=accepted

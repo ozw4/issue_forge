@@ -421,7 +421,8 @@ commit_issue_changes() {{ printf 'commit\n' >> "$batch_dir/events"; }}
 ensure_batch_checks_pass() {{ printf 'checks\n' >> "$batch_dir/events"; }}
 
 ensure_batch_review_accepted \
-  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir"
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir" \
+  "$batch_state_dir/checks/batch.manifest.tsv"
 """
     return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
         ["bash", "-c", script, "batch-no-change-test", str(tmp_path / "batch"), str(tmp_path / "state"), action],
@@ -509,7 +510,8 @@ queue_failpoint() {{
 }}
 
 ensure_batch_review_accepted \
-  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir"
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir" \
+  "$batch_state_dir/checks/batch.manifest.tsv"
 """
     return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
         [
@@ -602,7 +604,8 @@ queue_failpoint() {{
 }}
 
 ensure_batch_review_accepted \
-  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir"
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir" \
+  "$batch_state_dir/checks/batch.manifest.tsv"
 """
     return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
         ["bash", "-c", script, "batch-commit-boundary-test", stop_after],

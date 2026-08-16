@@ -153,7 +153,8 @@ write_issue_flow_prompt_files \
   "$pending_findings" \
   "$review_findings_ledger" \
   "$fix_resolution_report" \
-  "$review_snapshot"
+  "$review_snapshot" \
+  "$CODEX_FLOW_CHECKS_MANIFEST"
 
 run_implementation_phase
 ensure_checks_pass

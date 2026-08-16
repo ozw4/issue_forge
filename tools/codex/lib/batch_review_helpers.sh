@@ -112,6 +112,7 @@ ensure_batch_checks_pass() {
   local issues_label="$6"
   local check_fix_effort="$7"
   local batch_state_dir="$8"
+  local manifest_file="$9"
   local batch_id
   local checks_log="${batch_dir}/checks.log"
   local fix_checks_prompt="${batch_dir}/fix-from-batch-checks.prompt.md"
@@ -119,7 +120,6 @@ ensure_batch_checks_pass() {
   local fix_round=0
   local history_dir="${batch_dir}/history"
   local attempts_root="${batch_state_dir}/check-attempts/batch"
-  local manifest_file="${batch_state_dir}/checks/batch.manifest.tsv"
   local check_round
 
   batch_id="$(basename "$batch_state_dir")"
@@ -380,6 +380,7 @@ run_batch_review_once() {
   local review_effort="$5"
   local review_round="$6"
   local batch_state_dir="$7"
+  local checks_manifest="$8"
   local batch_diff="${batch_dir}/batch.diff"
   local batch_untracked="${batch_dir}/batch.untracked.txt"
   local batch_summary="${batch_dir}/batch.summary.txt"
@@ -405,7 +406,8 @@ run_batch_review_once() {
     "$batch_summary" \
     "$batch_review_prompt" \
     "$batch_findings_ledger" \
-    "$batch_fix_resolution"
+    "$batch_fix_resolution" \
+    "$checks_manifest"
 
   capture_review_snapshot "$batch_review_snapshot"
   log_info "codex batch review (round ${review_round})"
@@ -451,6 +453,7 @@ ensure_batch_review_accepted() {
   local review_fix_effort="$8"
   local check_fix_effort="$9"
   local batch_state_dir="${10}"
+  local checks_manifest="${11}"
   local batch_review_output="${batch_dir}/batch-review.txt"
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
@@ -478,7 +481,9 @@ ensure_batch_review_accepted() {
 
     case "$next_action" in
       review)
-        run_batch_review_once "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" "$review_round" "$batch_state_dir"
+        run_batch_review_once \
+          "$batch_dir" "$issues_file" "$base_commit" "$issues_label" "$review_effort" \
+          "$review_round" "$batch_state_dir" "$checks_manifest"
         if review_output_accepted "$batch_review_output"; then
           write_batch_review_lifecycle "$lifecycle_state" "$review_round" "$review_fix_round" complete
           if declare -F queue_failpoint >/dev/null 2>&1; then
@@ -555,7 +560,9 @@ ensure_batch_review_accepted() {
         fi
 
         if [[ "$run_fix_checks" -eq 1 ]]; then
-          ensure_batch_checks_pass "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" "$issues_label" "$check_fix_effort" "$batch_state_dir"
+          ensure_batch_checks_pass \
+            "$batch_dir" "$issues_file" "$base_commit" "$first_issue" "$last_issue" \
+            "$issues_label" "$check_fix_effort" "$batch_state_dir" "$checks_manifest"
           if declare -F queue_failpoint >/dev/null 2>&1; then
             queue_failpoint after_batch_review_fix_checks
           fi

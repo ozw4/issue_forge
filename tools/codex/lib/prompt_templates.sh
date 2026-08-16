@@ -133,6 +133,7 @@ write_issue_flow_prompt_files() {
   local findings_ledger="${13}"
   local fix_resolution="${14}"
   local review_snapshot="${15}"
+  local checks_manifest="${16}"
   local light_issue_review="${CODEX_FLOW_LIGHT_ISSUE_REVIEW:-0}"
   local review_template='review'
 
@@ -165,6 +166,7 @@ write_issue_flow_prompt_files() {
     REVIEW_DIFF "$review_diff" \
     REVIEW_UNTRACKED "$review_untracked" \
     REVIEW_SUMMARY "$review_summary" \
+    CHECKS_MANIFEST "$checks_manifest" \
     FINDINGS_LEDGER "$findings_ledger" \
     FIX_RESOLUTION "$fix_resolution" \
     ISSUE_NUMBER "$issue_number"
@@ -187,6 +189,7 @@ write_batch_review_prompt_file() {
   local output_path="$5"
   local findings_ledger="$6"
   local fix_resolution="$7"
+  local checks_manifest="$8"
 
   render_prompt_template \
     "$(prompt_template_path batch-review)" \
@@ -195,6 +198,7 @@ write_batch_review_prompt_file() {
     BATCH_DIFF "$batch_diff" \
     BATCH_UNTRACKED "$batch_untracked" \
     BATCH_SUMMARY "$batch_summary" \
+    CHECKS_MANIFEST "$checks_manifest" \
     FINDINGS_LEDGER "$findings_ledger" \
     FIX_RESOLUTION "$fix_resolution"
 }

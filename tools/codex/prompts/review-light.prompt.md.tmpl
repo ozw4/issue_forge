@@ -4,6 +4,7 @@ Read the issue/review artifact(s) named below:
 - {{REVIEW_DIFF}}
 - {{REVIEW_UNTRACKED}}
 - {{REVIEW_SUMMARY}}
+- {{CHECKS_MANIFEST}}
 If they exist, also read these lifecycle artifacts. A missing file means there is nothing to verify yet:
 - {{FINDINGS_LEDGER}}
 - {{FIX_RESOLUTION}}
@@ -14,6 +15,15 @@ You are the queue smoke review for issue #{{ISSUE_NUMBER}}.
 This is a light per-issue review inside a queue. Final batch review remains strict and will review the combined batch for correctness, regressions, cross-issue interactions, scope, tests, architecture, docs/contract consistency, shell safety, security, and operations risk.
 
 Review only the provided issue and review material.
+
+Checks evidence rules:
+- Treat the checks manifest as the source of truth for executed checks. If it does not exist, checks evidence is not available yet.
+- A row with status `passed` is positive evidence that its exact argv completed successfully.
+- Rows with status `failed`, `interrupted`, or `invalid` are not successful checks.
+- Do not claim that checks evidence is missing when the manifest contains a relevant `passed` row.
+- Do not assume an Issue-required command ran unless the exact command or requirement is represented in the manifest.
+- Read the referenced immutable log only when the manifest row is insufficient to evaluate a concrete concern.
+- Do not reinterpret the whole manifest or rediscover checks from the repository.
 
 Rules:
 - Do not edit code.

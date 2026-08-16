@@ -2262,6 +2262,7 @@ Read the issue/review artifact(s) named below:
 - .work/codex/review.diff
 - .work/codex/review.untracked.txt
 - .work/codex/review.summary.txt
+- .work/codex/checks.manifest.tsv
 If they exist, also read these lifecycle artifacts. A missing file means there is nothing to verify yet:
 - .work/codex/findings.tsv
 - .work/codex/fix-resolution.tsv
@@ -2282,6 +2283,15 @@ Token discipline:
 - Review only the provided material.
 - Do not shell out to rediscover diffs.
 - Inspect docs only for named conflicts or ambiguous source-of-truth questions.
+
+Checks evidence rules:
+- Treat the checks manifest as the source of truth for executed checks. If it does not exist, checks evidence is not available yet.
+- A row with status \`passed\` is positive evidence that its exact argv completed successfully.
+- Rows with status \`failed\`, \`interrupted\`, or \`invalid\` are not successful checks.
+- Do not claim that checks evidence is missing when the manifest contains a relevant \`passed\` row.
+- Do not assume an Issue-required command ran unless the exact command or requirement is represented in the manifest.
+- Read the referenced immutable log only when the manifest row is insufficient to evaluate a concrete concern.
+- Do not reinterpret the whole manifest or rediscover checks from the repository.
 
 Rules:
 - Do not edit code.
@@ -2481,6 +2491,9 @@ run_issue_flow_smoke() {
   assert_file_not_contains "${repo_dir}/.work/codex/findings.tsv" 'previous Issue finding'
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/review.summary.txt'
+  assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/checks.manifest.tsv'
+  assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'simulated checks pass on round 3'
+  assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" '{{CHECKS_MANIFEST}}'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'queue smoke review'
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_not_contains "${repo_dir}/.work/codex/history/review.round-02.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
@@ -4130,6 +4143,7 @@ run_issue_queue_smoke() {
   local queue_log="${state_dir}/queue.log"
   local run_dir
   local run_batch_dir
+  local run_batch_prompt_path
   local attempts_dir
   local check_attempts_dir
   local batch_checks_manifest
@@ -4237,9 +4251,21 @@ run_issue_queue_smoke() {
   run_dir="$(grep -l $'^issues\t41,40$' "${repo_dir}"/.work/queue/runs/*/manifest.state | head -n 1)"
   run_dir="${run_dir%/manifest.state}"
   run_batch_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
+  run_batch_prompt_path="${run_batch_dir#"${repo_dir}/"}"
   attempts_dir="${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/attempts"
   check_attempts_dir="${run_batch_dir}/check-attempts"
   batch_checks_manifest="${run_batch_dir}/checks/batch.manifest.tsv"
+  assert_file_contains \
+    "${batch_dir}/issues/${QUEUE_ISSUE_NUMBER}/codex/review.prompt.md" \
+    "${run_batch_prompt_path}/checks/issue-${QUEUE_ISSUE_NUMBER}.manifest.tsv"
+  assert_file_contains \
+    "${batch_dir}/issues/${ISSUE_NUMBER}/codex/review.prompt.md" \
+    "${run_batch_prompt_path}/checks/issue-${ISSUE_NUMBER}.manifest.tsv"
+  assert_file_contains \
+    "${batch_dir}/batch-review.prompt.md" \
+    "${run_batch_prompt_path}/checks/batch.manifest.tsv"
+  assert_file_not_contains "${batch_dir}/batch-review.prompt.md" 'simulated checks pass on'
+  assert_file_not_contains "${batch_dir}/batch-review.prompt.md" '{{CHECKS_MANIFEST}}'
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
   assert_file_contains "${run_dir}/manifest.state" $'review_every\t2'
   assert_file_contains "${run_dir}/manifest.state" $'batch_review_reasoning\tqueue_review'

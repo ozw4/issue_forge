@@ -174,6 +174,7 @@ Prompt behavior:
 - default prompt templates are engine-owned and live at `vendor/issue_forge/tools/codex/prompts/`
 - consumers may optionally override `CODEX_FLOW_PROMPTS_DIR`
 - `.work/codex/*.prompt.md` output paths are unchanged
+- Issue and batch review prompts receive the authoritative checks manifest path as an artifact; a missing manifest means checks evidence is not available yet, and raw check logs are not embedded in the prompt
 - consumers with custom `CODEX_FLOW_PROMPTS_DIR` need the batch prompt templates when they use `run_issue_queue.sh`; missing batch templates are a hard queue error
 - when `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW` is non-zero, queue mode also requires `review-light.prompt.md.tmpl`; missing light review templates are a hard queue error
 
