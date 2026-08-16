@@ -86,3 +86,6 @@ write_batch_review_prompt_file \
 		assert "{{" not in prompt
 		assert "RAW_CHECK_LOG_SENTINEL" not in prompt
 		assert "Treat the checks manifest as the source of truth" in prompt
+		assert "Use the last relevant manifest row as the current check result" in prompt
+		assert "read `argv.tsv` in the same attempt directory" in prompt
+		assert "its exact argv completed successfully" not in prompt

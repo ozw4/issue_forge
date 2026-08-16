@@ -2285,13 +2285,15 @@ Token discipline:
 - Inspect docs only for named conflicts or ambiguous source-of-truth questions.
 
 Checks evidence rules:
-- Treat the checks manifest as the source of truth for executed checks. If it does not exist, checks evidence is not available yet.
-- A row with status \`passed\` is positive evidence that its exact argv completed successfully.
+- Treat the checks manifest as the source of truth for recorded check attempts. If it does not exist, checks evidence is not available yet.
+- Use the last relevant manifest row as the current check result. Earlier rows are historical evidence for earlier snapshots.
+- A row with status \`passed\` proves that the identified attempt completed successfully for its recorded snapshot.
 - Rows with status \`failed\`, \`interrupted\`, or \`invalid\` are not successful checks.
-- Do not claim that checks evidence is missing when the manifest contains a relevant \`passed\` row.
-- Do not assume an Issue-required command ran unless the exact command or requirement is represented in the manifest.
-- Read the referenced immutable log only when the manifest row is insufficient to evaluate a concrete concern.
-- Do not reinterpret the whole manifest or rediscover checks from the repository.
+- To verify the exact argv, read \`argv.tsv\` in the same attempt directory as the row's \`log_path\`.
+- Do not claim that checks evidence is missing when the current relevant row has status \`passed\`.
+- Do not assume an Issue-required command ran unless the requirement, argv, or immutable log provides evidence for it.
+- Read the immutable log only when the manifest and argv are insufficient to evaluate a concrete concern.
+- Do not rediscover checks from the repository.
 
 Rules:
 - Do not edit code.
