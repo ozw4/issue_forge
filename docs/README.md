@@ -18,7 +18,9 @@
 4. `README.md`
    - repo の概要
    - consumer layout と日常的な使い方
-5. `tools/codex/README.md`
+5. `docs/dogfooding.md`
+   - fresh clone から single-Issue flow と draft PR を確認する self-hosting runbook
+6. `tools/codex/README.md`
    - smoke harness の目的と手動実行方法
 
 ## この repo で特に重視すること
