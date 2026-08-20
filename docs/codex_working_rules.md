@@ -57,6 +57,8 @@ repo 固有のルールや docs を engine 側の暗黙知に押し込まない�
 
 - prompt templates の default は `vendor/issue_forge/tools/codex/prompts/` です。
 - consumer-specific prompts は optional で、必要な場合のみ `CODEX_FLOW_PROMPTS_DIR` で override します。
+- Reviewer の簡潔な finding は acceptance と ledger identity の source of truth です。構造化 details は Fixer 向けの補助情報であり、Reviewer が具体的な patch 設計を固定するためのものではありません。
+- Fixer は pending finding と source-of-truth docs を normative とし、details の根拠を必要に応じて repository 上で確認します。details artifact の欠落や不整合を簡潔な finding から合成して隠してはいけません。
 - consumer docs の primary entrypoint は `README.md` です。`docs/README.md` は追加 docs がある場合だけ optional とします。
 - docs を追加したら `docs/README.md` に読む順番を反映してください。
 - docs の wording を変えるだけでも、runtime behavior と矛盾していないか確認してください。

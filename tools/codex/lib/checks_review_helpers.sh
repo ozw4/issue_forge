@@ -10,6 +10,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_material_helpers.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 # shellcheck source=tools/codex/lib/finding_ledger.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_ledger.sh"
+# shellcheck source=tools/codex/lib/review_details.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_details.sh"
 # shellcheck source=tools/codex/lib/check_attempts.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
 
@@ -129,7 +131,6 @@ extract_structured_review_output_file() {
   local structured_output_file="$2"
   local sanitized_output
   local candidate_output
-  local found_candidate=0
   local line_number
 
   sanitized_output="$(mktemp)"
@@ -142,7 +143,7 @@ extract_structured_review_output_file() {
 
   if head -n 1 "$sanitized_output" | grep -Eq '^accept: (yes|no)$'; then
     if ! extract_review_candidate_from_line "$sanitized_output" 1 > "$candidate_output" \
-      || ! direct_review_output_has_allowed_tail "$sanitized_output" "$candidate_output" \
+      || ! review_output_has_allowed_tail "$sanitized_output" "$candidate_output" 1 \
       || ! validate_review_output "$candidate_output" \
       || ! validate_review_output_semantics "$candidate_output"; then
       rm -f "$sanitized_output" "$candidate_output"
@@ -158,21 +159,18 @@ extract_structured_review_output_file() {
     return 1
   fi
 
-  while IFS=: read -r line_number _; do
-    if [[ -z "$line_number" ]]; then
-      continue
-    fi
+  line_number="$(awk '/^accept: (yes|no)$/ { line_number = NR } END { if (line_number) print line_number }' "$sanitized_output")"
+  if [[ -z "$line_number" ]] \
+    || ! extract_review_candidate_from_line "$sanitized_output" "$line_number" > "$candidate_output" \
+    || ! review_output_has_allowed_tail "$sanitized_output" "$candidate_output" "$line_number" \
+    || ! validate_review_output "$candidate_output" \
+    || ! validate_review_output_semantics "$candidate_output"; then
+    rm -f "$sanitized_output" "$candidate_output"
+    return 1
+  fi
 
-    if extract_review_candidate_from_line "$sanitized_output" "$line_number" > "$candidate_output" \
-      && validate_review_output "$candidate_output" \
-      && validate_review_output_semantics "$candidate_output"; then
-      cp "$candidate_output" "$structured_output_file"
-      found_candidate=1
-    fi
-  done < <(grep -nE '^accept: (yes|no)$' "$sanitized_output" || true)
-
+  cp "$candidate_output" "$structured_output_file"
   rm -f "$sanitized_output" "$candidate_output"
-  [[ "$found_candidate" -eq 1 ]]
 }
 
 sanitize_codex_runtime_logs() {
@@ -203,17 +201,24 @@ is_codex_transcript_output() {
   grep -Eq '^(Reading prompt from stdin[.]*|OpenAI Codex)' "$sanitized_output_file"
 }
 
-direct_review_output_has_allowed_tail() {
+review_output_has_allowed_tail() {
   local sanitized_output_file="$1"
   local candidate_output_file="$2"
+  local start_line="${3:-1}"
 
-  awk '
+  awk -v start_line="$start_line" '
     FNR == NR {
       candidate[++candidate_count] = $0
       next
     }
-    FNR <= candidate_count {
-      if ($0 != candidate[FNR]) {
+    FNR < start_line {
+      next
+    }
+    {
+      relative_line = FNR - start_line + 1
+    }
+    relative_line <= candidate_count {
+      if ($0 != candidate[relative_line]) {
         exit 1
       }
       next
@@ -242,7 +247,8 @@ direct_review_output_has_allowed_tail() {
       next
     }
     END {
-      if (candidate_count == 0 || FNR < candidate_count || state == "token-count") {
+      observed_count = FNR - start_line + 1
+      if (candidate_count == 0 || observed_count < candidate_count || state == "token-count") {
         exit 1
       }
     }
@@ -324,10 +330,30 @@ extract_review_candidate_from_line() {
     state == "minor" {
       if ($0 == "") {
         print
-        state = "verification-header"
+        state = "details-header"
         next
       }
       if ($0 ~ /^- /) {
+        print
+        next
+      }
+      exit 1
+    }
+    state == "details-header" {
+      if ($0 != "details:") {
+        exit 1
+      }
+      print
+      state = "details"
+      next
+    }
+    state == "details" {
+      if ($0 == "") {
+        print
+        state = "verification-header"
+        next
+      }
+      if ($0 == "- none" || $0 ~ /^- finding: / || $0 ~ /^  (severity|evidence|impact|required_outcome|constraints|validation): /) {
         print
         next
       }
@@ -406,106 +432,7 @@ run_review_round() {
 validate_review_output() {
   local file="$1"
 
-  awk '
-    NR == 1 {
-      if ($0 != "accept: yes" && $0 != "accept: no") {
-        exit 1
-      }
-      next
-    }
-    NR == 2 {
-      if ($0 != "") {
-        exit 1
-      }
-      next
-    }
-    state == "" {
-      if ($0 != "blocker:") {
-        exit 1
-      }
-      state = "blocker"
-      next
-    }
-    state == "blocker" {
-      if ($0 == "") {
-        state = "blocker-gap"
-        next
-      }
-      if ($0 !~ /^- /) {
-        exit 1
-      }
-      next
-    }
-    state == "blocker-gap" {
-      if ($0 != "major:") {
-        exit 1
-      }
-      state = "major"
-      next
-    }
-    state == "major" {
-      if ($0 == "") {
-        state = "major-gap"
-        next
-      }
-      if ($0 !~ /^- /) {
-        exit 1
-      }
-      next
-    }
-    state == "major-gap" {
-      if ($0 != "minor:") {
-        exit 1
-      }
-      state = "minor"
-      next
-    }
-    state == "minor" {
-      if ($0 == "") {
-        state = "minor-gap"
-        next
-      }
-      if ($0 !~ /^- /) {
-        exit 1
-      }
-      next
-    }
-    state == "minor-gap" {
-      if ($0 != "verification:") {
-        exit 1
-      }
-      state = "verification"
-      next
-    }
-    state == "verification" {
-      if ($0 == "") {
-        next
-      }
-      if ($0 == "- none") {
-        verification_none += 1
-        verification_items += 1
-        next
-      }
-      if ($0 !~ /^- F[0-9][0-9][0-9][0-9][0-9]* \| (resolved|invalid|unresolved) \| .+$/ || $0 ~ /\t/) {
-        exit 1
-      }
-      verification_body = substr($0, 3)
-      if (split(verification_body, verification_parts, / \| /) != 3) {
-        exit 1
-      }
-      verification_records += 1
-      verification_items += 1
-      next
-    }
-    {
-      exit 1
-    }
-    END {
-      if (state != "verification" || verification_items == 0 || (verification_none > 0 && verification_records > 0)) {
-        exit 1
-      }
-    }
-  ' "$file"
+  validate_review_details_output "$file"
 }
 
 validate_review_output_semantics() {
@@ -547,6 +474,8 @@ ensure_valid_review_output() {
 record_issue_review_findings() {
   local fix_resolution_input=''
 
+  write_review_details_artifact "$review_output" "$review_details"
+  archive_round_file "$review_details" "review-details" "$review_run_round" ".tsv"
   if [[ -f "$fix_resolution_report" ]]; then
     fix_resolution_input="$fix_resolution_report"
   fi
@@ -590,6 +519,11 @@ run_fix_from_review_round() {
   local review_fix_round="$1"
 
   write_pending_findings "$review_findings_ledger" "$pending_findings"
+  write_pending_finding_details \
+    "$review_findings_ledger" \
+    "$pending_findings" \
+    "$review_details" \
+    "$pending_finding_details"
   fix_review_round=$((fix_review_round + 1))
   log_info "codex fix from review (round ${review_fix_round})"
   assert_review_snapshot_matches "$review_snapshot" "before issue review fix"

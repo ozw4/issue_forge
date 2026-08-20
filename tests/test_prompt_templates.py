@@ -34,7 +34,7 @@ write_issue_flow_prompt_files \
   "$output_dir/review.prompt.md" \
   "$output_dir/fix-from-review.prompt.md" \
   "$checks_log" review.diff review.untracked.txt review.summary.txt review.txt \
-  pending-findings.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
+  pending-findings.tsv pending-finding-details.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
   "$issue_manifest"
 
 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1
@@ -45,13 +45,18 @@ write_issue_flow_prompt_files \
   "$output_dir/review-light.prompt.md" \
   "$output_dir/light-fix-from-review.prompt.md" \
   "$checks_log" review.diff review.untracked.txt review.summary.txt review.txt \
-  pending-findings.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
+  pending-findings.tsv pending-finding-details.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
   "$issue_manifest"
 
 write_batch_review_prompt_file \
   issues.txt batch.diff batch.untracked.txt batch.summary.txt \
   "$output_dir/batch-review.prompt.md" findings.tsv fix-resolution.tsv \
   "$batch_manifest"
+
+write_fix_from_batch_review_prompt_file \
+  issues.txt batch-review.txt "$output_dir/fix-from-batch-review.prompt.md" \
+  batch-pending-findings.tsv batch-review.snapshot.state \
+  batch-pending-finding-details.tsv
 """
 	completed = subprocess.run(  # noqa: S603 - exercises trusted repo-local shell renderer
 		[
@@ -78,6 +83,9 @@ write_batch_review_prompt_file \
 	issue_prompt = (output_dir / "review.prompt.md").read_text(encoding="utf-8")
 	light_prompt = (output_dir / "review-light.prompt.md").read_text(encoding="utf-8")
 	batch_prompt = (output_dir / "batch-review.prompt.md").read_text(encoding="utf-8")
+	issue_fixer_prompt = (output_dir / "fix-from-review.prompt.md").read_text(encoding="utf-8")
+	light_fixer_prompt = (output_dir / "light-fix-from-review.prompt.md").read_text(encoding="utf-8")
+	batch_fixer_prompt = (output_dir / "fix-from-batch-review.prompt.md").read_text(encoding="utf-8")
 
 	assert str(issue_manifest) in issue_prompt
 	assert str(issue_manifest) in light_prompt
@@ -89,3 +97,19 @@ write_batch_review_prompt_file \
 		assert "Use the last relevant manifest row as the current check result" in prompt
 		assert "read `argv.tsv` in the same attempt directory" in prompt
 		assert "its exact argv completed successfully" not in prompt
+
+	for prompt in (issue_prompt, light_prompt, batch_prompt):
+		assert "details:" in prompt
+		assert "required_outcome:" in prompt
+		assert "Add exactly one `details` record for every current concise finding" in prompt
+		assert "without prescribing a function-specific patch" in prompt
+
+	assert "pending-finding-details.tsv" in issue_fixer_prompt
+	assert "pending-finding-details.tsv" in light_fixer_prompt
+	assert "batch-pending-finding-details.tsv" in batch_fixer_prompt
+	for prompt in (issue_fixer_prompt, light_fixer_prompt, batch_fixer_prompt):
+		assert "is supplemental context" in prompt
+		assert "Do not execute details blindly as concrete patch instructions" in prompt
+		assert "smallest safe implementation yourself" in prompt
+		assert "resolution:\n- F0001 | fixed | One-line explanation." in prompt
+		assert "{{" not in prompt

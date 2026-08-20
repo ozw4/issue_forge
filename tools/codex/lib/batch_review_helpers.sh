@@ -302,6 +302,11 @@ reconcile_committed_batch_review_fix() {
   local expected_head
   local current_head
   local resolution_history
+  local findings_ledger="${batch_state_dir}/findings.tsv"
+  local pending_findings="${batch_state_dir}/pending-findings.tsv"
+  local review_details="${batch_state_dir}/review-details.tsv"
+  local pending_finding_details="${batch_state_dir}/pending-finding-details.tsv"
+  local review_details_history
   local review_fix_subject="chore: address batch review for issues #${first_issue}-#${last_issue}"
   local checks_fix_subject="chore: address batch checks for issues #${first_issue}-#${last_issue}"
   local commit
@@ -312,10 +317,35 @@ reconcile_committed_batch_review_fix() {
 
   printf -v resolution_history '%s/history/fix-resolution.round-%02d.tsv' \
     "$batch_state_dir" "$review_fix_round"
+  printf -v review_details_history '%s/history/review-details.round-%02d.tsv' \
+    "$batch_state_dir" "$review_fix_round"
 
   if [[ ! -f "$resolution_history" ]]; then
     printf 'Cannot reconcile committed batch review fix: resolution history is missing: %s\n' \
       "$resolution_history" >&2
+    return 1
+  fi
+  if [[ ! -f "$review_details_history" ]]; then
+    printf 'Cannot reconcile committed batch review fix: review details history is missing: %s\n' \
+      "$review_details_history" >&2
+    return 1
+  fi
+  if ! validate_pending_finding_details_artifact \
+    "$findings_ledger" \
+    "$pending_findings" \
+    "$review_details" \
+    "$pending_finding_details"; then
+    printf 'Cannot reconcile committed batch review fix: pending finding details are invalid: %s\n' \
+      "$pending_finding_details" >&2
+    return 1
+  fi
+  if ! validate_pending_finding_details_artifact \
+    "$findings_ledger" \
+    "$pending_findings" \
+    "$review_details_history" \
+    "$pending_finding_details"; then
+    printf 'Cannot reconcile committed batch review fix: pending finding details do not match review round %s history.\n' \
+      "$review_fix_round" >&2
     return 1
   fi
   if [[ -n "$(status_outside_work)" ]]; then
@@ -393,6 +423,7 @@ run_batch_review_once() {
   local batch_findings_history_dir="${batch_state_dir}/history"
   local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
   local batch_review_verification="${batch_state_dir}/review-verification.tsv"
+  local batch_review_details="${batch_state_dir}/review-details.tsv"
 
   mkdir -p "$history_dir" "$batch_findings_history_dir"
   generate_batch_review_material "$base_commit" "$batch_diff" "$batch_untracked" "$batch_summary"
@@ -425,6 +456,7 @@ run_batch_review_once() {
   fi
   archive_round_file "$batch_review_output" 'batch-review' "$review_round" '.txt'
   ensure_valid_batch_review_output "$batch_review_raw" "$batch_review_output"
+  write_review_details_artifact "$batch_review_output" "$batch_review_details"
   extract_review_verification \
     "$batch_review_output" \
     "$batch_findings_ledger" \
@@ -437,8 +469,11 @@ run_batch_review_once() {
     "$batch_review_verification"
   history_dir="$batch_findings_history_dir"
   archive_round_file "$batch_findings_ledger" 'findings' "$review_round" '.tsv'
+  archive_round_file "$batch_review_details" 'review-details' "$review_round" '.tsv'
   cp -- "$batch_findings_ledger" "${batch_dir}/findings.tsv"
   cp -- "$(history_round_path 'findings' "$review_round" '.tsv')" "${batch_dir}/history/"
+  cp -- "$batch_review_details" "${batch_dir}/review-details.tsv"
+  cp -- "$(history_round_path 'review-details' "$review_round" '.tsv')" "${batch_dir}/history/"
   cp -- "$batch_review_verification" "${batch_dir}/review-verification.tsv"
 }
 
@@ -460,6 +495,8 @@ ensure_batch_review_accepted() {
   local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
   local batch_findings_ledger="${batch_state_dir}/findings.tsv"
   local batch_pending_findings="${batch_state_dir}/pending-findings.tsv"
+  local batch_review_details="${batch_state_dir}/review-details.tsv"
+  local batch_pending_finding_details="${batch_state_dir}/pending-finding-details.tsv"
   local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
   local batch_state_history_dir="${batch_state_dir}/history"
   local lifecycle_state="${batch_state_dir}/review-lifecycle.state"
@@ -522,13 +559,20 @@ ensure_batch_review_accepted() {
 
         if [[ "$fix_commit_reconciled" -eq 0 ]]; then
           write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
+          write_pending_finding_details \
+            "$batch_findings_ledger" \
+            "$batch_pending_findings" \
+            "$batch_review_details" \
+            "$batch_pending_finding_details"
           cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
+          cp -- "$batch_pending_finding_details" "${batch_dir}/pending-finding-details.tsv"
           write_fix_from_batch_review_prompt_file \
             "$issues_file" \
             "$batch_review_output" \
             "$fix_review_prompt" \
             "$batch_pending_findings" \
-            "$batch_review_snapshot"
+            "$batch_review_snapshot" \
+            "$batch_pending_finding_details"
           ensure_clean_worktree 'Working tree must be clean before batch review fix.'
           log_info "codex fix from batch review (round ${review_fix_round})"
           run_codex_batch_write \

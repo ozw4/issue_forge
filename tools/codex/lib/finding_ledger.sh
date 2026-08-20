@@ -192,6 +192,15 @@ extract_review_verification() {
   }
 
   if ! awk -F '\t' -v OFS='\t' -v ledger_source="$ledger_source" -v fix_source="$fix_source" -v review_file="$review_output_file" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function is_placeholder_item(value, normalized) {
+      normalized = tolower(trim(value))
+      return normalized == "none" || normalized == "n/a" || normalized == "no issues" || normalized == "nothing"
+    }
     FILENAME == ledger_source {
       if (FNR == 1) next
       ledger_text[$1] = $7
@@ -210,6 +219,10 @@ extract_review_verification() {
         section = substr(line, 1, length(line) - 1)
         next
       }
+      if (line == "details:") {
+        section = "details"
+        next
+      }
       if (line == "verification:") {
         section = "verification"
         next
@@ -218,7 +231,7 @@ extract_review_verification() {
       body = substr(line, 3)
       if (section == "blocker" || section == "major" || section == "minor") {
         gsub(/\t/, " ", body)
-        if (body != "none") current[body] = 1
+        if (!is_placeholder_item(body)) current[body] = 1
         next
       }
       if (section != "verification") next
@@ -312,6 +325,15 @@ update_finding_ledger() {
   }
 
   if ! awk -F '\t' -v OFS='\t' -v ledger_source="$ledger_source" -v verification_source="$verification_source" -v review_file="$review_output_file" -v review_round="$review_round" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function is_placeholder_item(value, normalized) {
+      normalized = tolower(trim(value))
+      return normalized == "none" || normalized == "n/a" || normalized == "no issues" || normalized == "nothing"
+    }
     function severity_rank(value) {
       if (value == "blocker") return 3
       if (value == "major") return 2
@@ -345,6 +367,10 @@ update_finding_ledger() {
         section = substr(line, 1, length(line) - 1)
         next
       }
+      if (line == "details:") {
+        section = ""
+        next
+      }
       if (line == "verification:") {
         section = ""
         next
@@ -352,7 +378,7 @@ update_finding_ledger() {
       if (section != "" && line ~ /^- /) {
         text = substr(line, 3)
         gsub(/\t/, " ", text)
-        if (text == "none") next
+        if (is_placeholder_item(text)) next
         if (!(text in current_severity)) {
           current_order[++current_count] = text
           current_severity[text] = section

@@ -125,8 +125,10 @@ review_untracked="${CODEX_FLOW_CODEX_DIR}/review.untracked.txt"
 review_summary="${CODEX_FLOW_CODEX_DIR}/review.summary.txt"
 review_raw_output="${CODEX_FLOW_CODEX_DIR}/review.raw.txt"
 review_output="${CODEX_FLOW_CODEX_DIR}/review.txt"
+review_details="${CODEX_FLOW_CODEX_DIR}/review-details.tsv"
 review_findings_ledger="${CODEX_FLOW_CODEX_DIR}/findings.tsv"
 pending_findings="${CODEX_FLOW_CODEX_DIR}/pending-findings.tsv"
+pending_finding_details="${CODEX_FLOW_CODEX_DIR}/pending-finding-details.tsv"
 fix_resolution_report="${CODEX_FLOW_CODEX_DIR}/fix-resolution.tsv"
 review_verification="${CODEX_FLOW_CODEX_DIR}/review-verification.tsv"
 review_snapshot="${CODEX_FLOW_CODEX_DIR}/review.snapshot.state"
@@ -151,6 +153,7 @@ write_issue_flow_prompt_files \
   "$review_summary" \
   "$review_output" \
   "$pending_findings" \
+  "$pending_finding_details" \
   "$review_findings_ledger" \
   "$fix_resolution_report" \
   "$review_snapshot" \

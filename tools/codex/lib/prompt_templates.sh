@@ -130,10 +130,11 @@ write_issue_flow_prompt_files() {
   local review_summary="${10}"
   local review_output="${11}"
   local pending_findings="${12}"
-  local findings_ledger="${13}"
-  local fix_resolution="${14}"
-  local review_snapshot="${15}"
-  local checks_manifest="${16}"
+  local pending_finding_details="${13}"
+  local findings_ledger="${14}"
+  local fix_resolution="${15}"
+  local review_snapshot="${16}"
+  local checks_manifest="${17}"
   local light_issue_review="${CODEX_FLOW_LIGHT_ISSUE_REVIEW:-0}"
   local review_template='review'
 
@@ -177,6 +178,7 @@ write_issue_flow_prompt_files() {
     ISSUE_FILE "$issue_file" \
     REVIEW_OUTPUT "$review_output" \
     PENDING_FINDINGS "$pending_findings" \
+    PENDING_FINDING_DETAILS "$pending_finding_details" \
     REVIEW_SNAPSHOT "$review_snapshot" \
     ISSUE_NUMBER "$issue_number"
 }
@@ -209,6 +211,7 @@ write_fix_from_batch_review_prompt_file() {
   local output_path="$3"
   local pending_findings="$4"
   local review_snapshot="$5"
+  local pending_finding_details="$6"
 
   render_prompt_template \
     "$(prompt_template_path fix-from-batch-review)" \
@@ -216,6 +219,7 @@ write_fix_from_batch_review_prompt_file() {
     BATCH_ISSUES_FILE "$issues_file" \
     BATCH_REVIEW_OUTPUT "$batch_review_output" \
     PENDING_FINDINGS "$pending_findings" \
+    PENDING_FINDING_DETAILS "$pending_finding_details" \
     REVIEW_SNAPSHOT "$review_snapshot"
 }
 

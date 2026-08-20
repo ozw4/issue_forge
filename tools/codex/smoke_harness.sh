@@ -490,6 +490,12 @@ write_review_output_fixture() {
   local blocker_items="$3"
   local major_items="$4"
   local minor_items="$5"
+  local details_written=0
+  local severity
+  local items
+  local item
+  local finding
+  local normalized_finding
 
   {
     printf 'accept: %s\n\n' "$accept_value"
@@ -504,6 +510,36 @@ write_review_output_fixture() {
     printf '\nminor:\n'
     if [[ -n "$minor_items" ]]; then
       printf '%s\n' "$minor_items"
+    fi
+    printf '\ndetails:\n'
+    for severity in blocker major minor; do
+      case "$severity" in
+        blocker) items="$blocker_items" ;;
+        major) items="$major_items" ;;
+        minor) items="$minor_items" ;;
+      esac
+      while IFS= read -r item; do
+        [[ "$item" == '- '* ]] || continue
+        finding="${item#- }"
+        normalized_finding="${finding,,}"
+        normalized_finding="${normalized_finding#"${normalized_finding%%[![:space:]]*}"}"
+        normalized_finding="${normalized_finding%"${normalized_finding##*[![:space:]]}"}"
+        case "$normalized_finding" in
+          none|'n/a'|'no issues'|nothing) continue ;;
+        esac
+        details_written=1
+        printf '%s\n' \
+          "- finding: ${finding}" \
+          "  severity: ${severity}" \
+          "  evidence: Smoke fixture evidence for ${finding}" \
+          "  impact: Smoke fixture impact for ${finding}" \
+          "  required_outcome: Smoke fixture outcome for ${finding}" \
+          '  constraints: none' \
+          "  validation: Smoke fixture validation for ${finding}"
+      done <<< "$items"
+    done
+    if [[ "$details_written" -eq 0 ]]; then
+      printf '%s\n' '- none'
     fi
     printf '\nverification:\n- none\n'
   } > "$path"
@@ -1049,6 +1085,15 @@ major:
 minor:
 - none
 
+details:
+- finding: [cross-issue] smoke harness forces one batch review fix round
+  severity: major
+  evidence: The batch smoke fixture deliberately reports one cross-issue review finding.
+  impact: The batch review loop must invoke the Fixer once.
+  required_outcome: The next batch review observes the finding as resolved.
+  constraints: none
+  validation: Verify the batch review details and pending details artifacts retain the finding.
+
 verification:
 - none
 OUT
@@ -1069,6 +1114,9 @@ major:
 minor:
 - none
 
+details:
+- none
+
 verification:
 - F0001 | resolved | The batch fix removed the reported problem.
 OUT
@@ -1083,6 +1131,9 @@ major:
 - none
 
 minor:
+- none
+
+details:
 - none
 
 verification:
@@ -1119,6 +1170,15 @@ major:
 minor:
 - none
 
+details:
+- finding: smoke harness forces one review fix round
+  severity: major
+  evidence: The Issue smoke fixture deliberately reports one review finding.
+  impact: The Issue review loop must invoke the Fixer once.
+  required_outcome: The next Issue review observes the finding as resolved.
+  constraints: none
+  validation: Verify the Issue review details and pending details artifacts retain the finding.
+
 verification:
 - none
 OUT
@@ -1138,6 +1198,9 @@ major:
 minor:
 - none
 
+details:
+- none
+
 verification:
 - F0001 | resolved | The issue fix removed the reported problem.
 OUT
@@ -1155,6 +1218,9 @@ major:
 - none
 
 minor:
+- none
+
+details:
 - none
 
 verification:
@@ -2082,6 +2148,9 @@ major:
 minor:
 - none
 
+details:
+- none
+
 verification:
 - none
 codex
@@ -2103,6 +2172,15 @@ major:
 minor:
 - none
 
+details:
+- finding: stale transcript candidate before the final review
+  severity: major
+  evidence: The transcript fixture includes a stale candidate before the final result.
+  impact: Selecting this candidate would return the wrong review result.
+  required_outcome: Transcript extraction retains only the final valid review block.
+  constraints: none
+  validation: Confirm the extracted review does not contain this finding.
+
 verification:
 - none
 codex
@@ -2115,6 +2193,9 @@ major:
 - none
 
 minor:
+- none
+
+details:
 - none
 
 verification:
@@ -2130,6 +2211,9 @@ major:
 - none
 
 minor:
+- none
+
+details:
 - none
 
 verification:
@@ -2311,7 +2395,15 @@ Rules:
 - Use the exact lowercase placeholder \`none\` for any empty section.
 - Never output \`...\` or \`- ...\`.
 - Do not add any prose before or after the required format.
-- Every real finding must be a single \`- \` bullet in the correct section.
+- Every real finding must be one short sentence in a single \`- \` bullet in the correct section.
+- Keep concise findings stable: do not include long evidence or impact explanations, transient line numbers, patch instructions, test implementation details, or Reviewer-local IDs.
+- When an unresolved ledger finding is still present, reuse its concise finding text exactly even if its details have changed.
+- Add exactly one \`details\` record for every current concise finding. Its \`finding\` must match the bullet text exactly and its \`severity\` must match that bullet's section.
+- Use the fixed field order shown below. Every field must stay on one line, be non-empty, and contain no literal tab. Use exactly \`none\` for \`constraints\` when no special constraint applies.
+- \`evidence\` must state facts actually observed in the supplied code, diff, state transition, checks, or governing docs; do not invent files, symbols, line numbers, or results.
+- \`impact\` states the incorrect behavior or broken invariant. \`required_outcome\` states a verifiable postcondition, not a patch design. \`constraints\` states the contract or scope that must remain true. \`validation\` states how the outcome can be checked without claiming an unverified existing test.
+- Explain the problem and required outcome without prescribing a function-specific patch, command rewrite, class, or data-structure migration unless the repository contract leaves only one valid implementation.
+- If there are no current findings, output exactly \`details:\` followed by \`- none\`. If any current finding exists, \`- none\` is forbidden in \`details\`.
 - If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
 - Return \`resolved\`, \`invalid\`, or \`unresolved\` for each verified ID, with a one-line note without literal tabs or the literal delimiter \` | \`.
 - For \`unresolved\`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For \`resolved\` or \`invalid\`, do not repeat that text there.
@@ -2325,10 +2417,19 @@ blocker:
 - none
 
 major:
-- none
+- concise major finding
 
 minor:
 - none
+
+details:
+- finding: concise major finding
+  severity: major
+  evidence: One-line factual evidence observed in the supplied review material.
+  impact: One-line description of the incorrect behavior or broken invariant.
+  required_outcome: One-line verifiable postcondition that the fix must establish.
+  constraints: none
+  validation: One-line test, scenario, or check that verifies the required outcome.
 
 verification:
 - none
@@ -2340,6 +2441,7 @@ Read the issue/review artifact(s) named below:
 - .work/issues/${ISSUE_NUMBER}.md
 - .work/codex/review.txt
 - .work/codex/pending-findings.tsv
+- .work/codex/pending-finding-details.tsv
 - .work/codex/review.snapshot.state
 Read README.md and docs/README.md only when they are directly relevant to the current issue or review finding. Prefer targeted rg/sed section reads over reading entire files.
 
@@ -2369,9 +2471,15 @@ Rules:
 - Fix only the concrete accepted review findings.
 - Do not change implementation to satisfy the issue if doing so would violate docs.
 - Address only findings listed in \`.work/codex/pending-findings.tsv\`, using the ledger-assigned ID for each one. Do not generate finding IDs.
+- Treat \`.work/codex/pending-findings.tsv\` and the applicable source-of-truth documents as normative. \`.work/codex/pending-finding-details.tsv\` is supplemental context for understanding those findings.
+- Confirm detail \`evidence\` in the repository when necessary instead of assuming it is complete or current.
+- Make the result satisfy each detail \`required_outcome\` and \`constraints\`, and use \`validation\` to guide post-fix verification.
+- Do not execute details blindly as concrete patch instructions. Choose the smallest safe implementation yourself.
+- Do not broaden the change to work absent from \`.work/codex/pending-findings.tsv\`.
 - Return one resolution line for every pending ID, whether or not code changes were needed. Do not omit or duplicate IDs and do not include IDs absent from the pending file.
 - Use \`fixed\` only after making the necessary change, \`false_positive\` only after confirming the finding is wrong or already satisfied, and \`cannot_fix\` rather than hiding a constraint with an unsafe fallback.
 - Use a one-line note without literal tabs or the literal delimiter \` | \`.
+- Keep the existing resolution output contract unchanged.
 
 Return only this section and no other prose:
 
@@ -2421,8 +2529,10 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/review.summary.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.raw.txt"
   assert_file_exists "${repo_dir}/.work/codex/review.txt"
+  assert_file_exists "${repo_dir}/.work/codex/review-details.tsv"
   assert_file_exists "${repo_dir}/.work/codex/findings.tsv"
   assert_file_exists "${repo_dir}/.work/codex/pending-findings.tsv"
+  assert_file_exists "${repo_dir}/.work/codex/pending-finding-details.tsv"
   assert_file_exists "${repo_dir}/.work/codex/fix-resolution.tsv"
   assert_file_exists "${repo_dir}/.work/codex/review-verification.tsv"
   assert_file_exists "${repo_dir}/.work/codex/fix-from-review.log"
@@ -2467,10 +2577,12 @@ run_issue_flow_smoke() {
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-01.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review-raw.round-02.txt"
   assert_file_exists "${repo_dir}/.work/codex/history/review.round-01.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/review-details.round-01.tsv"
   assert_file_exists "${repo_dir}/.work/codex/history/findings.round-01.tsv"
   assert_file_exists "${repo_dir}/.work/codex/history/fix-from-review.round-01.log"
   assert_file_exists "${repo_dir}/.work/codex/history/fix-resolution.round-01.tsv"
   assert_file_exists "${repo_dir}/.work/codex/history/review.round-02.txt"
+  assert_file_exists "${repo_dir}/.work/codex/history/review-details.round-02.tsv"
   assert_file_exists "${repo_dir}/.work/codex/history/findings.round-02.tsv"
 
   assert_files_equal "${expected_prompt_dir}/implementation.prompt.md" "${repo_dir}/.work/codex/implementation.prompt.md" 'implementation prompt'
@@ -2485,15 +2597,27 @@ run_issue_flow_smoke() {
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-01.txt" 'accept: no'
   assert_file_contains "${repo_dir}/.work/codex/history/review.round-02.txt" 'accept: yes'
   assert_file_contains "${repo_dir}/.work/codex/history/findings.round-01.tsv" $'F0001\tmajor\t1\t1\tpresent\tunresolved\tsmoke harness forces one review fix round'
+  assert_file_contains "${repo_dir}/.work/codex/history/review-details.round-01.tsv" $'major\tsmoke harness forces one review fix round\tThe Issue smoke fixture deliberately reports one review finding.\tThe Issue review loop must invoke the Fixer once.\tThe next Issue review observes the finding as resolved.\tnone\tVerify the Issue review details and pending details artifacts retain the finding.'
+  assert_equals \
+    $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    "$(head -n 1 "${repo_dir}/.work/codex/review-details.tsv")" \
+    'Issue review details header'
+  assert_equals 1 "$(wc -l < "${repo_dir}/.work/codex/review-details.tsv")" 'accepted Issue review details row count'
   assert_file_contains "${repo_dir}/.work/codex/history/findings.round-02.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tresolved\tsmoke harness forces one review fix round'
   assert_file_contains "${repo_dir}/.work/codex/findings.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tresolved\tsmoke harness forces one review fix round'
   assert_file_contains "${repo_dir}/.work/codex/pending-findings.tsv" $'F0001\tmajor\tsmoke harness forces one review fix round'
+  assert_file_contains "${repo_dir}/.work/codex/pending-finding-details.tsv" $'F0001\tmajor\tsmoke harness forces one review fix round\tThe Issue smoke fixture deliberately reports one review finding.\tThe Issue review loop must invoke the Fixer once.\tThe next Issue review observes the finding as resolved.\tnone\tVerify the Issue review details and pending details artifacts retain the finding.'
+  assert_equals \
+    $'finding_id\tseverity\ttext\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    "$(head -n 1 "${repo_dir}/.work/codex/pending-finding-details.tsv")" \
+    'Issue pending finding details header'
   assert_file_contains "${repo_dir}/.work/codex/fix-resolution.tsv" $'F0001\tfixed\tApplied review fix round 1.'
   assert_file_contains "${repo_dir}/.work/codex/review-verification.tsv" $'F0001\tresolved\tThe issue fix removed the reported problem.'
   assert_file_not_contains "${repo_dir}/.work/codex/findings.tsv" 'previous Issue finding'
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" "You are the review session for issue #${ISSUE_NUMBER}."
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/review.summary.txt'
   assert_file_contains "${repo_dir}/.work/codex/review.prompt.md" '.work/codex/checks.manifest.tsv'
+  assert_file_contains "${repo_dir}/.work/codex/fix-from-review.prompt.md" '.work/codex/pending-finding-details.tsv'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'simulated checks pass on round 3'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" '{{CHECKS_MANIFEST}}'
   assert_file_not_contains "${repo_dir}/.work/codex/review.prompt.md" 'queue smoke review'
@@ -4198,14 +4322,18 @@ run_issue_queue_smoke() {
   assert_file_exists "${batch_dir}/batch-review.prompt.md"
   assert_file_exists "${batch_dir}/batch-review.raw.txt"
   assert_file_exists "${batch_dir}/batch-review.txt"
+  assert_file_exists "${batch_dir}/review-details.tsv"
   assert_file_exists "${batch_dir}/findings.tsv"
   assert_file_exists "${batch_dir}/pending-findings.tsv"
+  assert_file_exists "${batch_dir}/pending-finding-details.tsv"
   assert_file_exists "${batch_dir}/fix-resolution.tsv"
   assert_file_exists "${batch_dir}/review-verification.tsv"
   assert_file_exists "${batch_dir}/fix-from-batch-review.prompt.md"
   assert_file_exists "${batch_dir}/fix-from-batch-review.log"
   assert_file_exists "${batch_dir}/history/batch-review.round-01.txt"
   assert_file_exists "${batch_dir}/history/batch-review.round-02.txt"
+  assert_file_exists "${batch_dir}/history/review-details.round-01.tsv"
+  assert_file_exists "${batch_dir}/history/review-details.round-02.tsv"
   assert_file_exists "${batch_dir}/history/findings.round-01.tsv"
   assert_file_exists "${batch_dir}/history/findings.round-02.tsv"
   assert_file_exists "${batch_dir}/history/fix-resolution.round-01.tsv"
@@ -4231,9 +4359,20 @@ run_issue_queue_smoke() {
   assert_file_contains "${batch_dir}/batch-review.raw.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
   assert_file_contains "${batch_dir}/batch-review.txt" 'accept: yes'
   assert_file_contains "${batch_dir}/history/findings.round-01.tsv" $'F0001\tmajor\t1\t1\tpresent\tunresolved\t[cross-issue] smoke harness forces one batch review fix round'
+  assert_file_contains "${batch_dir}/history/review-details.round-01.tsv" $'major\t[cross-issue] smoke harness forces one batch review fix round\tThe batch smoke fixture deliberately reports one cross-issue review finding.\tThe batch review loop must invoke the Fixer once.\tThe next batch review observes the finding as resolved.\tnone\tVerify the batch review details and pending details artifacts retain the finding.'
+  assert_equals \
+    $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    "$(head -n 1 "${batch_dir}/review-details.tsv")" \
+    'Batch review details header'
+  assert_equals 1 "$(wc -l < "${batch_dir}/review-details.tsv")" 'accepted Batch review details row count'
   assert_file_contains "${batch_dir}/history/findings.round-02.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tresolved\t[cross-issue] smoke harness forces one batch review fix round'
   assert_file_contains "${batch_dir}/findings.tsv" $'F0001\tmajor\t1\t1\tnot_observed\tresolved\t[cross-issue] smoke harness forces one batch review fix round'
   assert_file_contains "${batch_dir}/pending-findings.tsv" $'F0001\tmajor\t[cross-issue] smoke harness forces one batch review fix round'
+  assert_file_contains "${batch_dir}/pending-finding-details.tsv" $'F0001\tmajor\t[cross-issue] smoke harness forces one batch review fix round\tThe batch smoke fixture deliberately reports one cross-issue review finding.\tThe batch review loop must invoke the Fixer once.\tThe next batch review observes the finding as resolved.\tnone\tVerify the batch review details and pending details artifacts retain the finding.'
+  assert_equals \
+    $'finding_id\tseverity\ttext\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    "$(head -n 1 "${batch_dir}/pending-finding-details.tsv")" \
+    'Batch pending finding details header'
   assert_file_contains "${batch_dir}/fix-resolution.tsv" $'F0001\tfixed\tApplied batch review fix round 1.'
   assert_file_contains "${batch_dir}/review-verification.tsv" $'F0001\tresolved\tThe batch fix removed the reported problem.'
   assert_file_not_contains "${batch_dir}/history/batch-review.round-01.txt" "$CODEX_RUNTIME_SESSION_LOG_LINE"
@@ -4266,6 +4405,9 @@ run_issue_queue_smoke() {
   assert_file_contains \
     "${batch_dir}/batch-review.prompt.md" \
     "${run_batch_prompt_path}/checks/batch.manifest.tsv"
+  assert_file_contains \
+    "${batch_dir}/fix-from-batch-review.prompt.md" \
+    "${run_batch_prompt_path}/pending-finding-details.tsv"
   assert_file_not_contains "${batch_dir}/batch-review.prompt.md" 'simulated checks pass on'
   assert_file_not_contains "${batch_dir}/batch-review.prompt.md" '{{CHECKS_MANIFEST}}'
   assert_file_contains "${run_dir}/manifest.state" $'issues\t41,40'
@@ -4276,12 +4418,16 @@ run_issue_queue_smoke() {
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/issues/${ISSUE_NUMBER}.state" $'state\tacknowledged'
   assert_file_contains "${run_dir}/batches/batch-${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}/publish.state" "head_branch$(printf '\t')batch/${QUEUE_ISSUE_NUMBER}-${ISSUE_NUMBER}"
   assert_file_exists "${run_batch_dir}/findings.tsv"
+  assert_file_exists "${run_batch_dir}/review-details.tsv"
   assert_file_exists "${run_batch_dir}/pending-findings.tsv"
+  assert_file_exists "${run_batch_dir}/pending-finding-details.tsv"
   assert_file_exists "${run_batch_dir}/fix-resolution.tsv"
   assert_file_exists "${run_batch_dir}/review-verification.tsv"
   assert_file_exists "${run_batch_dir}/review-lifecycle.state"
   assert_file_exists "${run_batch_dir}/history/findings.round-01.tsv"
   assert_file_exists "${run_batch_dir}/history/findings.round-02.tsv"
+  assert_file_exists "${run_batch_dir}/history/review-details.round-01.tsv"
+  assert_file_exists "${run_batch_dir}/history/review-details.round-02.tsv"
   assert_file_exists "${run_batch_dir}/history/fix-resolution.round-01.tsv"
   assert_file_exists "$batch_checks_manifest"
   assert_file_exists "${check_attempts_dir}/batch/batch-checks/attempt-0001/argv.tsv"
@@ -4318,8 +4464,12 @@ run_issue_queue_smoke() {
     "${issue_archive}/check-attempts/issue-checks/attempt-0001/combined.log" \
     'Issue archive immutable check attempt copy'
   assert_files_equal "${run_batch_dir}/findings.tsv" "${batch_dir}/findings.tsv" 'batch finding ledger compatibility copy'
+  assert_files_equal "${run_batch_dir}/review-details.tsv" "${batch_dir}/review-details.tsv" 'batch review details compatibility copy'
   assert_files_equal "${run_batch_dir}/history/findings.round-01.tsv" "${batch_dir}/history/findings.round-01.tsv" 'batch finding history compatibility copy'
+  assert_files_equal "${run_batch_dir}/history/review-details.round-01.tsv" "${batch_dir}/history/review-details.round-01.tsv" 'batch review details history compatibility copy'
+  assert_files_equal "${run_batch_dir}/history/review-details.round-02.tsv" "${batch_dir}/history/review-details.round-02.tsv" 'batch review details final history compatibility copy'
   assert_files_equal "${run_batch_dir}/pending-findings.tsv" "${batch_dir}/pending-findings.tsv" 'batch pending finding compatibility copy'
+  assert_files_equal "${run_batch_dir}/pending-finding-details.tsv" "${batch_dir}/pending-finding-details.tsv" 'batch pending finding details compatibility copy'
   assert_files_equal "${run_batch_dir}/fix-resolution.tsv" "${batch_dir}/fix-resolution.tsv" 'batch fix resolution compatibility copy'
   assert_files_equal "${run_batch_dir}/history/fix-resolution.round-01.tsv" "${batch_dir}/history/fix-resolution.round-01.tsv" 'batch fix resolution history compatibility copy'
   assert_file_contains "${run_batch_dir}/review-lifecycle.state" $'schema_version\t1'

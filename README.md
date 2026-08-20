@@ -261,9 +261,17 @@ single-Issue flow の主要 artifacts は次のとおりです。
 │  ├─ review.summary.txt
 │  ├─ review.raw.txt
 │  ├─ review.txt
+│  ├─ review-details.tsv
+│  ├─ findings.tsv
+│  ├─ pending-findings.tsv
+│  ├─ pending-finding-details.tsv
+│  ├─ fix-resolution.tsv
+│  ├─ review-verification.tsv
 │  ├─ fix-from-review.log
 │  ├─ token-usage.tsv
 │  └─ history/
+│     ├─ review-details.round-NN.tsv
+│     └─ findings.round-NN.tsv
 └─ queue/
    └─ batches/
       └─ batch-<first_issue>-<last_issue>/
@@ -272,19 +280,39 @@ single-Issue flow の主要 artifacts は次のとおりです。
 `review.txt` は次の schema を維持します。
 
 ```text
-accept: yes/no
+accept: no
 
 blocker:
-- ...
+- none
 
 major:
-- ...
+- A required invariant is not enforced.
 
 minor:
-- ...
+- none
+
+details:
+- finding: A required invariant is not enforced.
+  severity: major
+  evidence: The reviewed behavior allows the invariant to be bypassed.
+  impact: The flow can accept state that is not authoritative.
+  required_outcome: The invariant is enforced for every accepted state.
+  constraints: none
+  validation: Exercise both an authoritative and a non-authoritative state.
+
+verification:
+- none
 ```
 
-`accept: yes` でも `blocker:` または `major:` に実 finding がある場合は validation failure です。`minor:` は残り得ます。
+blocker・major・minor の簡潔な1文が acceptance、severity、finding ledger identity、pending finding、次回Reviewでの照合の source of truth です。details の `finding` はその本文と完全一致し、各current findingに1件だけ存在します。current findingが0件なら `details:` は `- none` だけです。detailsの文章だけを変更してもfinding IDは変わりません。
+
+`review-details.tsv` はvalidated reviewから生成されるFixer向け補助情報で、headerは `severity`, `finding`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` です。Fixer前にはledger IDと結合した `pending-finding-details.tsv` を生成し、headerは `finding_id`, `severity`, `text`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` になります。`pending-findings.tsv` とsource-of-truth docsがnormativeであり、detailsはpatch設計ではありません。Fixerはrepository上で根拠を確認し、必要な事後条件と制約を満たす最小で安全な修正を判断します。
+
+必要なdetails artifactや対応行が欠落・重複・不整合の場合、flowは簡潔なfindingからdetailsを合成せず停止します。Fixerの`fixed`、`false_positive`、`cannot_fix`はclaimにすぎずfindingをcloseしません。次のReviewerが`resolved`、`invalid`、`unresolved`を検証します。
+
+`accept: yes` でも `blocker:` または `major:` に実 finding がある場合は validation failure です。`minor:` は残り得ます。acceptanceはcurrent severity sectionだけを基準にし、detailsやverificationだけを理由にrejectしません。
+
+Batch reviewのdetails source of truthは `.work/queue/runs/<run_id>/batches/<batch>/review-details.tsv`、round history、`pending-finding-details.tsv` です。同名artifactは `.work/queue/batches/<batch>/` にcompatibility copyされますが、run-owned stateとしては読みません。
 
 Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
 

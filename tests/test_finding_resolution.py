@@ -52,6 +52,24 @@ def write_review(
     major: tuple[str, ...] = ("none",),
     verification: tuple[str, ...] = ("none",),
 ) -> None:
+    details: list[str] = []
+    for finding in major:
+        if finding == "none":
+            continue
+        details.extend(
+            [
+                f"- finding: {finding}",
+                "  severity: major",
+                f"  evidence: Evidence for {finding}.",
+                f"  impact: Impact of {finding}.",
+                f"  required_outcome: Required outcome for {finding}.",
+                "  constraints: none",
+                f"  validation: Validate {finding}.",
+            ]
+        )
+    if not details:
+        details.append("- none")
+
     path.write_text(
         "\n".join(
             [
@@ -65,6 +83,9 @@ def write_review(
                 "",
                 "minor:",
                 "- none",
+                "",
+                "details:",
+                *details,
                 "",
                 "verification:",
                 *(f"- {item}" for item in verification),
@@ -395,6 +416,13 @@ printf '%s\n' \
   $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
   $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
   > "$batch_state_dir/findings.tsv"
+printf '%s\n' \
+  $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+  $'major\tfinding A\tobserved evidence\tobservable impact\trequired outcome\tnone\tvalidation scenario' \
+  > "$batch_state_dir/review-details.tsv"
+cp -- \
+  "$batch_state_dir/review-details.tsv" \
+  "$batch_state_dir/history/review-details.round-01.tsv"
 : > "$batch_dir/batch-review.snapshot.state"
 review_calls=0
 CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
@@ -408,7 +436,10 @@ run_batch_review_once() {{
     printf 'review-2\n' >> "$batch_dir/events"
   fi
 }}
-write_fix_from_batch_review_prompt_file() {{ : > "$3"; }}
+write_fix_from_batch_review_prompt_file() {{
+  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
+  : > "$3"
+}}
 assert_review_snapshot_matches() {{ :; }}
 ensure_clean_worktree() {{ :; }}
 log_info() {{ printf '%s\n' "$1" >> "$batch_dir/events"; }}
@@ -442,6 +473,22 @@ def test_batch_no_change_non_fixed_report_reaches_next_review(tmp_path: Path, ac
     assert "review-2" in events
     assert "commit" not in events
     assert "checks" not in events
+    pending_details = tmp_path / "state" / "pending-finding-details.tsv"
+    assert read_tsv(pending_details) == [
+        {
+            "finding_id": "F0001",
+            "severity": "major",
+            "text": "finding A",
+            "evidence": "observed evidence",
+            "impact": "observable impact",
+            "required_outcome": "required outcome",
+            "constraints": "none",
+            "validation": "validation scenario",
+        }
+    ]
+    assert pending_details.read_bytes() == (
+        tmp_path / "batch" / "pending-finding-details.tsv"
+    ).read_bytes()
 
 
 def test_batch_no_change_fixed_report_is_hard_error(tmp_path: Path) -> None:
@@ -479,6 +526,13 @@ if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
     $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
     > "$batch_state_dir/findings.tsv"
 fi
+printf '%s\n' \
+  $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+  $'major\tfinding A\tobserved evidence\tobservable impact\trequired outcome\tnone\tvalidation scenario' \
+  > "$batch_state_dir/review-details.tsv"
+cp -- \
+  "$batch_state_dir/review-details.tsv" \
+  "$batch_state_dir/history/review-details.round-01.tsv"
 : > "$batch_dir/batch-review.snapshot.state"
 
 run_batch_review_once() {{
@@ -490,7 +544,10 @@ run_batch_review_once() {{
     printf '%s\n' 'accept: no' > "$batch_dir/batch-review.txt"
   fi
 }}
-write_fix_from_batch_review_prompt_file() {{ : > "$3"; }}
+write_fix_from_batch_review_prompt_file() {{
+  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
+  : > "$3"
+}}
 assert_review_snapshot_matches() {{ :; }}
 ensure_clean_worktree() {{ :; }}
 log_info() {{ :; }}
@@ -566,6 +623,13 @@ if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
     $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
     $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
     > "$batch_state_dir/findings.tsv"
+  printf '%s\n' \
+    $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    $'major\tfinding A\tobserved evidence\tobservable impact\trequired outcome\tnone\tvalidation scenario' \
+    > "$batch_state_dir/review-details.tsv"
+  cp -- \
+    "$batch_state_dir/review-details.tsv" \
+    "$batch_state_dir/history/review-details.round-01.tsv"
   printf '%s\n' 'accept: no' > "$batch_dir/batch-review.txt"
   capture_review_snapshot "$snapshot"
   initialize_batch_review_lifecycle "$lifecycle_state"
@@ -576,7 +640,10 @@ run_batch_review_once() {{
   printf 'review:%s\n' "$6" >> "$batch_dir/events"
   printf '%s\n' 'accept: yes' > "$batch_dir/batch-review.txt"
 }}
-write_fix_from_batch_review_prompt_file() {{ : > "$3"; }}
+write_fix_from_batch_review_prompt_file() {{
+  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
+  : > "$3"
+}}
 ensure_clean_worktree() {{
   [[ -z "$(status_outside_work)" ]] || exit 1
 }}
@@ -659,6 +726,11 @@ def test_batch_resume_reconciles_committed_fix_before_lifecycle_update(
     assert events_before_resume.count("fix-agent:1") == 1
     assert events_before_resume.count("checks") == checks_before_resume
     assert commits_after_stop == "2"
+    assert (state_dir / "pending-finding-details.tsv").is_file()
+    assert (state_dir / "history/review-details.round-01.tsv").is_file()
+    assert (batch_dir / "pending-finding-details.tsv").read_bytes() == (
+        state_dir / "pending-finding-details.tsv"
+    ).read_bytes()
 
     resumed = run_batch_commit_boundary(repo)
     assert resumed.returncode == 0, resumed.stderr
@@ -682,6 +754,35 @@ def test_batch_resume_reconciles_committed_fix_before_lifecycle_update(
         "1",
         "complete",
     )
+
+
+@pytest.mark.parametrize(
+    "missing_relative_path",
+    [
+        "review-details.tsv",
+        "history/review-details.round-01.tsv",
+        "pending-findings.tsv",
+        "pending-finding-details.tsv",
+    ],
+)
+def test_batch_resume_rejects_missing_details_artifacts_before_adopting_committed_fix(
+    tmp_path: Path,
+    missing_relative_path: str,
+) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    batch_dir = repo / ".work" / "queue" / "batches" / "batch-1"
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_commit_boundary(repo, stop_after="after_batch_review_fix_commit")
+    assert stopped.returncode == 86, stopped.stderr
+    events_before_resume = (batch_dir / "events").read_bytes()
+    (state_dir / missing_relative_path).unlink()
+
+    resumed = run_batch_commit_boundary(repo)
+
+    assert resumed.returncode != 0
+    assert "Cannot reconcile committed batch review fix" in resumed.stderr
+    assert (batch_dir / "events").read_bytes() == events_before_resume
 
 
 def test_batch_resume_after_rejected_review_starts_with_fix(tmp_path: Path) -> None:

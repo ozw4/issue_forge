@@ -25,6 +25,28 @@ def write_review(
         path.write_text("invalid review output\n", encoding="utf-8")
         return
 
+    findings = [
+        (severity, item)
+        for severity, items in (("blocker", blocker), ("major", major), ("minor", minor))
+        for item in items
+        if item != "none"
+    ]
+    detail_lines = ["- none"]
+    if findings:
+        detail_lines = []
+        for severity, finding in findings:
+            detail_lines.extend(
+                [
+                    f"- finding: {finding}",
+                    f"  severity: {severity}",
+                    f"  evidence: Evidence for {finding}",
+                    f"  impact: Impact of {finding}",
+                    f"  required_outcome: Required outcome for {finding}",
+                    "  constraints: none",
+                    f"  validation: Validation for {finding}",
+                ]
+            )
+
     path.write_text(
         "\n".join(
             [
@@ -38,6 +60,9 @@ def write_review(
                 "",
                 "minor:",
                 *(f"- {item}" for item in minor),
+                "",
+                "details:",
+                *detail_lines,
                 "",
                 "verification:",
                 *(f"- {item}" for item in verification),
@@ -86,7 +111,10 @@ review_snapshot="${{work_dir}}/review.snapshot.state"
 review_prompt="${{work_dir}}/review.prompt.md"
 review_raw_output="${{work_dir}}/review.raw.txt"
 review_output="${{work_dir}}/review.txt"
+review_details="${{work_dir}}/review-details.tsv"
 review_findings_ledger="${{work_dir}}/findings.tsv"
+pending_findings="${{work_dir}}/pending-findings.tsv"
+pending_finding_details="${{work_dir}}/pending-finding-details.tsv"
 fix_resolution_report="${{work_dir}}/fix-resolution.tsv"
 review_verification="${{work_dir}}/review-verification.tsv"
 review_run_round=0
@@ -178,6 +206,7 @@ ensure_valid_review_output
 
     assert completed.returncode == 0, completed.stderr
     assert not (tmp_path / "findings.tsv").exists()
+    assert not (tmp_path / "review-details.tsv").exists()
     assert not (tmp_path / "history").exists()
 
 
@@ -185,7 +214,7 @@ def test_validator_rejects_review_without_verification_section(tmp_path: Path) -
     review = tmp_path / "review.txt"
     raw = tmp_path / "review.raw.txt"
     review.write_text(
-        "accept: yes\n\nblocker:\n- none\n\nmajor:\n- none\n\nminor:\n- none\n",
+        "accept: yes\n\nblocker:\n- none\n\nmajor:\n- none\n\nminor:\n- none\n\ndetails:\n- none\n",
         encoding="utf-8",
     )
     raw.write_bytes(review.read_bytes())
@@ -219,6 +248,7 @@ def test_reject_without_current_findings_stops_before_ledger_or_fixer(tmp_path: 
     assert "review output is inconsistent with acceptance" in completed.stderr
     assert ledger.read_text(encoding="utf-8") == original
     assert not (work_dir / "history" / "findings.round-01.tsv").exists()
+    assert not (work_dir / "history" / "review-details.round-01.tsv").exists()
     assert not (work_dir / "pending-findings.tsv").exists()
     assert not (work_dir / "fix-resolution.tsv").exists()
     assert not (work_dir / "review-verification.tsv").exists()
@@ -315,12 +345,21 @@ def test_valid_issue_round_records_findings_once_after_validation(tmp_path: Path
     finding_histories = list((work_dir / "history").glob("findings.round-*.tsv"))
     assert [path.name for path in finding_histories] == ["findings.round-01.tsv"]
     assert finding_histories[0].read_bytes() == ledger.read_bytes()
+    details = work_dir / "review-details.tsv"
+    details_history = work_dir / "history" / "review-details.round-01.tsv"
+    assert details.read_text(encoding="utf-8") == (
+        "severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation\n"
+        "major\tfocused finding\tEvidence for focused finding\tImpact of focused finding\t"
+        "Required outcome for focused finding\tnone\tValidation for focused finding\n"
+    )
+    assert details_history.read_bytes() == details.read_bytes()
 
     events = (work_dir / "events.log").read_text(encoding="utf-8").splitlines()
     assert events.count("validate-format") == 1
     assert events.count("validate-semantics") == 1
     assert events.count("update") == 1
     assert events.count("archive:findings") == 1
+    assert events.count("archive:review-details") == 1
     assert events.index("snapshot-match") < events.index("extract")
     assert events.index("extract") < events.index("validate-format")
     assert events.index("validate-semantics") < events.index("update")

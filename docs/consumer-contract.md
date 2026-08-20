@@ -412,6 +412,8 @@ The following remain part of the v1 behavior contract:
 - `.work/codex/review.summary.txt`
 - `.work/codex/review.raw.txt`
 - `.work/codex/review.txt`
+- `.work/codex/review-details.tsv`
+- `.work/codex/pending-finding-details.tsv`
 - `.work/codex/fix-from-review.log`
 - `.work/codex/history/<stem>.round-<NN>.<ext>`
 - `.work/queue/lock`
@@ -422,42 +424,82 @@ Additional invariants:
 
 - issue branch name shape is `issue/<issue_number>-<slug>`
 - slug generation remains lowercase, dash-collapsed, trimmed, and capped at 48 characters
-- review output format remains:
+- review output format is:
 
 ```text
-accept: yes/no
+accept: no
 
 blocker:
-- ...
+- none
 
 major:
-- ...
+- Resume adoption does not verify ownership by the current run.
 
 minor:
-- ...
+- none
+
+details:
+- finding: Resume adoption does not verify ownership by the current run.
+  severity: major
+  evidence: The adoption path accepts the expected commit frontier without matching it to run-owned resolution history.
+  impact: Resume can adopt work that is not authoritative for the current queue run.
+  required_outcome: Adoption succeeds only when the candidate commit is proven to belong to the resumed run.
+  constraints: Do not change the queue state schema or add fallback recovery.
+  validation: Exercise an ancestry-compatible commit that lacks matching run-owned history.
 
 verification:
 - none
 ```
 
+- `details:` appears after `minor:` and before `verification:` in Issue, light Issue, and Batch reviews. Each current blocker, major, or minor finding has exactly one detail record whose fields are exactly `finding`, `severity`, `evidence`, `impact`, `required_outcome`, `constraints`, and `validation` in that order.
+- each concise finding remains a short single sentence suitable for stable matching. Detailed evidence or impact, transient line numbers, Reviewer-local IDs, patch steps, concrete edit commands, and test implementation instructions belong neither in that sentence nor in ledger identity
+- `finding` must exactly equal the concise current finding text, and `severity` must equal the section that contains it. Every field is one non-empty line and contains no literal tab. `severity` is `blocker`, `major`, or `minor`; `constraints` is exactly `none` when there is no special constraint.
+- `evidence` records only code, diff, state transition, check result, or documentation inconsistency the Reviewer actually observed; `impact` records the resulting incorrect behavior or broken invariant; `required_outcome` records a verifiable postcondition rather than an implementation method; `constraints` records specifications and scope that must be preserved; and `validation` records a test, reproduction scenario, or check that can confirm the outcome
+- When there are no current findings, the entire section is `details:` followed by exactly `- none`. A review with current findings cannot use that placeholder, and a no-finding review cannot contain a real detail record. Findings that appear only as `resolved` or `invalid` verification records need no details; an `unresolved` finding repeated in a current severity section does.
+- the Reviewer remains read-only. Reviewer details are not a patch design: except where the repository contract admits only one implementation, they do not prescribe function signatures, commands, data structures, or other concrete edits
 - validated Issue reviews publish the current Issue ledger at `.work/codex/findings.tsv`; validated batch reviews publish their source-of-truth ledger at `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` and copy it to `.work/queue/batches/<batch>/findings.tsv` for compatibility; each uses the fixed TSV schema `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `resolution`, `text`
-- finding IDs are ledger-local `FNNNN` sequences; an ID is reused only when normalized finding text matches exactly across rounds, where normalization removes the leading bullet marker, removes a trailing CR, and replaces each literal tab with one space
+- concise blocker, major, and minor text remains the sole source of truth for acceptance, ledger identity and severity, pending finding generation, and unresolved matching; details never participate in those decisions
+- finding IDs are ledger-local `FNNNN` sequences; an ID is reused only when normalized concise finding text matches exactly across rounds, where normalization removes the leading bullet marker, removes a trailing CR, and replaces each literal tab with one space. Changing only a detail record never allocates a new ID
 - `status` records observation (`present` or `not_observed`), while `resolution` records lifecycle state (`unresolved`, `resolved`, or `invalid`); new and reappearing findings are `unresolved`
-- before a fix, current `present` and `unresolved` findings are written to `pending-findings.tsv`; the Fixer must report one `fixed`, `false_positive`, or `cannot_fix` action per pending ID in `fix-resolution.tsv`
+- each validated Issue review writes `.work/codex/review-details.tsv` and archives the same round at `.work/codex/history/review-details.round-NN.tsv`; both use this fixed header:
+
+```text
+severity	finding	evidence	impact	required_outcome	constraints	validation
+```
+
+- a no-current-finding review produces a header-only details TSV. The artifact contains only validated current details and does not change the finding ledger header or identity
+- review details describe the same captured review snapshot as the concise findings. The existing post-Reviewer and pre-Fixer snapshot checks remain mandatory; a mismatch stops the flow before the Fixer uses the details
+- before a fix, current `present` and `unresolved` findings are written to `pending-findings.tsv`; the engine joins them to the validated review details by exact concise text and writes `.work/codex/pending-finding-details.tsv` with this fixed header:
+
+```text
+finding_id	severity	text	evidence	impact	required_outcome	constraints	validation
+```
+
+- pending detail rows use ledger-assigned IDs, preserve `pending-findings.tsv` order, and have exactly one row per pending ID. The join never creates an ID from details and rejects an unknown or duplicate ID, an unknown or duplicate detail, a severity or text mismatch, and a missing detail
+- validated Batch details are authoritative at `.work/queue/runs/<run_id>/batches/<batch>/review-details.tsv`, `.work/queue/runs/<run_id>/batches/<batch>/history/review-details.round-NN.tsv`, and `.work/queue/runs/<run_id>/batches/<batch>/pending-finding-details.tsv`. They are copied to the corresponding paths below `.work/queue/batches/<batch>/` as compatibility views, following the existing Batch artifact and history rules; the engine never reads compatibility copies as run-owned state
+- when a fix is pending, missing or malformed validated details, pending findings, ledger state, or their required mapping is a hard error. The engine does not synthesize details from concise findings and does not silently fall back to an older or compatibility artifact
+- the Fixer treats `pending-findings.tsv` and source-of-truth documentation as normative. `pending-finding-details.tsv` is auxiliary context: the Fixer verifies evidence in the repository as needed, satisfies `required_outcome` and `constraints`, uses `validation` to check the result, chooses the smallest safe implementation, and does not execute details blindly as patch instructions or broaden scope beyond pending findings
+- the Fixer must report one `fixed`, `false_positive`, or `cannot_fix` action per pending ID in `fix-resolution.tsv`; the existing resolution output contract is unchanged:
+
+```text
+resolution:
+- F0001 | fixed | One-line explanation.
+```
+
 - a Fixer action is only a claim and never closes a finding; the next Reviewer must return one `resolved`, `invalid`, or `unresolved` verification per reported ID, and an unresolved verification must repeat the exact ledger text in the current finding sections
 - findings absent from the current round remain as `not_observed`; resolved or invalid findings that reappear with the same normalized text retain their ID and return to `unresolved`
 - each current ledger is copied after publication to `history/findings.round-NN.tsv` using the existing round-history naming rule; batch source history is run-owned and is then copied to the compatibility history path
-- Issue lifecycle artifacts are `.work/codex/pending-findings.tsv`, `.work/codex/fix-resolution.tsv`, `.work/codex/history/fix-resolution.round-NN.tsv`, and `.work/codex/review-verification.tsv`; batch source artifacts use the corresponding names below `.work/queue/runs/<run_id>/batches/<batch>/`, with compatibility copies below `.work/queue/batches/<batch>/`
+- Issue lifecycle artifacts are `.work/codex/review-details.tsv`, `.work/codex/history/review-details.round-NN.tsv`, `.work/codex/pending-findings.tsv`, `.work/codex/pending-finding-details.tsv`, `.work/codex/fix-resolution.tsv`, `.work/codex/history/fix-resolution.round-NN.tsv`, and `.work/codex/review-verification.tsv`; batch source artifacts use the corresponding names below `.work/queue/runs/<run_id>/batches/<batch>/`, with compatibility copies below `.work/queue/batches/<batch>/`
 - resuming a queue run continues that run's ledger, while a different run over the same batch range starts a separate ledger and never reads the compatibility copy as finding state
 - each run-owned Batch directory has a fixed version-1 `review-lifecycle.state` TSV containing `review_round`, `fix_round`, `next_action` (`review`, `fix`, or `complete`), and `updated_at`; resume continues that saved action and logical round, and `complete` prevents Reviewer or Fixer reruns before the outer `batch_review after` checkpoint
 - `review-lifecycle.state` is the Batch review/fix loop's commit-point control state after successful artifacts and checks; it is separate from Agent attempts and the finding ledger, has no compatibility copy, and does not change queue state schema version 3
-- if a Batch review fix commit is durable before that commit point, resume adopts it only when the worktree is clean, the current HEAD is a linear descendant of the saved review snapshot HEAD containing the expected review/check-fix commit subjects, and that round's run-owned fix-resolution history exists; it reruns checks without rerunning the Fixer before advancing the lifecycle
+- if a Batch review fix commit is durable before that commit point, resume adopts it only when the worktree is clean, the current HEAD is a linear descendant of the saved review snapshot HEAD containing the expected review/check-fix commit subjects, that round's run-owned fix-resolution and review-details history exist, and the run-owned pending detail mapping still validates exactly; it reruns checks without rerunning the Fixer before advancing the lifecycle
 - malformed review output is a hard error
 - `accept: yes` must still fail if `blocker:` or `major:` contain real findings
 - `accept: no` must have at least one current finding in `blocker:`, `major:`, or `minor:`; verification records do not count as current findings or rejection reasons
 - `accept: no` remains allowed; acceptance still uses the current review finding sections rather than scanning the full ledger
 - raw Codex review logs remain byte-for-byte debugging artifacts; before extracting and validating `.work/codex/review.txt` or batch review output, only the exact known `[codex]` launcher progress lines and Codex runtime/session log lines matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* (ERROR|WARN|INFO|DEBUG|TRACE) codex_core::session:` are ignored
-- pure review output must still start with `accept: yes` or `accept: no`; for recognizable `codex exec` transcript output, the engine extracts the last valid structured review block and drops transcript headers, prompt text, tool calls, token summaries, duplicated review blocks, and runtime session logs
+- pure review output must still start with `accept: yes` or `accept: no`; for recognizable `codex exec` transcript output, the engine requires the final `accept: yes` or `accept: no` candidate to be a valid structured review block and drops transcript headers, prompt text, tool calls, token summaries, earlier duplicated review blocks, and runtime session logs. It never falls back to an earlier valid block when the final candidate has invalid details; after that final block, only blank lines and the existing exact token-usage tail are allowed, while arbitrary trailing prose is malformed
 - arbitrary non-review text before or after a pure structured review remains malformed output
 
 ## 12. Self-Hosting and Verification

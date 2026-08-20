@@ -115,18 +115,36 @@ Starting a new standalone Issue through `start_from_issue.sh` removes the previo
 
 Validated batch reviews use `.work/queue/runs/<run_id>/batches/<batch>/findings.tsv` as the source of truth. A resume continues the same run-owned ledger; another run over the same batch range starts a separate ledger. After each round, the engine copies the current ledger and that round's history to `.work/queue/batches/<batch>/findings.tsv` and `.work/queue/batches/<batch>/history/findings.round-NN.tsv` for compatibility, but never reads those copies as finding state.
 
-The run-owned Batch directory also stores `review-lifecycle.state` (schema version 1) with the logical review/fix rounds, the next `review`, `fix`, or `complete` action, and an update timestamp. Resume follows that state, so a completed fix continues with the next review and a completed review does not rerun before the outer queue checkpoint is written. If a review fix commit became durable before lifecycle publication, resume adopts the expected linear review/check-fix commit frontier only with a clean worktree and run-owned resolution history, reruns checks without rerunning the Fixer, and then advances to the next review. This is Batch-review control state, separate from Agent attempts and finding data; it has no compatibility copy and does not alter queue state schema version 3.
+Both ledger types use the TSV columns `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `resolution`, and `text`. IDs are ledger-local sequences starting at `F0001` and are reused only for exact normalized-text matches. Normalization removes the leading review bullet marker and a trailing CR, and replaces each literal tab with one space; category tags remain part of batch finding text.
+
+The concise blocker, major, and minor sentences remain the source of truth for acceptance, severity, ledger identity, pending findings, and unresolved matching. Each current finding also has one structured detail record containing `finding`, `severity`, `evidence`, `impact`, `required_outcome`, `constraints`, and `validation`. Details are auxiliary Fixer context, not part of identity and not a prescribed patch design; changing only details leaves the finding ID unchanged.
+
+Validated Issue details are written to `.work/codex/review-details.tsv` with round copies at `.work/codex/history/review-details.round-NN.tsv`. Before a fix, the engine joins current details to ledger-owned pending IDs and writes `.work/codex/pending-finding-details.tsv`. The review details header is:
+
+```text
+severity	finding	evidence	impact	required_outcome	constraints	validation
+```
+
+The pending details header is:
+
+```text
+finding_id	severity	text	evidence	impact	required_outcome	constraints	validation
+```
+
+Batch details are authoritative at `.work/queue/runs/<run_id>/batches/<batch>/review-details.tsv`, `.work/queue/runs/<run_id>/batches/<batch>/history/review-details.round-NN.tsv`, and `.work/queue/runs/<run_id>/batches/<batch>/pending-finding-details.tsv`. They are copied to the corresponding paths below `.work/queue/batches/<batch>/` for compatibility. The pending join preserves `pending-findings.tsv` order and uses only existing ledger IDs. Missing, unknown, or duplicate mappings and malformed or missing required artifacts fail explicitly; the engine never synthesizes details from concise findings or reads a compatibility copy as authoritative state.
+
+`status` is observation state: a finding seen in the current round is `present`, while an absent prior finding is retained as `not_observed`. `resolution` is lifecycle state: new findings are `unresolved`, and only the next Reviewer may verify them as `resolved` or `invalid`. A resolved or invalid finding that reappears keeps its ID and returns to `unresolved`.
+
+Before each fix, current `present` and `unresolved` records are written to `pending-findings.tsv`. That file and source-of-truth documentation are normative; `pending-finding-details.tsv` helps the Fixer verify evidence, satisfy the required outcome and constraints, and plan validation. The Fixer chooses the smallest safe implementation, does not follow details blindly as edit instructions, and does not broaden scope beyond pending findings.
+
+The Fixer returns one `fixed`, `false_positive`, or `cannot_fix` claim per pending ID in `fix-resolution.tsv`; that report does not itself close findings. The next review records `resolved`, `invalid`, or `unresolved` decisions in `review-verification.tsv`. Issue artifacts live below `.work/codex/`, including `history/fix-resolution.round-NN.tsv`. Batch source artifacts live below `.work/queue/runs/<run_id>/batches/<batch>/` and are copied, including fix-resolution history, to `.work/queue/batches/<batch>/` for compatibility.
+
+Current acceptance still uses the current structured review finding sections rather than scanning the full ledger. `accept: no` requires at least one current blocker, major, or minor finding; verification records alone are not a rejection reason. After each round, the current ledger is copied to its corresponding `history/findings.round-NN.tsv` path.
+
+The run-owned Batch directory also stores `review-lifecycle.state` (schema version 1) with the logical review/fix rounds, the next `review`, `fix`, or `complete` action, and an update timestamp. Resume follows that state, so a completed fix continues with the next review and a completed review does not rerun before the outer queue checkpoint is written. If a review fix commit became durable before lifecycle publication, resume adopts the expected linear review/check-fix commit frontier only with a clean worktree, run-owned resolution and review-details history, and a still-valid run-owned pending-details mapping; it reruns checks without rerunning the Fixer, and then advances to the next review. This is Batch-review control state, separate from Agent attempts and finding data; it has no compatibility copy and does not alter queue state schema version 3.
 
 ## Check Attempts
 
 Standalone Issue checks store terminal attempts at `.work/codex/check-attempts/issue-checks/attempt-NNNN/` and the strict TSV index at `.work/codex/checks.manifest.tsv`. Queue Issue attempts are authoritative at `.work/queue/runs/<run_id>/batches/<batch>/check-attempts/issue-<issue>/`; their manifests are `checks/issue-<issue>.manifest.tsv`, and validated copies are included in the run-owned Issue archive. Batch attempts use the sibling `check-attempts/batch/` store and `checks/batch.manifest.tsv`.
 
 An unfinished `.running` directory is preserved but never indexed as terminal. Resume scans both terminal and `.running` IDs and allocates the next sequence. Terminal `combined.log` is the only input for atomic legacy `checks.log` publication and check history. The manifest and terminal artifacts, rather than the legacy log, determine the latest structured result. Checks are snapshot-verified as read-only operations using the same exclusions as review snapshots; a repository mutation produces `status=invalid` and is left intact for operator inspection.
-
-Both ledger types use the TSV columns `finding_id`, `severity`, `first_round`, `last_seen_round`, `status`, `resolution`, and `text`. IDs are ledger-local sequences starting at `F0001` and are reused only for exact normalized-text matches. Normalization removes the leading review bullet marker and a trailing CR, and replaces each literal tab with one space; category tags remain part of batch finding text.
-
-`status` is observation state: a finding seen in the current round is `present`, while an absent prior finding is retained as `not_observed`. `resolution` is lifecycle state: new findings are `unresolved`, and only the next Reviewer may verify them as `resolved` or `invalid`. A resolved or invalid finding that reappears keeps its ID and returns to `unresolved`.
-
-Before each fix, current `present` and `unresolved` records are written to `pending-findings.tsv`. The Fixer returns one `fixed`, `false_positive`, or `cannot_fix` claim per pending ID in `fix-resolution.tsv`; that report does not itself close findings. The next review records `resolved`, `invalid`, or `unresolved` decisions in `review-verification.tsv`. Issue artifacts live below `.work/codex/`, including `history/fix-resolution.round-NN.tsv`. Batch source artifacts live below `.work/queue/runs/<run_id>/batches/<batch>/` and are copied, including fix-resolution history, to `.work/queue/batches/<batch>/` for compatibility.
-
-Current acceptance still uses the current structured review finding sections rather than scanning the full ledger. `accept: no` requires at least one current blocker, major, or minor finding; verification records alone are not a rejection reason. After each round, the current ledger is copied to its corresponding `history/findings.round-NN.tsv` path.

@@ -29,6 +29,10 @@ review_finding_count_numbers() {
       section = "minor"
       next
     }
+    $0 == "details:" {
+      section = ""
+      next
+    }
     $0 == "verification:" {
       section = ""
       next

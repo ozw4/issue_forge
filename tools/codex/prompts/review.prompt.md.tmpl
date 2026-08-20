@@ -53,7 +53,15 @@ Rules:
 - Use the exact lowercase placeholder `none` for any empty section.
 - Never output `...` or `- ...`.
 - Do not add any prose before or after the required format.
-- Every real finding must be a single `- ` bullet in the correct section.
+- Every real finding must be one short sentence in a single `- ` bullet in the correct section.
+- Keep concise findings stable: do not include long evidence or impact explanations, transient line numbers, patch instructions, test implementation details, or Reviewer-local IDs.
+- When an unresolved ledger finding is still present, reuse its concise finding text exactly even if its details have changed.
+- Add exactly one `details` record for every current concise finding. Its `finding` must match the bullet text exactly and its `severity` must match that bullet's section.
+- Use the fixed field order shown below. Every field must stay on one line, be non-empty, and contain no literal tab. Use exactly `none` for `constraints` when no special constraint applies.
+- `evidence` must state facts actually observed in the supplied code, diff, state transition, checks, or governing docs; do not invent files, symbols, line numbers, or results.
+- `impact` states the incorrect behavior or broken invariant. `required_outcome` states a verifiable postcondition, not a patch design. `constraints` states the contract or scope that must remain true. `validation` states how the outcome can be checked without claiming an unverified existing test.
+- Explain the problem and required outcome without prescribing a function-specific patch, command rewrite, class, or data-structure migration unless the repository contract leaves only one valid implementation.
+- If there are no current findings, output exactly `details:` followed by `- none`. If any current finding exists, `- none` is forbidden in `details`.
 - If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
 - Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note without literal tabs or the literal delimiter ` | `.
 - For `unresolved`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For `resolved` or `invalid`, do not repeat that text there.
@@ -67,10 +75,19 @@ blocker:
 - none
 
 major:
-- none
+- concise major finding
 
 minor:
 - none
+
+details:
+- finding: concise major finding
+  severity: major
+  evidence: One-line factual evidence observed in the supplied review material.
+  impact: One-line description of the incorrect behavior or broken invariant.
+  required_outcome: One-line verifiable postcondition that the fix must establish.
+  constraints: none
+  validation: One-line test, scenario, or check that verifies the required outcome.
 
 verification:
 - none

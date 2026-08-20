@@ -18,12 +18,34 @@ def write_review(
     major: tuple[str, ...] = ("none",),
     minor: tuple[str, ...] = ("none",),
 ) -> None:
+    findings = [
+        (severity, text)
+        for severity, items in (("blocker", blocker), ("major", major), ("minor", minor))
+        for text in items
+        if text != "none"
+    ]
     lines = ["accept: no", "", "blocker:"]
     lines.extend(f"- {text}" for text in blocker)
     lines.extend(["", "major:"])
     lines.extend(f"- {text}" for text in major)
     lines.extend(["", "minor:"])
     lines.extend(f"- {text}" for text in minor)
+    lines.extend(["", "details:"])
+    if findings:
+        for severity, text in findings:
+            lines.extend(
+                [
+                    f"- finding: {text}",
+                    f"  severity: {severity}",
+                    f"  evidence: Evidence for {text}",
+                    f"  impact: Impact of {text}",
+                    f"  required_outcome: Required outcome for {text}",
+                    "  constraints: none",
+                    f"  validation: Validation for {text}",
+                ]
+            )
+    else:
+        lines.append("- none")
     lines.extend(["", "verification:", "- none"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -65,6 +87,24 @@ def test_initial_ledger_creation(tmp_path: Path) -> None:
         {"finding_id": "F0002", "severity": "major", "first_round": "1", "last_seen_round": "1", "status": "present", "resolution": "unresolved", "text": "major B"},
         {"finding_id": "F0003", "severity": "minor", "first_round": "1", "last_seen_round": "1", "status": "present", "resolution": "unresolved", "text": "minor C"},
     ]
+
+
+def test_placeholder_aliases_do_not_create_finding_ids(tmp_path: Path) -> None:
+    review = tmp_path / "review.txt"
+    ledger = tmp_path / "findings.tsv"
+    review.write_text(
+        "accept: yes\n\n"
+        "blocker:\n-  NONE  \n\n"
+        "major:\n- No Issues\n\n"
+        "minor:\n-   n/a\n- nothing\n\n"
+        "details:\n- none\n\n"
+        "verification:\n- none\n",
+        encoding="utf-8",
+    )
+
+    assert_update(review, ledger, 1)
+
+    assert ledger.read_text(encoding="utf-8") == HEADER
 
 
 def test_same_finding_keeps_id_and_first_round(tmp_path: Path) -> None:
