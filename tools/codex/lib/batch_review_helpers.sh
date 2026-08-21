@@ -699,7 +699,7 @@ ensure_batch_review_accepted() {
   local recorded_fix_attempt_round
   local active_id
   local active_status
-  local active_artifact_digest
+  local scheduler_state_digest
   local one_row_resolution
   local history_dir="${batch_dir}/history"
 
@@ -796,10 +796,6 @@ ensure_batch_review_accepted() {
               return "$active_status"
             fi
 
-            active_artifact_digest="$(
-              active_finding_artifact_digest \
-                "$batch_active_finding" "$batch_active_finding_details"
-            )" || return 1
             fix_invocation_round=$((fix_invocation_round + 1))
             capture_review_snapshot "$fix_review_snapshot"
             write_fix_from_batch_review_prompt_file \
@@ -808,13 +804,27 @@ ensure_batch_review_accepted() {
               "$batch_active_finding" \
               "$fix_review_snapshot" \
               "$batch_active_finding_details"
+            scheduler_state_digest="$(
+              finding_scheduler_state_digest \
+                "$batch_pending_findings" \
+                "$batch_pending_finding_details" \
+                "$batch_fix_resolution" \
+                "$batch_active_finding" \
+                "$batch_active_finding_details" \
+                "$fix_review_prompt"
+            )" || return 1
             log_info "codex fix from batch review (cycle ${review_fix_round}, finding ${active_id})"
             run_codex_batch_write \
               batch-fix-from-review "$fix_invocation_round" "$fix_review_prompt" "$fix_review_log" \
               "$review_fix_effort" "$fix_review_snapshot"
-            assert_active_finding_artifacts_match \
-              "$batch_active_finding" "$batch_active_finding_details" \
-              "$active_artifact_digest" || return 1
+            assert_finding_scheduler_state_matches \
+              "$scheduler_state_digest" \
+              "$batch_pending_findings" \
+              "$batch_pending_finding_details" \
+              "$batch_fix_resolution" \
+              "$batch_active_finding" \
+              "$batch_active_finding_details" \
+              "$fix_review_prompt" || return 1
             archive_round_file \
               "$fix_review_log" 'fix-from-batch-review' "$fix_invocation_round" '.log'
             ensure_batch_token_usage_tsv \

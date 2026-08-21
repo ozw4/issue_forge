@@ -237,6 +237,7 @@ issue_number=1
 CODEX_FLOW_REVIEW_REASONING=medium
 CODEX_FLOW_REVIEW_FIX_REASONING=high
 CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS="$4"
+printf 'fix prompt\n' > "$fix_review_prompt"
 
 log_info() {{ :; }}
 log_fail_with_path() {{ printf '%s: %s\n' "$1" "$2" >&2; }}
@@ -304,7 +305,19 @@ run_codex_phase() {{
         $'finding_id\tseverity\ttext' \
         $'F9999\tmajor\tmutated active finding' \
         > "$active_finding"
-      printf 'resolution:\n- F9999 | fixed | mutated active claim\n' > "$output_file"
+      printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
+      ;;
+    mutate_resolution)
+      printf 'F0001\tfixed\tFixed together.\n' >> "$fix_resolution_report"
+      printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
+      ;;
+    mutate_pending_details)
+      printf '# mutated by Fixer\n' >> "$pending_finding_details"
+      printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
+      ;;
+    mutate_prompt)
+      printf 'mutated by Fixer\n' >> "$fix_review_prompt"
+      printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
       ;;
     *)
       printf 'Missing Fixer action for invocation %s.\n' "$invocation" >&2
@@ -674,7 +687,19 @@ def test_issue_review_rejects_inactive_or_multi_id_fixer_output(
     assert not (work_dir / "history" / "fix-resolution.round-01.tsv").exists()
 
 
-def test_issue_review_rejects_active_artifact_mutation_by_fixer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "mutate_active",
+        "mutate_resolution",
+        "mutate_pending_details",
+        "mutate_prompt",
+    ],
+    ids=["active", "fix-resolution", "pending-details", "prompt"],
+)
+def test_issue_review_rejects_scheduler_state_mutation_by_fixer(
+    tmp_path: Path, mutation: str
+) -> None:
     fixtures = tmp_path / "fixtures"
     work_dir = tmp_path / "work"
     fixtures.mkdir()
@@ -689,15 +714,24 @@ def test_issue_review_rejects_active_artifact_mutation_by_fixer(tmp_path: Path) 
     completed = run_active_finding_flow(
         fixtures,
         work_dir,
-        actions=("mutate_active",),
+        actions=(mutation,),
         max_fix_rounds=1,
     )
 
     assert completed.returncode != 0
-    assert "Active finding artifacts changed during the Fixer invocation" in completed.stderr
-    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
-        "finding_id\taction\tnote\n"
+    assert (
+        "Finding scheduler state artifacts changed during the Fixer invocation"
+        in completed.stderr
     )
+    resolution = (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8")
+    assert "F0002\tfixed\tactive claim" not in resolution
+    if mutation == "mutate_resolution":
+        assert resolution == (
+            "finding_id\taction\tnote\n"
+            "F0001\tfixed\tFixed together.\n"
+        )
+    else:
+        assert resolution == "finding_id\taction\tnote\n"
 
 
 def test_issue_review_max_fix_rounds_counts_rejected_cycles_not_fixer_invocations(

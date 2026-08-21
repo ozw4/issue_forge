@@ -730,7 +730,7 @@ def initialize_batch_commit_repo(tmp_path: Path) -> Path:
 
 
 def run_two_finding_batch_flow(
-    repo: Path, *, all_non_fixed: bool = False, mutate_active: bool = False
+    repo: Path, *, all_non_fixed: bool = False, mutation: str = ""
 ) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -euo pipefail
@@ -744,7 +744,7 @@ batch_state_dir="$PWD/.work/queue/runs/run-a/batches/batch-1"
 batch_snapshot="$batch_dir/batch-review.snapshot.state"
 events="$batch_dir/events"
 all_non_fixed="$1"
-mutate_active="$2"
+mutation="$2"
 CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
 CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(':(exclude).work')
 mkdir -p "$batch_dir/history" "$batch_state_dir/history"
@@ -817,12 +817,32 @@ run_codex_batch_write() {{
   if [[ "$active_id" == 'F0002' ]]; then
     [[ "$2" -eq 1 && "$validation" == 'blocker validation' ]]
     cp -- "$6" "$batch_dir/first-fix.snapshot.state"
-    if [[ "$mutate_active" -eq 1 ]]; then
-      printf '%s\n' \
-        $'finding_id\tseverity\ttext' \
-        $'F9999\tblocker\tmutated active finding' \
-        > "$batch_state_dir/active-finding.tsv"
-      printf 'resolution:\n- F9999 | fixed | mutated active claim\n' > "$4"
+    case "$mutation" in
+      active)
+        printf '%s\n' \
+          $'finding_id\tseverity\ttext' \
+          $'F9999\tblocker\tmutated active finding' \
+          > "$batch_state_dir/active-finding.tsv"
+        ;;
+      fix_resolution)
+        printf 'F0001\tfixed\tFixed together.\n' \
+          >> "$batch_state_dir/fix-resolution.tsv"
+        ;;
+      pending_details)
+        printf '# mutated by Fixer\n' \
+          >> "$batch_state_dir/pending-finding-details.tsv"
+        ;;
+      prompt)
+        printf 'mutated by Fixer\n' >> "$batch_dir/fix-from-batch-review.prompt.md"
+        ;;
+      '')
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    if [[ -n "$mutation" ]]; then
+      printf 'resolution:\n- F0002 | fixed | active claim\n' > "$4"
     elif [[ "$all_non_fixed" -eq 1 ]]; then
       printf 'resolution:\n- F0002 | false_positive | blocker invalid\n' > "$4"
     else
@@ -865,7 +885,7 @@ ensure_batch_review_accepted \
             script,
             "batch-two-finding-test",
             "1" if all_non_fixed else "0",
-            "1" if mutate_active else "0",
+            mutation,
         ],
         cwd=repo,
         capture_output=True,
@@ -990,17 +1010,33 @@ def test_batch_two_non_fixed_claims_skip_commit_and_checks(tmp_path: Path) -> No
     ).stdout.strip() == "1"
 
 
-def test_batch_rejects_active_artifact_mutation_by_fixer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    ["active", "fix_resolution", "pending_details", "prompt"],
+    ids=["active", "fix-resolution", "pending-details", "prompt"],
+)
+def test_batch_rejects_scheduler_state_mutation_by_fixer(
+    tmp_path: Path, mutation: str
+) -> None:
     repo = initialize_batch_commit_repo(tmp_path)
     state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
 
-    completed = run_two_finding_batch_flow(repo, mutate_active=True)
+    completed = run_two_finding_batch_flow(repo, mutation=mutation)
 
     assert completed.returncode != 0
-    assert "Active finding artifacts changed during the Fixer invocation" in completed.stderr
-    assert (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
-        "finding_id\taction\tnote\n"
+    assert (
+        "Finding scheduler state artifacts changed during the Fixer invocation"
+        in completed.stderr
     )
+    resolution = (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8")
+    assert "F0002\tfixed\tactive claim" not in resolution
+    if mutation == "fix_resolution":
+        assert resolution == (
+            "finding_id\taction\tnote\n"
+            "F0001\tfixed\tFixed together.\n"
+        )
+    else:
+        assert resolution == "finding_id\taction\tnote\n"
 
 
 def run_batch_with_inconsistent_active_details(

@@ -521,7 +521,7 @@ run_fix_from_review_round() {
   local review_fix_round="$1"
   local active_id
   local active_status
-  local active_artifact_digest
+  local scheduler_state_digest
   local one_row_resolution
 
   write_pending_findings "$review_findings_ledger" "$pending_findings"
@@ -552,8 +552,14 @@ run_fix_from_review_round() {
       return "$active_status"
     fi
 
-    active_artifact_digest="$(
-      active_finding_artifact_digest "$active_finding" "$active_finding_details"
+    scheduler_state_digest="$(
+      finding_scheduler_state_digest \
+        "$pending_findings" \
+        "$pending_finding_details" \
+        "$fix_resolution_report" \
+        "$active_finding" \
+        "$active_finding_details" \
+        "$fix_review_prompt"
     )" || return 1
     fix_review_round=$((fix_review_round + 1))
     log_info "codex fix from review (cycle ${review_fix_round}, finding ${active_id})"
@@ -561,8 +567,14 @@ run_fix_from_review_round() {
     run_codex_phase \
       fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
       "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$fix_review_snapshot"
-    assert_active_finding_artifacts_match \
-      "$active_finding" "$active_finding_details" "$active_artifact_digest" || return 1
+    assert_finding_scheduler_state_matches \
+      "$scheduler_state_digest" \
+      "$pending_findings" \
+      "$pending_finding_details" \
+      "$fix_resolution_report" \
+      "$active_finding" \
+      "$active_finding_details" \
+      "$fix_review_prompt" || return 1
     archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
     ensure_issue_token_usage_tsv \
       'fix-from-review' "$issue_number" "$fix_review_round" \

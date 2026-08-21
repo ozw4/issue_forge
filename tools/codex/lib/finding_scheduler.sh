@@ -316,34 +316,33 @@ active_finding_id() {
   ' "$active_file"
 }
 
-active_finding_artifact_digest() {
-  local active_file="$1"
-  local active_details_file="$2"
-  local active_digest
-  local active_details_digest
+finding_scheduler_state_digest() {
+  local state_file
+  local state_digest
 
-  _finding_scheduler_require_regular_file "$active_file" 'Active finding' || return 1
-  _finding_scheduler_require_regular_file "$active_details_file" 'Active finding details' || return 1
-  active_digest="$(git hash-object --no-filters -- "$active_file")" || {
-    printf 'Failed to hash active finding: %s\n' "$active_file" >&2
+  if [[ "$#" -eq 0 ]]; then
+    printf 'Finding scheduler state digest requires at least one artifact.\n' >&2
     return 1
-  }
-  active_details_digest="$(git hash-object --no-filters -- "$active_details_file")" || {
-    printf 'Failed to hash active finding details: %s\n' "$active_details_file" >&2
-    return 1
-  }
-  printf '%s\t%s\n' "$active_digest" "$active_details_digest"
+  fi
+  for state_file in "$@"; do
+    _finding_scheduler_require_regular_file \
+      "$state_file" 'Finding scheduler state artifact' || return 1
+    state_digest="$(git hash-object --no-filters -- "$state_file")" || {
+      printf 'Failed to hash finding scheduler state artifact: %s\n' "$state_file" >&2
+      return 1
+    }
+    printf '%s\n' "$state_digest"
+  done
 }
 
-assert_active_finding_artifacts_match() {
-  local active_file="$1"
-  local active_details_file="$2"
-  local expected_digest="$3"
+assert_finding_scheduler_state_matches() {
+  local expected_digest="$1"
   local current_digest
+  shift
 
-  current_digest="$(active_finding_artifact_digest "$active_file" "$active_details_file")" || return 1
+  current_digest="$(finding_scheduler_state_digest "$@")" || return 1
   if [[ "$current_digest" != "$expected_digest" ]]; then
-    printf 'Active finding artifacts changed during the Fixer invocation.\n' >&2
+    printf 'Finding scheduler state artifacts changed during the Fixer invocation.\n' >&2
     return 1
   fi
 }

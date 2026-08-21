@@ -315,7 +315,7 @@ blocker・major・minor の簡潔な1文が acceptance、severity、finding ledg
 
 `review-details.tsv` はvalidated reviewから生成されるFixer向け補助情報で、headerは `severity`, `finding`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` です。Fixer cycle前にはledger IDと結合した `pending-finding-details.tsv` を生成し、headerは `finding_id`, `severity`, `text`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` になります。scheduler は `active-finding.tsv` と `active-finding-details.tsv` に一致する0件または1件を公開します。active concise row とsource-of-truth docsがnormativeであり、active detailsはpatch設計ではありません。Fixerはrepository上で根拠を確認し、必要な事後条件と制約を満たす最小で安全な修正を判断します。`validation` はguidanceであり、shell inputとして実行しません。
 
-必要なdetails artifactや対応行が欠落・重複・不整合の場合、flowは簡潔なfindingからdetailsを合成せず停止します。各pending IDはrejected-review cycleごとに最大1回だけFixerへ渡され、`fix-resolution.tsv` はそのcycleのclaimを処理順に累積します。新しいrejected cycleではこのreportをheader-onlyへ再初期化します。Fixerの`fixed`、`false_positive`、`cannot_fix`はclaimにすぎずfindingをcloseしません。次のReviewerだけが`resolved`、`invalid`、`unresolved`を決定します。
+必要なdetails artifactや対応行が欠落・重複・不整合の場合、flowは簡潔なfindingからdetailsを合成せず停止します。各pending IDはrejected-review cycleごとに最大1回だけFixerへ渡され、`fix-resolution.tsv` はそのcycleのclaimを処理順に累積します。各Fixerの前後ではpending 2 artifact、累積resolution、active 2 artifact、生成済みFixer promptがbyte-identicalであることを確認し、変更時はresolutionを解析・追記せず停止します。新しいrejected cycleではこのreportをheader-onlyへ再初期化します。Fixerの`fixed`、`false_positive`、`cannot_fix`はclaimにすぎずfindingをcloseしません。次のReviewerだけが`resolved`、`invalid`、`unresolved`を決定します。
 
 Fixer sessionのfocused validationはacceptance evidenceであるfull Checksの代替ではありません。Fixerはroutineとしてrepository-wide Checksやfull `pytest -q`を各finding後に実行せず、issue_forgeが全active finding後にconfigured full Checks phaseを開始します。このorchestrationにmulti-agentやparallel Fixerは含まれません。
 
