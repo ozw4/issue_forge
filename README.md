@@ -140,12 +140,14 @@ consumer repository root で、clean worktree から次を実行します。
 
 1. Codex implementation
 2. consumer-owned checks と fix-from-checks loop
-3. structured review と fix-from-review loop
+3. structured review と one-finding-at-a-time の fix-from-review loop
 4. `chore: address issue #123` commit
 5. branch push
 6. PR create、または既存 open PR の title/body sync
 
 新規 Issue PR は `CODEX_FLOW_PR_DRAFT_DEFAULT=1` により default で draft です。既存 PR を更新する場合、draft/open state、reviewers、labels は変更しません。
+
+Reviewer が reject した各 cycle では、pending findings から `blocker`、`major`、`minor` の順に1件を active にし、同じ severity 内では pending 順を保ちます。1 active finding ごとに1回だけ Fixer を実行し、各 Fixer は直接関係する最小の validation を行います。全 pending ID が1回ずつ処理された後に configured full Checks phase へ1度入り、その後 Reviewer が全 claim を検証します。Checks failure は既存の fix-from-checks loop で処理します。
 
 `--scaffold-run` で生成した wrapper を使う場合は、base branch の同期、Issue bootstrap、flow 実行を 1 command にまとめられます。
 
@@ -192,6 +194,8 @@ CODEX_FLOW_SKIP_PUBLISH=1 \
 ```
 
 各 Issue は同じ batch branch 上で既存 single-Issue flow を再利用し、Issue ごとに commit されます。default では per-Issue review に軽量 prompt を使い、最後に strict batch review を実行して batch PR を 1 つ作成します。full per-Issue review が必要な場合は次を設定します。
+
+strict Batch review が reject された場合も、active finding ごとに Fixer を逐次実行します。全 active Fixer の変更を既存の1件の Batch review-fix commit にまとめ、その commit 後に full Batch Checks phase へ1度入ってから Reviewer を再実行します。変更がなく全 claim が `false_positive` または `cannot_fix` の場合は commit と Checks を省略します。
 
 ```sh
 CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
@@ -265,8 +269,11 @@ single-Issue flow の主要 artifacts は次のとおりです。
 │  ├─ findings.tsv
 │  ├─ pending-findings.tsv
 │  ├─ pending-finding-details.tsv
+│  ├─ active-finding.tsv
+│  ├─ active-finding-details.tsv
 │  ├─ fix-resolution.tsv
 │  ├─ review-verification.tsv
+│  ├─ fix-from-review.snapshot.state
 │  ├─ fix-from-review.log
 │  ├─ token-usage.tsv
 │  └─ history/
@@ -306,13 +313,15 @@ verification:
 
 blocker・major・minor の簡潔な1文が acceptance、severity、finding ledger identity、pending finding、次回Reviewでの照合の source of truth です。details の `finding` はその本文と完全一致し、各current findingに1件だけ存在します。current findingが0件なら `details:` は `- none` だけです。detailsの文章だけを変更してもfinding IDは変わりません。
 
-`review-details.tsv` はvalidated reviewから生成されるFixer向け補助情報で、headerは `severity`, `finding`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` です。Fixer前にはledger IDと結合した `pending-finding-details.tsv` を生成し、headerは `finding_id`, `severity`, `text`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` になります。`pending-findings.tsv` とsource-of-truth docsがnormativeであり、detailsはpatch設計ではありません。Fixerはrepository上で根拠を確認し、必要な事後条件と制約を満たす最小で安全な修正を判断します。
+`review-details.tsv` はvalidated reviewから生成されるFixer向け補助情報で、headerは `severity`, `finding`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` です。Fixer cycle前にはledger IDと結合した `pending-finding-details.tsv` を生成し、headerは `finding_id`, `severity`, `text`, `evidence`, `impact`, `required_outcome`, `constraints`, `validation` になります。scheduler は `active-finding.tsv` と `active-finding-details.tsv` に一致する0件または1件を公開します。active concise row とsource-of-truth docsがnormativeであり、active detailsはpatch設計ではありません。Fixerはrepository上で根拠を確認し、必要な事後条件と制約を満たす最小で安全な修正を判断します。`validation` はguidanceであり、shell inputとして実行しません。
 
-必要なdetails artifactや対応行が欠落・重複・不整合の場合、flowは簡潔なfindingからdetailsを合成せず停止します。Fixerの`fixed`、`false_positive`、`cannot_fix`はclaimにすぎずfindingをcloseしません。次のReviewerが`resolved`、`invalid`、`unresolved`を検証します。
+必要なdetails artifactや対応行が欠落・重複・不整合の場合、flowは簡潔なfindingからdetailsを合成せず停止します。各pending IDはrejected-review cycleごとに最大1回だけFixerへ渡され、`fix-resolution.tsv` はそのcycleのclaimを処理順に累積します。新しいrejected cycleではこのreportをheader-onlyへ再初期化します。Fixerの`fixed`、`false_positive`、`cannot_fix`はclaimにすぎずfindingをcloseしません。次のReviewerだけが`resolved`、`invalid`、`unresolved`を決定します。
+
+Fixer sessionのfocused validationはacceptance evidenceであるfull Checksの代替ではありません。Fixerはroutineとしてrepository-wide Checksやfull `pytest -q`を各finding後に実行せず、issue_forgeが全active finding後にconfigured full Checks phaseを開始します。このorchestrationにmulti-agentやparallel Fixerは含まれません。
 
 `accept: yes` でも `blocker:` または `major:` に実 finding がある場合は validation failure です。`minor:` は残り得ます。acceptanceはcurrent severity sectionだけを基準にし、detailsやverificationだけを理由にrejectしません。
 
-Batch reviewのdetails source of truthは `.work/queue/runs/<run_id>/batches/<batch>/review-details.tsv`、round history、`pending-finding-details.tsv` です。同名artifactは `.work/queue/batches/<batch>/` にcompatibility copyされますが、run-owned stateとしては読みません。
+Batch reviewのdetails source of truthは `.work/queue/runs/<run_id>/batches/<batch>/review-details.tsv`、round history、`pending-finding-details.tsv` です。Batchの `active-finding.tsv`、`active-finding-details.tsv`、累積 `fix-resolution.tsv` もこのrun-owned directoryがauthoritativeです。active artifactsはcompatibility copyを持ちません。その他の同名artifactを `.work/queue/batches/<batch>/` に置く場合もcompatibility copyであり、run-owned stateとしては読みません。
 
 Codex log に `tokens used` block が含まれる場合、single-Issue flow は `.work/codex/token-usage.tsv`、batch flow は各 batch directory の `token-usage.tsv` に usage を記録します。計測できない場合も flow は失敗せず、TSV header だけが残ります。
 

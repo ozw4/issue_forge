@@ -107,7 +107,7 @@ Queue runs preserve each Codex invocation below the authoritative run directory:
 
 Each terminal attempt contains `request.state`, the exact `prompt.md`, one combined stdout/stderr `agent.log`, and `result.state`. An `attempt-NNNN.running/` directory means the process stopped before terminal finalization. Later executions do not overwrite terminal or `.running` attempts and use the next sequence number. The existing `.work/codex` and batch log filenames remain compatibility views: combined-policy logs receive `agent.log`, while stdout-policy raw review logs receive stdout only. Standalone `run_issue_flow.sh` executions do not enable this attempt store by default.
 
-Issue and batch review rounds capture a review snapshot as the consumer repository `HEAD` commit plus a Git tree for the current worktree, honoring the standard worktree exclusions. The snapshot must still match after the Reviewer and immediately before its corresponding Fixer; a mismatch stops the flow before further Agent processing. With the attempt store enabled, the review and matching fix attempts each preserve the same immutable `snapshot.state`. The current snapshot file is overwritten when the next review round captures its input.
+Issue and batch review rounds capture a review snapshot as the consumer repository `HEAD` commit plus a Git tree for the current worktree, honoring the standard worktree exclusions. The snapshot must still match after the Reviewer and before the rejected-review fix cycle begins; a mismatch stops the flow. Each active Fixer then captures a fresh snapshot immediately before its own invocation, so later Fixer attempts include the changes produced by earlier active findings. With the attempt store enabled, every review and Fixer attempt preserves the snapshot it actually received. The original Batch review snapshot remains the reconciliation boundary for the cycle.
 
 ## Finding Ledgers
 
@@ -135,13 +135,54 @@ Batch details are authoritative at `.work/queue/runs/<run_id>/batches/<batch>/re
 
 `status` is observation state: a finding seen in the current round is `present`, while an absent prior finding is retained as `not_observed`. `resolution` is lifecycle state: new findings are `unresolved`, and only the next Reviewer may verify them as `resolved` or `invalid`. A resolved or invalid finding that reappears keeps its ID and returns to `unresolved`.
 
-Before each fix, current `present` and `unresolved` records are written to `pending-findings.tsv`. That file and source-of-truth documentation are normative; `pending-finding-details.tsv` helps the Fixer verify evidence, satisfy the required outcome and constraints, and plan validation. The Fixer chooses the smallest safe implementation, does not follow details blindly as edit instructions, and does not broaden scope beyond pending findings.
+Before each rejected-review cycle, current `present` and `unresolved` records are written once to `pending-findings.tsv` and joined to `pending-finding-details.tsv`. The scheduler selects one unprocessed row by `blocker`, `major`, then `minor`, preserving pending order within a severity, and publishes matching `active-finding.tsv` and `active-finding-details.tsv` artifacts. The active concise row and source-of-truth documentation are normative; active details help the Fixer confirm evidence, satisfy the required outcome and constraints, and choose focused validation. The `validation` field is guidance and is never executed as shell input.
 
-The Fixer returns one `fixed`, `false_positive`, or `cannot_fix` claim per pending ID in `fix-resolution.tsv`; that report does not itself close findings. The next review records `resolved`, `invalid`, or `unresolved` decisions in `review-verification.tsv`. Issue artifacts live below `.work/codex/`, including `history/fix-resolution.round-NN.tsv`. Batch source artifacts live below `.work/queue/runs/<run_id>/batches/<batch>/` and are copied, including fix-resolution history, to `.work/queue/batches/<batch>/` for compatibility.
+Each pending ID receives at most one sequential Fixer attempt in that cycle. The active concise and detail files must not change during that invocation. The Fixer chooses the smallest safe implementation, does not intentionally address another pending finding, starts no multi-agent or parallel work, and normally runs only the smallest directly relevant validation. Focused validation is not acceptance evidence and does not replace configured full Checks. Queue resume derives Batch Fixer progress only from run-owned attempts and cumulative resolution state; unmatched attempts fail closed rather than repeating an active ID.
+
+Each Fixer returns exactly one `fixed`, `false_positive`, or `cannot_fix` claim for its active ID. `fix-resolution.tsv` accumulates those rows in processing order for the current cycle and is reinitialized when a new rejected cycle begins. A claim does not close a finding: only the next Reviewer records `resolved`, `invalid`, or `unresolved` in `review-verification.tsv`. After all active findings receive an attempt, standalone Issue and changed Batch cycles enter full Checks once and then rerun Reviewer; a failed check continues through the existing checks-fix loop. An unchanged Batch cycle whose claims are all `false_positive` or `cannot_fix` skips its commit and Checks.
+
+```text
+Reviewer
+  -> pending findings
+  -> one active finding
+  -> one Fixer
+  -> focused validation by that Fixer
+  -> next active finding
+  -> full Checks once
+  -> Reviewer verification
+```
+
+For example, this pending set is scheduled as `F0002` and then `F0001` because major precedes minor:
+
+```text
+finding_id	severity	text
+F0001	minor	Document the edge case.
+F0002	major	Restore the required guard.
+```
+
+The two one-line Fixer outputs:
+
+```text
+resolution:
+- F0002 | fixed | Restored the required guard.
+
+resolution:
+- F0001 | cannot_fix | The consumer contract forbids the requested change.
+```
+
+produce this cumulative report:
+
+```text
+finding_id	action	note
+F0002	fixed	Restored the required guard.
+F0001	cannot_fix	The consumer contract forbids the requested change.
+```
+
+Issue active artifacts and `fix-from-review.snapshot.state` live below `.work/codex/`, including cycle history at `history/fix-resolution.round-NN.tsv`. Batch active artifacts and cumulative resolution state are authoritative below `.work/queue/runs/<run_id>/batches/<batch>/`; active artifacts have no compatibility copy. Pending artifacts, cumulative resolution, and resolution history are copied below `.work/queue/batches/<batch>/` but are never read as run-owned state. The current Batch Fixer snapshot exists only at the compatibility artifact path `.work/queue/batches/<batch>/fix-from-batch-review.snapshot.state`; immutable attempts retain the snapshot they received. A changed Batch cycle creates one review-fix commit after all Fixers and then starts one full Batch Checks phase. If no files changed and every claim is `false_positive` or `cannot_fix`, Batch skips that commit and Checks.
 
 Current acceptance still uses the current structured review finding sections rather than scanning the full ledger. `accept: no` requires at least one current blocker, major, or minor finding; verification records alone are not a rejection reason. After each round, the current ledger is copied to its corresponding `history/findings.round-NN.tsv` path.
 
-The run-owned Batch directory also stores `review-lifecycle.state` (schema version 1) with the logical review/fix rounds, the next `review`, `fix`, or `complete` action, and an update timestamp. Resume follows that state, so a completed fix continues with the next review and a completed review does not rerun before the outer queue checkpoint is written. If a review fix commit became durable before lifecycle publication, resume adopts the expected linear review/check-fix commit frontier only with a clean worktree, run-owned resolution and review-details history, and a still-valid run-owned pending-details mapping; it reruns checks without rerunning the Fixer, and then advances to the next review. This is Batch-review control state, separate from Agent attempts and finding data; it has no compatibility copy and does not alter queue state schema version 3.
+The run-owned Batch directory also stores `review-lifecycle.state` (schema version 1) with the logical review/fix rounds, the next `review`, `fix`, or `complete` action, and an update timestamp. Resume follows that state, so a completed fix continues with the next review and a completed review does not rerun before the outer queue checkpoint is written. If a review fix commit became durable before lifecycle publication, resume adopts the expected linear review/check-fix commit frontier only with a clean worktree, a current cumulative resolution exactly matching valid run-owned history and covering every pending ID, and a still-valid run-owned pending-details mapping; it reruns checks without rerunning the Fixer, and then advances to the next review. This is Batch-review control state, separate from Agent attempts and finding data; it has no compatibility copy and does not alter queue state schema version 3.
 
 ## Check Attempts
 

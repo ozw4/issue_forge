@@ -58,7 +58,10 @@ repo 固有のルールや docs を engine 側の暗黙知に押し込まない�
 - prompt templates の default は `vendor/issue_forge/tools/codex/prompts/` です。
 - consumer-specific prompts は optional で、必要な場合のみ `CODEX_FLOW_PROMPTS_DIR` で override します。
 - Reviewer の簡潔な finding は acceptance と ledger identity の source of truth です。構造化 details は Fixer 向けの補助情報であり、Reviewer が具体的な patch 設計を固定するためのものではありません。
-- Fixer は pending finding と source-of-truth docs を normative とし、details の根拠を必要に応じて repository 上で確認します。details artifact の欠落や不整合を簡潔な finding から合成して隠してはいけません。
+- Fixer は1件の active concise finding と source-of-truth docs を normative とし、active details の根拠を必要に応じて repository 上で確認します。details artifact の欠落や不整合を簡潔な finding から合成して隠してはいけません。`validation` は guidance であり shell command として実行しません。
+- rejected-review cycle では `blocker`、`major`、`minor` の順に、同 severity 内は pending 順で1件ずつ処理します。各 ID の Fixer attempt は cycle 内で最大1回とし、multi-agent や parallel Fixer を開始しません。
+- 各 Fixer は可能なら直接関係する最小の validation を行います。single-Issue と変更を伴う Batch cycle では、全 active finding 後に orchestrator が configured full Checks phase へ1度入り、その失敗は既存 checks-fix loop で処理します。変更がなく全 Batch claim が `false_positive` または `cannot_fix` の場合だけ commit と Checks を省略します。focused validation は full Checks の代替ではありません。
+- `fix-resolution.tsv` は rejected-review cycle 内の `fixed`、`false_positive`、`cannot_fix` claim を累積し、新しい rejected cycle で再初期化します。finding を close できるのは次の Reviewer だけです。
 - consumer docs の primary entrypoint は `README.md` です。`docs/README.md` は追加 docs がある場合だけ optional とします。
 - docs を追加したら `docs/README.md` に読む順番を反映してください。
 - docs の wording を変えるだけでも、runtime behavior と矛盾していないか確認してください。
