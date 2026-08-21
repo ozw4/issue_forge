@@ -61,7 +61,7 @@ repo 固有のルールや docs を engine 側の暗黙知に押し込まない�
 - Fixer は1件の active concise finding と source-of-truth docs を normative とし、active details の根拠を必要に応じて repository 上で確認します。details artifact の欠落や不整合を簡潔な finding から合成して隠してはいけません。`validation` は guidance であり shell command として実行しません。
 - rejected-review cycle では `blocker`、`major`、`minor` の順に、同 severity 内は pending 順で1件ずつ処理します。各 ID の Fixer attempt は cycle 内で最大1回とし、multi-agent や parallel Fixer を開始しません。
 - active artifact はdetailsを先に、concise rowをcommit markerとして最後に、それぞれatomic replaceします。active IDを使う前に両artifactの行数と `finding_id`・`severity`・`text` の一致を検証し、途中停止による旧新の混在はfail-closedします。
-- 各 Fixer の直前と直後で、orchestrator は pending 2 artifact、累積 `fix-resolution.tsv`、active 2 artifact、生成済み Fixer prompt の内容を照合します。Fixer log の解析と claim の追記は照合成功後にだけ行い、欠落・置換・変更は即時失敗させます。
+- 各 Fixer の直前に、orchestrator は pending 2 artifact、累積 `fix-resolution.tsv`、active 2 artifact、生成済み Fixer prompt を退避して内容を記録します。Fixer の終了statusにかかわらず直後に照合し、欠落・置換・変更時は6 artifactをFixer前の内容へatomic replaceで復元して失敗させます。Fixer log の解析と claim の追記は照合成功後にだけ行います。Batch resumeでは、改変を起こしたattemptと復元済みresolutionの不一致をhard errorとし、別findingへ進みません。
 - 各 Fixer は可能なら直接関係する最小の validation を行います。single-Issue と変更を伴う Batch cycle では、全 active finding 後に orchestrator が configured full Checks phase へ1度入り、その失敗は既存 checks-fix loop で処理します。変更がなく全 Batch claim が `false_positive` または `cannot_fix` の場合だけ commit と Checks を省略します。focused validation は full Checks の代替ではありません。
 - `fix-resolution.tsv` は rejected-review cycle 内の `fixed`、`false_positive`、`cannot_fix` claim を累積し、新しい rejected cycle で再初期化します。finding を close できるのは次の Reviewer だけです。
 - consumer docs の primary entrypoint は `README.md` です。`docs/README.md` は追加 docs がある場合だけ optional とします。

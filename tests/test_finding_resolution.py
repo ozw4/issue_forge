@@ -828,6 +828,11 @@ run_codex_batch_write() {{
         printf 'F0001\tfixed\tFixed together.\n' \
           >> "$batch_state_dir/fix-resolution.tsv"
         ;;
+      fix_resolution_fail)
+        printf 'F0001\tfixed\tFixed together.\n' \
+          >> "$batch_state_dir/fix-resolution.tsv"
+        return 17
+        ;;
       pending_details)
         printf '# mutated by Fixer\n' \
           >> "$batch_state_dir/pending-finding-details.tsv"
@@ -1010,6 +1015,98 @@ def test_batch_two_non_fixed_claims_skip_commit_and_checks(tmp_path: Path) -> No
     ).stdout.strip() == "1"
 
 
+def run_batch_scheduler_mutation_resume(
+    batch_dir: Path,
+    state_dir: Path,
+    *,
+    fixer_exit_status: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPER))}
+source {shlex.quote(str(REVIEW_HELPER))}
+source {shlex.quote(str(BATCH_HELPER))}
+
+batch_dir="$1"
+batch_state_dir="$2"
+fixer_exit_status="$3"
+CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
+CODEX_FLOW_AGENT_ATTEMPTS_ROOT="$batch_state_dir/attempts/batch"
+mkdir -p "$batch_dir/history" "$batch_state_dir/history"
+if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
+  printf '%s\n' \
+    $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
+    $'F0001\tmajor\t1\t1\tpresent\tunresolved\tmajor finding' \
+    $'F0002\tblocker\t1\t1\tpresent\tunresolved\tblocker finding' \
+    > "$batch_state_dir/findings.tsv"
+  printf '%s\n' \
+    $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    $'major\tmajor finding\tmajor evidence\tmajor impact\tmajor outcome\tnone\tmajor validation' \
+    $'blocker\tblocker finding\tblocker evidence\tblocker impact\tblocker outcome\tnone\tblocker validation' \
+    > "$batch_state_dir/review-details.tsv"
+  cp -- \
+    "$batch_state_dir/review-details.tsv" \
+    "$batch_state_dir/history/review-details.round-01.tsv"
+  : > "$batch_dir/batch-review.snapshot.state"
+fi
+
+run_batch_review_once() {{
+  printf 'review:%s\n' "$6" >> "$batch_dir/events"
+  printf 'accept: no\n' > "$batch_dir/batch-review.txt"
+}}
+write_fix_from_batch_review_prompt_file() {{
+  printf 'active=%s\n' "$(sed -n '2s/\t.*//p' "$3")" > "$2"
+}}
+assert_review_snapshot_matches() {{ :; }}
+capture_review_snapshot() {{ : > "$1"; }}
+ensure_clean_worktree() {{ :; }}
+status_outside_work() {{ :; }}
+log_info() {{ :; }}
+run_codex_batch_write() {{
+  local active_id
+  local attempt_dir
+  active_id="$(sed -n '2s/\t.*//p' "$batch_state_dir/active-finding.tsv")"
+  [[ "$active_id" == F0002 ]]
+  printf 'fix:%s\n' "$active_id" >> "$batch_dir/events"
+  printf -v attempt_dir \
+    '%s/batch-fix-from-review/attempt-%04d' "$CODEX_FLOW_AGENT_ATTEMPTS_ROOT" "$2"
+  mkdir -p "$attempt_dir"
+  printf '%s\n' \
+    $'schema_version\t1' \
+    $'attempt_id\tattempt-0001' \
+    $'operation\tbatch-fix-from-review' \
+    $'round\t1' \
+    $'mode\twrite' \
+    $'started_at\t2026-08-21T00:00:00Z' \
+    > "$attempt_dir/request.state"
+  printf 'F0001\tfixed\tFixed together.\n' >> "$batch_state_dir/fix-resolution.tsv"
+  printf 'resolution:\n- F0002 | fixed | active claim\n' > "$4"
+  if [[ "$fixer_exit_status" -ne 0 ]]; then
+    return "$fixer_exit_status"
+  fi
+}}
+
+ensure_batch_review_accepted \
+  "$batch_dir" "$batch_dir/issues.txt" base 1 2 '#1-#2' medium high high \
+  "$batch_state_dir" "$batch_state_dir/checks/batch.manifest.tsv"
+"""
+    return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
+        [
+            "bash",
+            "-c",
+            script,
+            "batch-scheduler-mutation-resume-test",
+            str(batch_dir),
+            str(state_dir),
+            str(fixer_exit_status),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["active", "fix_resolution", "pending_details", "prompt"],
@@ -1029,14 +1126,71 @@ def test_batch_rejects_scheduler_state_mutation_by_fixer(
         in completed.stderr
     )
     resolution = (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8")
-    assert "F0002\tfixed\tactive claim" not in resolution
-    if mutation == "fix_resolution":
-        assert resolution == (
-            "finding_id\taction\tnote\n"
-            "F0001\tfixed\tFixed together.\n"
-        )
-    else:
-        assert resolution == "finding_id\taction\tnote\n"
+    assert resolution == "finding_id\taction\tnote\n"
+    assert (state_dir / "active-finding.tsv").read_text(encoding="utf-8") == (
+        "finding_id\tseverity\ttext\n"
+        "F0002\tblocker\tblocker finding\n"
+    )
+    assert "# mutated by Fixer" not in (
+        state_dir / "pending-finding-details.tsv"
+    ).read_text(encoding="utf-8")
+    assert (
+        repo / ".work/queue/batches/batch-1/fix-from-batch-review.prompt.md"
+    ).read_text(encoding="utf-8") == "active=F0002\n"
+
+
+def test_batch_resume_rejects_scheduler_state_mutation_claim(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    completed = run_batch_scheduler_mutation_resume(batch_dir, state_dir)
+    assert completed.returncode != 0
+    assert (
+        "Finding scheduler state artifacts changed during the Fixer invocation"
+        in completed.stderr
+    )
+    assert (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
+
+    events_before_resume = (batch_dir / "events").read_text(encoding="utf-8")
+    resumed = run_batch_scheduler_mutation_resume(batch_dir, state_dir)
+
+    assert resumed.returncode != 0
+    assert "refusing to repeat an active finding" in resumed.stderr
+    assert (batch_dir / "events").read_text(encoding="utf-8") == events_before_resume
+    assert events_before_resume.splitlines() == ["review:1", "fix:F0002"]
+    assert "F0001" not in events_before_resume
+
+
+def test_batch_restores_scheduler_state_when_failed_fixer_mutates_it(
+    tmp_path: Path,
+) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    completed = run_batch_scheduler_mutation_resume(
+        batch_dir,
+        state_dir,
+        fixer_exit_status=17,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "Finding scheduler state artifacts changed during the Fixer invocation"
+        in completed.stderr
+    )
+    assert (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
+
+    events_before_resume = (batch_dir / "events").read_text(encoding="utf-8")
+    resumed = run_batch_scheduler_mutation_resume(batch_dir, state_dir)
+
+    assert resumed.returncode != 0
+    assert "refusing to repeat an active finding" in resumed.stderr
+    assert (batch_dir / "events").read_text(encoding="utf-8") == events_before_resume
+    assert events_before_resume.splitlines() == ["review:1", "fix:F0002"]
 
 
 def run_batch_with_inconsistent_active_details(

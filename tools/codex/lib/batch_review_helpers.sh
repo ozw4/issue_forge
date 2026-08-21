@@ -700,7 +700,10 @@ ensure_batch_review_accepted() {
   local active_id
   local active_status
   local scheduler_state_digest
+  local scheduler_state_backup_dir
+  local fixer_status
   local one_row_resolution
+  local -a scheduler_state_artifacts
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
@@ -806,27 +809,35 @@ ensure_batch_review_accepted() {
               "$batch_active_finding" \
               "$fix_review_snapshot" \
               "$batch_active_finding_details"
-            scheduler_state_digest="$(
-              finding_scheduler_state_digest \
-                "$batch_pending_findings" \
-                "$batch_pending_finding_details" \
-                "$batch_fix_resolution" \
-                "$batch_active_finding" \
-                "$batch_active_finding_details" \
-                "$fix_review_prompt"
+            scheduler_state_artifacts=(
+              "$batch_pending_findings"
+              "$batch_pending_finding_details"
+              "$batch_fix_resolution"
+              "$batch_active_finding"
+              "$batch_active_finding_details"
+              "$fix_review_prompt"
+            )
+            scheduler_state_backup_dir="$(
+              backup_finding_scheduler_state "${scheduler_state_artifacts[@]}"
             )" || return 1
+            scheduler_state_digest="$(
+              finding_scheduler_state_digest "${scheduler_state_artifacts[@]}"
+            )" || {
+              remove_finding_scheduler_state_backup "$scheduler_state_backup_dir"
+              return 1
+            }
             log_info "codex fix from batch review (cycle ${review_fix_round}, finding ${active_id})"
+            fixer_status=0
             run_codex_batch_write \
               batch-fix-from-review "$fix_invocation_round" "$fix_review_prompt" "$fix_review_log" \
-              "$review_fix_effort" "$fix_review_snapshot"
-            assert_finding_scheduler_state_matches \
+              "$review_fix_effort" "$fix_review_snapshot" || fixer_status=$?
+            assert_finding_scheduler_state_matches_or_restore \
               "$scheduler_state_digest" \
-              "$batch_pending_findings" \
-              "$batch_pending_finding_details" \
-              "$batch_fix_resolution" \
-              "$batch_active_finding" \
-              "$batch_active_finding_details" \
-              "$fix_review_prompt" || return 1
+              "$scheduler_state_backup_dir" \
+              "${scheduler_state_artifacts[@]}" || return 1
+            if [[ "$fixer_status" -ne 0 ]]; then
+              return "$fixer_status"
+            fi
             archive_round_file \
               "$fix_review_log" 'fix-from-batch-review' "$fix_invocation_round" '.log'
             ensure_batch_token_usage_tsv \

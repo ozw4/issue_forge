@@ -311,6 +311,10 @@ run_codex_phase() {{
       printf 'F0001\tfixed\tFixed together.\n' >> "$fix_resolution_report"
       printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
       ;;
+    mutate_resolution_fail)
+      printf 'F0001\tfixed\tFixed together.\n' >> "$fix_resolution_report"
+      return 17
+      ;;
     mutate_pending_details)
       printf '# mutated by Fixer\n' >> "$pending_finding_details"
       printf 'resolution:\n- %s | fixed | active claim\n' "$active_id" > "$output_file"
@@ -724,14 +728,48 @@ def test_issue_review_rejects_scheduler_state_mutation_by_fixer(
         in completed.stderr
     )
     resolution = (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8")
-    assert "F0002\tfixed\tactive claim" not in resolution
-    if mutation == "mutate_resolution":
-        assert resolution == (
-            "finding_id\taction\tnote\n"
-            "F0001\tfixed\tFixed together.\n"
-        )
-    else:
-        assert resolution == "finding_id\taction\tnote\n"
+    assert resolution == "finding_id\taction\tnote\n"
+    assert (work_dir / "active-finding.tsv").read_text(encoding="utf-8") == (
+        "finding_id\tseverity\ttext\n"
+        f"F0002\tblocker\t{BLOCKER_FINDING}\n"
+    )
+    assert "# mutated by Fixer" not in (
+        work_dir / "pending-finding-details.tsv"
+    ).read_text(encoding="utf-8")
+    assert (work_dir / "fix-from-review.prompt.md").read_text(
+        encoding="utf-8"
+    ) == "fix prompt\n"
+
+
+def test_issue_restores_scheduler_state_when_failed_fixer_mutates_it(
+    tmp_path: Path,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("mutate_resolution_fail",),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "Finding scheduler state artifacts changed during the Fixer invocation"
+        in completed.stderr
+    )
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
 
 
 def test_issue_review_max_fix_rounds_counts_rejected_cycles_not_fixer_invocations(

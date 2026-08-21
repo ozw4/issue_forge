@@ -376,16 +376,116 @@ finding_scheduler_state_digest() {
   done
 }
 
+backup_finding_scheduler_state() {
+  local backup_dir
+  local backup_file
+  local state_file
+  local state_index=0
+
+  if [[ "$#" -eq 0 ]]; then
+    printf 'Finding scheduler state backup requires at least one artifact.\n' >&2
+    return 1
+  fi
+  backup_dir="$(mktemp -d)" || {
+    printf 'Failed to create finding scheduler state backup directory.\n' >&2
+    return 1
+  }
+  for state_file in "$@"; do
+    _finding_scheduler_require_regular_file \
+      "$state_file" 'Finding scheduler state artifact' || {
+      remove_finding_scheduler_state_backup "$backup_dir" || true
+      return 1
+    }
+    printf -v backup_file '%s/artifact-%06d' "$backup_dir" "$state_index"
+    if ! cp -p -- "$state_file" "$backup_file"; then
+      remove_finding_scheduler_state_backup "$backup_dir" || true
+      printf 'Failed to back up finding scheduler state artifact: %s\n' "$state_file" >&2
+      return 1
+    fi
+    state_index=$((state_index + 1))
+  done
+  printf '%s\n' "$backup_dir"
+}
+
+restore_finding_scheduler_state() {
+  local backup_dir="$1"
+  local backup_file
+  local restore_temporary
+  local state_file
+  local state_index=0
+  shift
+
+  if [[ ! -d "$backup_dir" || -L "$backup_dir" ]]; then
+    printf 'Finding scheduler state backup directory is invalid: %s\n' "$backup_dir" >&2
+    return 1
+  fi
+  for state_file in "$@"; do
+    printf -v backup_file '%s/artifact-%06d' "$backup_dir" "$state_index"
+    _finding_scheduler_require_regular_file \
+      "$backup_file" 'Finding scheduler state backup artifact' || return 1
+    restore_temporary="$(mktemp "${state_file}.restore.XXXXXX")" || {
+      printf 'Failed to create temporary restored scheduler artifact: %s\n' \
+        "$state_file" >&2
+      return 1
+    }
+    if ! cp -p -- "$backup_file" "$restore_temporary" \
+      || ! mv -T -f -- "$restore_temporary" "$state_file"; then
+      rm -f -- "$restore_temporary"
+      printf 'Failed to restore finding scheduler state artifact: %s\n' "$state_file" >&2
+      return 1
+    fi
+    state_index=$((state_index + 1))
+  done
+}
+
+remove_finding_scheduler_state_backup() {
+  local backup_dir="$1"
+
+  if [[ -z "$backup_dir" || ! -d "$backup_dir" || -L "$backup_dir" ]]; then
+    printf 'Finding scheduler state backup directory is invalid: %s\n' "$backup_dir" >&2
+    return 1
+  fi
+  if ! rm -f -- "$backup_dir"/artifact-* || ! rmdir -- "$backup_dir"; then
+    printf 'Failed to remove finding scheduler state backup directory: %s\n' \
+      "$backup_dir" >&2
+    return 1
+  fi
+}
+
 assert_finding_scheduler_state_matches() {
   local expected_digest="$1"
   local current_digest
   shift
 
-  current_digest="$(finding_scheduler_state_digest "$@")" || return 1
+  current_digest="$(finding_scheduler_state_digest "$@")" || {
+    printf 'Finding scheduler state artifacts changed during the Fixer invocation.\n' >&2
+    return 1
+  }
   if [[ "$current_digest" != "$expected_digest" ]]; then
     printf 'Finding scheduler state artifacts changed during the Fixer invocation.\n' >&2
     return 1
   fi
+}
+
+assert_finding_scheduler_state_matches_or_restore() {
+  local expected_digest="$1"
+  local backup_dir="$2"
+  shift 2
+
+  if assert_finding_scheduler_state_matches "$expected_digest" "$@"; then
+    remove_finding_scheduler_state_backup "$backup_dir"
+    return 0
+  fi
+  restore_finding_scheduler_state "$backup_dir" "$@" || {
+    remove_finding_scheduler_state_backup "$backup_dir" || true
+    return 1
+  }
+  assert_finding_scheduler_state_matches "$expected_digest" "$@" || {
+    remove_finding_scheduler_state_backup "$backup_dir" || true
+    return 1
+  }
+  remove_finding_scheduler_state_backup "$backup_dir" || return 1
+  return 1
 }
 
 readonly ISSUE_FORGE_FINDING_SCHEDULER_LOADED=1

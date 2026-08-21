@@ -581,3 +581,27 @@ def test_interrupted_active_publication_is_rejected_as_inconsistent(
     rejected = run_helper("active_finding_id", paths[3], paths[4])
     assert rejected.returncode != 0
     assert "Active finding artifacts are inconsistent" in rejected.stderr
+
+
+def test_scheduler_state_backup_restores_all_artifacts(tmp_path: Path) -> None:
+    artifacts = [tmp_path / f"artifact-{index}.tsv" for index in range(6)]
+    expected = []
+    for index, artifact in enumerate(artifacts):
+        contents = f"original-{index}\n".encode()
+        artifact.write_bytes(contents)
+        expected.append(contents)
+
+    command = """
+restore_test() {
+  backup_dir="$(backup_finding_scheduler_state "$@")" || exit 1
+  for artifact in "$@"; do
+    printf 'mutated\n' > "$artifact"
+  done
+  restore_finding_scheduler_state "$backup_dir" "$@" || exit 1
+  remove_finding_scheduler_state_backup "$backup_dir"
+}
+restore_test"""
+    completed = run_helper(command, *artifacts)
+
+    assert_ok(completed)
+    assert [artifact.read_bytes() for artifact in artifacts] == expected

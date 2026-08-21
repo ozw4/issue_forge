@@ -522,7 +522,10 @@ run_fix_from_review_round() {
   local active_id
   local active_status
   local scheduler_state_digest
+  local scheduler_state_backup_dir
+  local fixer_status
   local one_row_resolution
+  local -a scheduler_state_artifacts
 
   write_pending_findings "$review_findings_ledger" "$pending_findings"
   write_pending_finding_details \
@@ -552,29 +555,38 @@ run_fix_from_review_round() {
       return "$active_status"
     fi
 
-    scheduler_state_digest="$(
-      finding_scheduler_state_digest \
-        "$pending_findings" \
-        "$pending_finding_details" \
-        "$fix_resolution_report" \
-        "$active_finding" \
-        "$active_finding_details" \
-        "$fix_review_prompt"
+    scheduler_state_artifacts=(
+      "$pending_findings"
+      "$pending_finding_details"
+      "$fix_resolution_report"
+      "$active_finding"
+      "$active_finding_details"
+      "$fix_review_prompt"
+    )
+    scheduler_state_backup_dir="$(
+      backup_finding_scheduler_state "${scheduler_state_artifacts[@]}"
     )" || return 1
+    scheduler_state_digest="$(
+      finding_scheduler_state_digest "${scheduler_state_artifacts[@]}"
+    )" || {
+      remove_finding_scheduler_state_backup "$scheduler_state_backup_dir"
+      return 1
+    }
     fix_review_round=$((fix_review_round + 1))
     log_info "codex fix from review (cycle ${review_fix_round}, finding ${active_id})"
     capture_review_snapshot "$fix_review_snapshot"
+    fixer_status=0
     run_codex_phase \
       fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
-      "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$fix_review_snapshot"
-    assert_finding_scheduler_state_matches \
+      "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$fix_review_snapshot" \
+      || fixer_status=$?
+    assert_finding_scheduler_state_matches_or_restore \
       "$scheduler_state_digest" \
-      "$pending_findings" \
-      "$pending_finding_details" \
-      "$fix_resolution_report" \
-      "$active_finding" \
-      "$active_finding_details" \
-      "$fix_review_prompt" || return 1
+      "$scheduler_state_backup_dir" \
+      "${scheduler_state_artifacts[@]}" || return 1
+    if [[ "$fixer_status" -ne 0 ]]; then
+      return "$fixer_status"
+    fi
     archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
     ensure_issue_token_usage_tsv \
       'fix-from-review' "$issue_number" "$fix_review_round" \
