@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -24,7 +26,11 @@ DetailRow = tuple[str, str, str, str, str, str, str, str]
 ResolutionRow = tuple[str, str, str]
 
 
-def run_helper(command: str, *args: Path | str) -> subprocess.CompletedProcess[str]:
+def run_helper(
+    command: str,
+    *args: Path | str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -uo pipefail
 source {shlex.quote(str(HELPER))}
@@ -35,6 +41,7 @@ source {shlex.quote(str(HELPER))}
         cwd=REPO_ROOT,
         capture_output=True,
         check=False,
+        env=env,
         text=True,
     )
 
@@ -174,7 +181,7 @@ def test_all_processed_writes_header_only_active_artifacts(tmp_path: Path) -> No
 
     assert paths[3].read_text(encoding="utf-8") == ACTIVE_HEADER
     assert paths[4].read_text(encoding="utf-8") == ACTIVE_DETAILS_HEADER
-    completed = run_helper("active_finding_id", paths[3])
+    completed = run_helper("active_finding_id", paths[3], paths[4])
     assert completed.returncode != 0
     assert completed.stdout == ""
 
@@ -465,9 +472,15 @@ def test_append_requires_valid_headers_without_modifying_reports(
 
 def test_active_finding_id_prints_the_only_valid_id(tmp_path: Path) -> None:
     active = tmp_path / "active-finding.tsv"
+    active_details = tmp_path / "active-finding-details.tsv"
     write_tsv(active, ACTIVE_HEADER, [("F0123", "major", "one active finding")])
+    write_tsv(
+        active_details,
+        ACTIVE_DETAILS_HEADER,
+        [detail_row(("F0123", "major", "one active finding"))],
+    )
 
-    completed = run_helper("active_finding_id", active)
+    completed = run_helper("active_finding_id", active, active_details)
 
     assert_ok(completed)
     assert completed.stdout == "F0123\n"
@@ -488,9 +501,83 @@ def test_active_finding_id_rejects_invalid_artifacts(
     tmp_path: Path, contents: str
 ) -> None:
     active = tmp_path / "active-finding.tsv"
+    active_details = tmp_path / "active-finding-details.tsv"
     active.write_text(contents, encoding="utf-8")
+    write_tsv(
+        active_details,
+        ACTIVE_DETAILS_HEADER,
+        [detail_row(("F0001", "major", "finding"))],
+    )
 
-    completed = run_helper("active_finding_id", active)
+    completed = run_helper("active_finding_id", active, active_details)
 
     assert completed.returncode != 0
     assert completed.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "details_finding",
+    [
+        ("F0002", "major", "finding"),
+        ("F0001", "minor", "finding"),
+        ("F0001", "major", "different finding"),
+    ],
+    ids=["id", "severity", "text"],
+)
+def test_active_finding_id_rejects_inconsistent_pair(
+    tmp_path: Path, details_finding: FindingRow
+) -> None:
+    active = tmp_path / "active-finding.tsv"
+    active_details = tmp_path / "active-finding-details.tsv"
+    write_tsv(active, ACTIVE_HEADER, [("F0001", "major", "finding")])
+    write_tsv(
+        active_details,
+        ACTIVE_DETAILS_HEADER,
+        [detail_row(details_finding)],
+    )
+
+    completed = run_helper("active_finding_id", active, active_details)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "Active finding artifacts are inconsistent" in completed.stderr
+
+
+def test_interrupted_active_publication_is_rejected_as_inconsistent(
+    tmp_path: Path,
+) -> None:
+    paths = prepare_inputs(tmp_path, [("F0002", "blocker", "new finding")])
+    old_finding = ("F0001", "major", "old finding")
+    write_tsv(paths[3], ACTIVE_HEADER, [old_finding])
+    write_tsv(paths[4], ACTIVE_DETAILS_HEADER, [detail_row(old_finding)])
+
+    wrapper_dir = tmp_path / "bin"
+    wrapper_dir.mkdir()
+    counter = tmp_path / "mv-count"
+    real_mv = shutil.which("mv")
+    assert real_mv is not None
+    mv_wrapper = wrapper_dir / "mv"
+    mv_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        f"counter={shlex.quote(str(counter))}\n"
+        "count=0\n"
+        "[[ ! -f \"$counter\" ]] || count=$(<\"$counter\")\n"
+        "count=$((count + 1))\n"
+        "printf '%s\\n' \"$count\" > \"$counter\"\n"
+        "[[ \"$count\" -ne 2 ]] || exit 86\n"
+        f"exec {shlex.quote(real_mv)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    mv_wrapper.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{wrapper_dir}{os.pathsep}{env['PATH']}"
+
+    completed = run_helper("write_next_active_finding", *paths, env=env)
+
+    assert completed.returncode != 0
+    assert "Failed to publish active finding commit marker" in completed.stderr
+    assert read_tsv(paths[3])[0]["finding_id"] == "F0001"
+    assert read_tsv(paths[4])[0]["finding_id"] == "F0002"
+    rejected = run_helper("active_finding_id", paths[3], paths[4])
+    assert rejected.returncode != 0
+    assert "Active finding artifacts are inconsistent" in rejected.stderr

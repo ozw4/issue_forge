@@ -540,7 +540,7 @@ run_fix_from_review_round() {
       "$fix_resolution_report" \
       "$active_finding" \
       "$active_finding_details"
-    if active_id="$(active_finding_id "$active_finding")"; then
+    if active_id="$(active_finding_id "$active_finding" "$active_finding_details")"; then
       active_status=0
     else
       active_status=$?

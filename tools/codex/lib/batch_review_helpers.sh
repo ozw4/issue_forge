@@ -374,7 +374,7 @@ reconcile_committed_batch_review_fix() {
     printf 'Cannot reconcile committed batch review fix: cumulative resolution state is invalid.\n' >&2
     return 1
   fi
-  if active_id="$(active_finding_id "$active_finding")"; then
+  if active_id="$(active_finding_id "$active_finding" "$active_finding_details")"; then
     printf 'Cannot reconcile committed batch review fix: finding %s lacks a cumulative resolution.\n' \
       "$active_id" >&2
     return 1
@@ -784,7 +784,9 @@ ensure_batch_review_accepted() {
               "$batch_fix_resolution" \
               "$batch_active_finding" \
               "$batch_active_finding_details"
-            if active_id="$(active_finding_id "$batch_active_finding")"; then
+            if active_id="$(
+              active_finding_id "$batch_active_finding" "$batch_active_finding_details"
+            )"; then
               active_status=0
             else
               active_status=$?

@@ -281,39 +281,80 @@ write_next_active_finding() {
     printf 'Active finding inputs are invalid.\n' >&2
     return 1
   fi
-  if ! mv -T -f -- "$active_temporary" "$active_file"; then
+  if ! mv -T -f -- "$active_details_temporary" "$active_details_file"; then
     rm -f -- "$active_temporary" "$active_details_temporary"
-    printf 'Failed to publish active finding: %s\n' "$active_file" >&2
+    printf 'Failed to publish active finding details: %s\n' "$active_details_file" >&2
     return 1
   fi
-  if ! mv -T -f -- "$active_details_temporary" "$active_details_file"; then
-    rm -f -- "$active_details_temporary"
-    printf 'Failed to publish active finding details: %s\n' "$active_details_file" >&2
+  if ! mv -T -f -- "$active_temporary" "$active_file"; then
+    rm -f -- "$active_temporary"
+    printf 'Failed to publish active finding commit marker: %s\n' "$active_file" >&2
     return 1
   fi
 }
 
 active_finding_id() {
   local active_file="$1"
+  local active_details_file="${2:-}"
+  local active_id
+  local active_status
 
   _finding_scheduler_require_regular_file "$active_file" 'Active finding' || return 1
+  _finding_scheduler_require_regular_file \
+    "$active_details_file" 'Active finding details' || return 1
   require_tsv_header "$active_file" "$ACTIVE_FINDING_HEADER" 'Active finding' || return 1
-  awk -F '\t' '
+  require_tsv_header \
+    "$active_details_file" "$ACTIVE_FINDING_DETAILS_HEADER" 'Active finding details' || return 1
+
+  if active_id="$(awk -F '\t' \
+    -v active_file="$active_file" \
+    -v active_details_file="$active_details_file" '
     function invalid() { failed = 1; exit 1 }
-    NR == 1 { next }
-    {
+    index($0, "\r") { invalid() }
+    FILENAME == active_file {
+      if (FNR == 1) next
       if (NF != 3 || $1 !~ /^F[0-9][0-9][0-9][0-9][0-9]*$/) invalid()
       if ($2 != "blocker" && $2 != "major" && $2 != "minor") invalid()
-      if ($3 == "" || index($0, "\r")) invalid()
-      row_count += 1
-      finding_id = $1
+      if ($3 == "") invalid()
+      active_count += 1
+      active_id = $1
+      active_severity = $2
+      active_text = $3
+      next
+    }
+    FILENAME == active_details_file {
+      if (FNR == 1) next
+      if (NF != 8 || $1 !~ /^F[0-9][0-9][0-9][0-9][0-9]*$/) invalid()
+      if ($2 != "blocker" && $2 != "major" && $2 != "minor") invalid()
+      for (column = 3; column <= 8; column++) {
+        if ($column == "") invalid()
+      }
+      details_count += 1
+      details_id = $1
+      details_severity = $2
+      details_text = $3
     }
     END {
-      if (failed || row_count > 1) exit 1
-      if (row_count == 0) exit 2
-      print finding_id
+      if (failed || active_count > 1 || details_count > 1) exit 1
+      if (active_count != details_count) exit 1
+      if (active_count == 0) exit 2
+      if (active_id != details_id \
+        || active_severity != details_severity \
+        || active_text != details_text) exit 1
+      print active_id
     }
-  ' "$active_file"
+  ' "$active_file" "$active_details_file")"; then
+    printf '%s\n' "$active_id"
+    return 0
+  else
+    active_status=$?
+  fi
+  if [[ "$active_status" -eq 2 ]]; then
+    return 2
+  fi
+  printf 'Active finding artifacts are inconsistent: %s and %s\n' \
+    "$active_file" "$active_details_file" >&2
+  return 1
 }
 
 finding_scheduler_state_digest() {
