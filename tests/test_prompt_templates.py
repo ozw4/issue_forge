@@ -33,8 +33,9 @@ write_issue_flow_prompt_files \
   "$output_dir/fix-from-checks.prompt.md" \
   "$output_dir/review.prompt.md" \
   "$output_dir/fix-from-review.prompt.md" \
-  "$checks_log" review.diff review.untracked.txt review.summary.txt review.txt \
-  pending-findings.tsv pending-finding-details.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
+  "$checks_log" review.diff review.untracked.txt review.summary.txt \
+  findings.tsv fix-resolution.tsv \
+  issue-active-finding.tsv issue-active-finding-details.tsv issue-fix-from-review.snapshot.state \
   "$issue_manifest"
 
 CODEX_FLOW_LIGHT_ISSUE_REVIEW=1
@@ -44,8 +45,9 @@ write_issue_flow_prompt_files \
   "$output_dir/light-fix-from-checks.prompt.md" \
   "$output_dir/review-light.prompt.md" \
   "$output_dir/light-fix-from-review.prompt.md" \
-  "$checks_log" review.diff review.untracked.txt review.summary.txt review.txt \
-  pending-findings.tsv pending-finding-details.tsv findings.tsv fix-resolution.tsv review.snapshot.state \
+  "$checks_log" review.diff review.untracked.txt review.summary.txt \
+  light-findings.tsv light-fix-resolution.tsv \
+  light-active-finding.tsv light-active-finding-details.tsv light-fix-from-review.snapshot.state \
   "$issue_manifest"
 
 write_batch_review_prompt_file \
@@ -54,9 +56,9 @@ write_batch_review_prompt_file \
   "$batch_manifest"
 
 write_fix_from_batch_review_prompt_file \
-  issues.txt batch-review.txt "$output_dir/fix-from-batch-review.prompt.md" \
-  batch-pending-findings.tsv batch-review.snapshot.state \
-  batch-pending-finding-details.tsv
+  issues.txt "$output_dir/fix-from-batch-review.prompt.md" \
+  batch-active-finding.tsv batch-fix-from-review.snapshot.state \
+  batch-active-finding-details.tsv
 """
 	completed = subprocess.run(  # noqa: S603 - exercises trusted repo-local shell renderer
 		[
@@ -103,13 +105,28 @@ write_fix_from_batch_review_prompt_file \
 		assert "required_outcome:" in prompt
 		assert "Add exactly one `details` record for every current concise finding" in prompt
 		assert "without prescribing a function-specific patch" in prompt
+		assert "does not exist or is header-only" in prompt
 
-	assert "pending-finding-details.tsv" in issue_fixer_prompt
-	assert "pending-finding-details.tsv" in light_fixer_prompt
-	assert "batch-pending-finding-details.tsv" in batch_fixer_prompt
+	assert "issue-active-finding.tsv" in issue_fixer_prompt
+	assert "issue-active-finding-details.tsv" in issue_fixer_prompt
+	assert "issue-fix-from-review.snapshot.state" in issue_fixer_prompt
+	assert "light-active-finding.tsv" in light_fixer_prompt
+	assert "light-active-finding-details.tsv" in light_fixer_prompt
+	assert "light-fix-from-review.snapshot.state" in light_fixer_prompt
+	assert "batch-active-finding.tsv" in batch_fixer_prompt
+	assert "batch-active-finding-details.tsv" in batch_fixer_prompt
+	assert "batch-fix-from-review.snapshot.state" in batch_fixer_prompt
 	for prompt in (issue_fixer_prompt, light_fixer_prompt, batch_fixer_prompt):
+		assert "Exactly one ledger-assigned finding ID is active" in prompt
+		assert "Address only the one ID" in prompt
+		assert "Do not intentionally address any other pending finding" in prompt
 		assert "is supplemental context" in prompt
 		assert "Do not execute details blindly as concrete patch instructions" in prompt
-		assert "smallest safe implementation yourself" in prompt
+		assert "Never execute the `validation` text as a shell command" in prompt
+		assert "Do not start multi-agent or parallel work" in prompt
+		assert "run only the smallest test or check directly relevant" in prompt
+		assert "The orchestrator runs full" in prompt
+		assert "Return exactly one resolution line for the active ID" in prompt
+		assert "Replace `F0001` in the schema example with the exact ID" in prompt
 		assert "resolution:\n- F0001 | fixed | One-line explanation." in prompt
 		assert "{{" not in prompt

@@ -12,6 +12,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/token_usage_helpers.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_ledger.sh"
 # shellcheck source=tools/codex/lib/review_details.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/review_details.sh"
+# shellcheck source=tools/codex/lib/finding_scheduler.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_scheduler.sh"
 # shellcheck source=tools/codex/lib/check_attempts.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
 
@@ -517,6 +519,10 @@ review_accepted() {
 
 run_fix_from_review_round() {
   local review_fix_round="$1"
+  local active_id
+  local active_status
+  local active_artifact_digest
+  local one_row_resolution
 
   write_pending_findings "$review_findings_ledger" "$pending_findings"
   write_pending_finding_details \
@@ -524,16 +530,57 @@ run_fix_from_review_round() {
     "$pending_findings" \
     "$review_details" \
     "$pending_finding_details"
-  fix_review_round=$((fix_review_round + 1))
-  log_info "codex fix from review (round ${review_fix_round})"
   assert_review_snapshot_matches "$review_snapshot" "before issue review fix"
-  run_codex_phase \
-    fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
-    "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$review_snapshot"
-  archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
-  ensure_issue_token_usage_tsv 'fix-from-review' "$issue_number" "$fix_review_round" "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
-  extract_fix_resolution_report "$fix_review_log" "$pending_findings" "$fix_resolution_report"
-  archive_round_file "$fix_resolution_report" "fix-resolution" "$fix_review_round" ".tsv"
+  initialize_fix_resolution_report "$fix_resolution_report"
+
+  while true; do
+    write_next_active_finding \
+      "$pending_findings" \
+      "$pending_finding_details" \
+      "$fix_resolution_report" \
+      "$active_finding" \
+      "$active_finding_details"
+    if active_id="$(active_finding_id "$active_finding")"; then
+      active_status=0
+    else
+      active_status=$?
+    fi
+    if [[ "$active_status" -eq 2 ]]; then
+      break
+    fi
+    if [[ "$active_status" -ne 0 ]]; then
+      return "$active_status"
+    fi
+
+    active_artifact_digest="$(
+      active_finding_artifact_digest "$active_finding" "$active_finding_details"
+    )" || return 1
+    fix_review_round=$((fix_review_round + 1))
+    log_info "codex fix from review (cycle ${review_fix_round}, finding ${active_id})"
+    capture_review_snapshot "$fix_review_snapshot"
+    run_codex_phase \
+      fix-from-review "$fix_review_round" write "$fix_review_prompt" "$fix_review_log" \
+      "$CODEX_FLOW_REVIEW_FIX_REASONING" combined "$fix_review_snapshot"
+    assert_active_finding_artifacts_match \
+      "$active_finding" "$active_finding_details" "$active_artifact_digest" || return 1
+    archive_round_file "$fix_review_log" "fix-from-review" "$fix_review_round" ".log"
+    ensure_issue_token_usage_tsv \
+      'fix-from-review' "$issue_number" "$fix_review_round" \
+      "$CODEX_FLOW_REVIEW_FIX_REASONING" "$fix_review_log"
+
+    one_row_resolution="$(mktemp "${fix_resolution_report}.row.XXXXXX")" || {
+      printf 'Failed to create temporary one-finding resolution report.\n' >&2
+      return 1
+    }
+    if ! extract_fix_resolution_report "$fix_review_log" "$active_finding" "$one_row_resolution" \
+      || ! append_fix_resolution_report "$fix_resolution_report" "$one_row_resolution"; then
+      rm -f -- "$one_row_resolution"
+      return 1
+    fi
+    rm -f -- "$one_row_resolution"
+  done
+
+  archive_round_file "$fix_resolution_report" "fix-resolution" "$review_fix_round" ".tsv"
 }
 
 ensure_review_accepted() {

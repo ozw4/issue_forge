@@ -401,6 +401,25 @@ def test_initial_review_requires_none_verification(tmp_path: Path) -> None:
     assert completed.returncode != 0
 
 
+def test_header_only_fix_report_has_no_claims_to_verify(tmp_path: Path) -> None:
+    review = tmp_path / "review.txt"
+    report = tmp_path / "fix-resolution.tsv"
+    output = tmp_path / "verification.tsv"
+    write_review(review)
+    report.write_text("finding_id\taction\tnote\n", encoding="utf-8")
+
+    completed = run_helper(
+        "extract_review_verification",
+        review,
+        tmp_path / "missing-ledger.tsv",
+        report,
+        output,
+    )
+
+    assert_ok(completed)
+    assert output.read_text(encoding="utf-8") == "finding_id\tresolution\tnote\n"
+
+
 def run_no_change_batch_fix(tmp_path: Path, action: str) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -uo pipefail
@@ -437,10 +456,14 @@ run_batch_review_once() {{
   fi
 }}
 write_fix_from_batch_review_prompt_file() {{
-  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
-  : > "$3"
+  [[ "$2" == "$batch_dir/fix-from-batch-review.prompt.md" ]]
+  [[ "$3" == "$batch_state_dir/active-finding.tsv" ]]
+  [[ "$4" == "$batch_dir/fix-from-batch-review.snapshot.state" ]]
+  [[ "$5" == "$batch_state_dir/active-finding-details.tsv" ]]
+  : > "$2"
 }}
 assert_review_snapshot_matches() {{ :; }}
+capture_review_snapshot() {{ : > "$1"; }}
 ensure_clean_worktree() {{ :; }}
 log_info() {{ printf '%s\n' "$1" >> "$batch_dir/events"; }}
 run_codex_batch_write() {{
@@ -519,6 +542,9 @@ batch_state_dir="$2"
 stop_after="$3"
 accepted_round="$4"
 CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS="$5"
+if [[ -d "$batch_state_dir/attempts/batch" ]]; then
+  CODEX_FLOW_AGENT_ATTEMPTS_ROOT="$batch_state_dir/attempts/batch"
+fi
 mkdir -p "$batch_dir/history" "$batch_state_dir/history"
 if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
   printf '%s\n' \
@@ -545,10 +571,14 @@ run_batch_review_once() {{
   fi
 }}
 write_fix_from_batch_review_prompt_file() {{
-  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
-  : > "$3"
+  [[ "$2" == "$batch_dir/fix-from-batch-review.prompt.md" ]]
+  [[ "$3" == "$batch_state_dir/active-finding.tsv" ]]
+  [[ "$4" == "$batch_dir/fix-from-batch-review.snapshot.state" ]]
+  [[ "$5" == "$batch_state_dir/active-finding-details.tsv" ]]
+  : > "$2"
 }}
 assert_review_snapshot_matches() {{ :; }}
+capture_review_snapshot() {{ : > "$1"; }}
 ensure_clean_worktree() {{ :; }}
 log_info() {{ :; }}
 run_codex_batch_write() {{
@@ -633,6 +663,7 @@ if [[ ! -f "$batch_state_dir/findings.tsv" ]]; then
   printf '%s\n' 'accept: no' > "$batch_dir/batch-review.txt"
   capture_review_snapshot "$snapshot"
   initialize_batch_review_lifecycle "$lifecycle_state"
+  prepare_batch_review_fix_cycle "$batch_dir" "$batch_state_dir"
   write_batch_review_lifecycle "$lifecycle_state" 1 1 fix
 fi
 
@@ -641,8 +672,11 @@ run_batch_review_once() {{
   printf '%s\n' 'accept: yes' > "$batch_dir/batch-review.txt"
 }}
 write_fix_from_batch_review_prompt_file() {{
-  [[ "$6" == "$batch_state_dir/pending-finding-details.tsv" ]]
-  : > "$3"
+  [[ "$2" == "$batch_dir/fix-from-batch-review.prompt.md" ]]
+  [[ "$3" == "$batch_state_dir/active-finding.tsv" ]]
+  [[ "$4" == "$batch_dir/fix-from-batch-review.snapshot.state" ]]
+  [[ "$5" == "$batch_state_dir/active-finding-details.tsv" ]]
+  : > "$2"
 }}
 ensure_clean_worktree() {{
   [[ -z "$(status_outside_work)" ]] || exit 1
@@ -693,6 +727,356 @@ def initialize_batch_commit_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "target.txt"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
     return repo
+
+
+def run_two_finding_batch_flow(
+    repo: Path, *, all_non_fixed: bool = False, mutate_active: bool = False
+) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPER))}
+source {shlex.quote(str(REVIEW_HELPER))}
+source {shlex.quote(str(SNAPSHOT_HELPER))}
+source {shlex.quote(str(BATCH_HELPER))}
+
+batch_dir="$PWD/.work/queue/batches/batch-1"
+batch_state_dir="$PWD/.work/queue/runs/run-a/batches/batch-1"
+batch_snapshot="$batch_dir/batch-review.snapshot.state"
+events="$batch_dir/events"
+all_non_fixed="$1"
+mutate_active="$2"
+CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
+CODEX_FLOW_WORKTREE_EXCLUDE_PATHS=(':(exclude).work')
+mkdir -p "$batch_dir/history" "$batch_state_dir/history"
+printf '%s\n' '#1 first issue' > "$batch_dir/issues.txt"
+printf '%s\n' \
+  $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
+  $'F0001\tmajor\t1\t1\tpresent\tunresolved\tmajor finding' \
+  $'F0002\tblocker\t1\t1\tpresent\tunresolved\tblocker finding' \
+  > "$batch_state_dir/findings.tsv"
+printf '%s\n' \
+  $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+  $'major\tmajor finding\tmajor evidence\tmajor impact\tmajor outcome\tnone\tmajor validation' \
+  $'blocker\tblocker finding\tblocker evidence\tblocker impact\tblocker outcome\tnone\tblocker validation' \
+  > "$batch_state_dir/review-details.tsv"
+cp -- \
+  "$batch_state_dir/review-details.tsv" \
+  "$batch_state_dir/history/review-details.round-01.tsv"
+capture_review_snapshot "$batch_snapshot"
+
+run_batch_review_once() {{
+  local round="$6"
+  local ids
+  if [[ "$round" -eq 1 ]]; then
+    printf 'review:1\n' >> "$events"
+    printf 'accept: no\n' > "$batch_dir/batch-review.txt"
+    return
+  fi
+  cmp -s -- "$batch_state_dir/fix-resolution.tsv" "$batch_dir/fix-resolution.tsv"
+  ids="$(awk -F '\t' 'NR > 1 {{ ids = ids (ids == "" ? "" : ",") $1 }} END {{ print ids }}' \
+    "$batch_state_dir/fix-resolution.tsv")"
+  [[ "$ids" == 'F0002,F0001' ]]
+  printf 'review:2:%s\n' "$ids" >> "$events"
+  printf 'accept: yes\n' > "$batch_dir/batch-review.txt"
+}}
+write_fix_from_batch_review_prompt_file() {{
+  local active_id
+  local detail_id
+  local active_severity
+  local detail_severity
+  local active_text
+  local detail_text
+  [[ "$2" == "$batch_dir/fix-from-batch-review.prompt.md" ]]
+  [[ "$3" == "$batch_state_dir/active-finding.tsv" ]]
+  [[ "$4" == "$batch_dir/fix-from-batch-review.snapshot.state" ]]
+  [[ "$5" == "$batch_state_dir/active-finding-details.tsv" ]]
+  [[ "$(wc -l < "$3")" -eq 2 ]]
+  [[ "$(wc -l < "$5")" -eq 2 ]]
+  IFS=$'\t' read -r active_id active_severity active_text < <(sed -n '2p' "$3")
+  IFS=$'\t' read -r detail_id detail_severity detail_text _ < <(sed -n '2p' "$5")
+  [[ "$active_id" == "$detail_id" ]]
+  [[ "$active_severity" == "$detail_severity" ]]
+  [[ "$active_text" == "$detail_text" ]]
+  printf 'active=%s\n' "$active_id" > "$2"
+}}
+ensure_clean_worktree() {{
+  [[ -z "$(status_outside_work)" ]]
+}}
+status_outside_work() {{
+  git status --porcelain --untracked-files=all -- . ':(exclude).work'
+}}
+log_info() {{ :; }}
+run_codex_batch_write() {{
+  local active_id
+  local validation
+  active_id="$(sed -n '2s/\t.*//p' "$batch_state_dir/active-finding.tsv")"
+  validation="$(awk -F '\t' 'NR == 2 {{ print $8 }}' "$batch_state_dir/active-finding-details.tsv")"
+  [[ "$1" == 'batch-fix-from-review' ]]
+  [[ "$3" == "$batch_dir/fix-from-batch-review.prompt.md" ]]
+  [[ "$6" == "$batch_dir/fix-from-batch-review.snapshot.state" ]]
+  if [[ "$active_id" == 'F0002' ]]; then
+    [[ "$2" -eq 1 && "$validation" == 'blocker validation' ]]
+    cp -- "$6" "$batch_dir/first-fix.snapshot.state"
+    if [[ "$mutate_active" -eq 1 ]]; then
+      printf '%s\n' \
+        $'finding_id\tseverity\ttext' \
+        $'F9999\tblocker\tmutated active finding' \
+        > "$batch_state_dir/active-finding.tsv"
+      printf 'resolution:\n- F9999 | fixed | mutated active claim\n' > "$4"
+    elif [[ "$all_non_fixed" -eq 1 ]]; then
+      printf 'resolution:\n- F0002 | false_positive | blocker invalid\n' > "$4"
+    else
+      printf '%s\n' fixed-by-F0002 > target.txt
+      printf 'resolution:\n- F0002 | fixed | blocker fixed\n' > "$4"
+    fi
+  elif [[ "$active_id" == 'F0001' ]]; then
+    [[ "$2" -eq 2 && "$validation" == 'major validation' ]]
+    if [[ "$all_non_fixed" -eq 1 ]]; then
+      [[ "$(_review_snapshot_read_expected_state "$batch_dir/first-fix.snapshot.state")" == \
+        "$(_review_snapshot_read_expected_state "$6")" ]]
+    else
+      [[ "$(_review_snapshot_read_expected_state "$batch_dir/first-fix.snapshot.state")" != \
+        "$(_review_snapshot_read_expected_state "$6")" ]]
+    fi
+    printf 'resolution:\n- F0001 | cannot_fix | major remains constrained\n' > "$4"
+  else
+    return 1
+  fi
+  printf 'fix:%s:%s\n' "$active_id" "$validation" >> "$events"
+}}
+ensure_batch_token_usage_tsv() {{ :; }}
+commit_issue_changes() {{
+  git add target.txt
+  git commit -m "$1" >/dev/null
+  printf 'commit\n' >> "$events"
+}}
+ensure_batch_checks_pass() {{
+  printf 'checks\n' >> "$events"
+}}
+
+ensure_batch_review_accepted \
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir" \
+  "$batch_state_dir/checks/batch.manifest.tsv"
+"""
+    return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
+        [
+            "bash",
+            "-c",
+            script,
+            "batch-two-finding-test",
+            "1" if all_non_fixed else "0",
+            "1" if mutate_active else "0",
+        ],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
+def test_batch_processes_two_active_findings_before_one_commit_and_checks(
+    tmp_path: Path,
+) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    batch_dir = repo / ".work" / "queue" / "batches" / "batch-1"
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    completed = run_two_finding_batch_flow(repo)
+
+    assert completed.returncode == 0, completed.stderr
+    assert (batch_dir / "events").read_text(encoding="utf-8").splitlines() == [
+        "review:1",
+        "fix:F0002:blocker validation",
+        "fix:F0001:major validation",
+        "commit",
+        "checks",
+        "review:2:F0002,F0001",
+    ]
+    assert read_tsv(state_dir / "fix-resolution.tsv") == [
+        {
+            "finding_id": "F0002",
+            "action": "fixed",
+            "note": "blocker fixed",
+        },
+        {
+            "finding_id": "F0001",
+            "action": "cannot_fix",
+            "note": "major remains constrained",
+        },
+    ]
+    assert (state_dir / "fix-resolution.tsv").read_bytes() == (
+        batch_dir / "fix-resolution.tsv"
+    ).read_bytes()
+    assert (state_dir / "history" / "fix-resolution.round-01.tsv").read_bytes() == (
+        batch_dir / "history" / "fix-resolution.round-01.tsv"
+    ).read_bytes()
+    assert sorted(path.name for path in batch_dir.glob("history/fix-from-batch-review.*.log")) == [
+        "fix-from-batch-review.round-01.log",
+        "fix-from-batch-review.round-02.log",
+    ]
+    assert (state_dir / "pending-findings.tsv").read_bytes() == (
+        batch_dir / "pending-findings.tsv"
+    ).read_bytes()
+    assert (state_dir / "pending-finding-details.tsv").read_bytes() == (
+        batch_dir / "pending-finding-details.tsv"
+    ).read_bytes()
+    assert (state_dir / "active-finding.tsv").read_text(encoding="utf-8") == (
+        "finding_id\tseverity\ttext\n"
+    )
+    assert (state_dir / "active-finding-details.tsv").read_text(encoding="utf-8") == (
+        "finding_id\tseverity\ttext\tevidence\timpact\trequired_outcome"
+        "\tconstraints\tvalidation\n"
+    )
+    assert not (batch_dir / "active-finding.tsv").exists()
+    assert not (batch_dir / "active-finding-details.tsv").exists()
+    assert (batch_dir / "fix-from-batch-review.snapshot.state").is_file()
+    assert not (state_dir / "fix-from-batch-review.snapshot.state").exists()
+    assert subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == "2"
+    assert subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == "chore: address batch review for issues #1-#1"
+    assert read_lifecycle_state(state_dir) | {"updated_at": "ignored"} == {
+        "schema_version": "1",
+        "review_round": "2",
+        "fix_round": "1",
+        "next_action": "complete",
+        "updated_at": "ignored",
+    }
+
+
+def test_batch_two_non_fixed_claims_skip_commit_and_checks(tmp_path: Path) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    batch_dir = repo / ".work" / "queue" / "batches" / "batch-1"
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    completed = run_two_finding_batch_flow(repo, all_non_fixed=True)
+
+    assert completed.returncode == 0, completed.stderr
+    events = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    assert events == [
+        "review:1",
+        "fix:F0002:blocker validation",
+        "fix:F0001:major validation",
+        "review:2:F0002,F0001",
+    ]
+    assert read_tsv(state_dir / "fix-resolution.tsv") == [
+        {
+            "finding_id": "F0002",
+            "action": "false_positive",
+            "note": "blocker invalid",
+        },
+        {
+            "finding_id": "F0001",
+            "action": "cannot_fix",
+            "note": "major remains constrained",
+        },
+    ]
+    assert subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == "1"
+
+
+def test_batch_rejects_active_artifact_mutation_by_fixer(tmp_path: Path) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    completed = run_two_finding_batch_flow(repo, mutate_active=True)
+
+    assert completed.returncode != 0
+    assert "Active finding artifacts changed during the Fixer invocation" in completed.stderr
+    assert (state_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
+
+
+def run_batch_with_inconsistent_active_details(
+    tmp_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPER))}
+source {shlex.quote(str(REVIEW_HELPER))}
+source {shlex.quote(str(BATCH_HELPER))}
+
+batch_dir="$1"
+batch_state_dir="$2"
+CODEX_FLOW_BATCH_REVIEW_MAX_FIX_ROUNDS=1
+mkdir -p "$batch_dir/history" "$batch_state_dir/history"
+printf '%s\n' \
+  $'finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext' \
+  $'F0001\tmajor\t1\t1\tpresent\tunresolved\tfinding A' \
+  > "$batch_state_dir/findings.tsv"
+printf '%s\n' \
+  $'severity\tfinding\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+  $'major\tfinding A\tevidence\timpact\toutcome\tnone\tvalidation' \
+  > "$batch_state_dir/review-details.tsv"
+: > "$batch_dir/batch-review.snapshot.state"
+
+run_batch_review_once() {{
+  printf 'accept: no\n' > "$batch_dir/batch-review.txt"
+}}
+write_pending_finding_details() {{
+  printf '%s\n' \
+    $'finding_id\tseverity\ttext\tevidence\timpact\trequired_outcome\tconstraints\tvalidation' \
+    $'F0001\tminor\tfinding A\tevidence\timpact\toutcome\tnone\tvalidation' \
+    > "$4"
+}}
+assert_review_snapshot_matches() {{ :; }}
+ensure_clean_worktree() {{ :; }}
+status_outside_work() {{ :; }}
+log_info() {{ :; }}
+write_fix_from_batch_review_prompt_file() {{
+  printf 'prompt\n' >> "$batch_dir/events"
+}}
+run_codex_batch_write() {{
+  printf 'fix\n' >> "$batch_dir/events"
+}}
+
+ensure_batch_review_accepted \
+  "$batch_dir" "$batch_dir/issues.txt" base 1 1 '#1' medium high high "$batch_state_dir" \
+  "$batch_state_dir/checks/batch.manifest.tsv"
+"""
+    return subprocess.run(  # noqa: S603 - exercises trusted repo-local shell flow
+        [
+            "bash",
+            "-c",
+            script,
+            "batch-active-details-mismatch-test",
+            str(tmp_path / "batch"),
+            str(tmp_path / "state"),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+
+def test_batch_inconsistent_active_details_fail_before_fixer(tmp_path: Path) -> None:
+    completed = run_batch_with_inconsistent_active_details(tmp_path)
+
+    assert completed.returncode != 0
+    assert "Active finding inputs are invalid" in completed.stderr
+    assert not (tmp_path / "batch" / "events").exists()
+    assert not (tmp_path / "batch" / "fix-resolution.tsv").exists()
+    assert not (tmp_path / "state" / "active-finding.tsv").exists()
+    assert (tmp_path / "state" / "fix-resolution.tsv").read_text(
+        encoding="utf-8"
+    ) == "finding_id\taction\tnote\n"
 
 
 @pytest.mark.parametrize(
@@ -761,6 +1145,8 @@ def test_batch_resume_reconciles_committed_fix_before_lifecycle_update(
     [
         "review-details.tsv",
         "history/review-details.round-01.tsv",
+        "history/fix-resolution.round-01.tsv",
+        "fix-resolution.tsv",
         "pending-findings.tsv",
         "pending-finding-details.tsv",
     ],
@@ -777,6 +1163,33 @@ def test_batch_resume_rejects_missing_details_artifacts_before_adopting_committe
     assert stopped.returncode == 86, stopped.stderr
     events_before_resume = (batch_dir / "events").read_bytes()
     (state_dir / missing_relative_path).unlink()
+
+    resumed = run_batch_commit_boundary(repo)
+
+    assert resumed.returncode != 0
+    assert "Cannot reconcile committed batch review fix" in resumed.stderr
+    assert (batch_dir / "events").read_bytes() == events_before_resume
+
+
+def test_batch_resume_rejects_malformed_fix_resolution_history(tmp_path: Path) -> None:
+    repo = initialize_batch_commit_repo(tmp_path)
+    batch_dir = repo / ".work" / "queue" / "batches" / "batch-1"
+    state_dir = repo / ".work" / "queue" / "runs" / "run-a" / "batches" / "batch-1"
+
+    stopped = run_batch_commit_boundary(repo, stop_after="after_batch_review_fix_commit")
+    assert stopped.returncode == 86, stopped.stderr
+    events_before_resume = (batch_dir / "events").read_bytes()
+    malformed_report = (
+        "finding_id\taction\tnote\n"
+        "F0001\tfixed\tapplied fix\n"
+        "F0001\tfixed\tduplicate claim\n"
+    )
+    (state_dir / "history" / "fix-resolution.round-01.tsv").write_text(
+        malformed_report, encoding="utf-8"
+    )
+    (state_dir / "fix-resolution.tsv").write_text(
+        malformed_report, encoding="utf-8"
+    )
 
     resumed = run_batch_commit_boundary(repo)
 
@@ -809,6 +1222,107 @@ def test_batch_resume_after_rejected_review_starts_with_fix(tmp_path: Path) -> N
     assert events.count("review:1") == 1
     assert events.count("fix:1") == 1
     assert events.count("review:2") == 1
+
+
+def test_batch_second_rejected_cycle_resets_cumulative_and_preserves_histories(
+    tmp_path: Path,
+) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+
+    completed = run_batch_lifecycle(
+        batch_dir,
+        state_dir,
+        accepted_round=3,
+        max_fix_rounds=2,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (batch_dir / "events").read_text(encoding="utf-8").splitlines() == [
+        "review:1",
+        "fix:1",
+        "review:2",
+        "fix:2",
+        "review:3",
+    ]
+    expected_report = (
+        "finding_id\taction\tnote\n"
+        "F0001\tfalse_positive\treviewed claim\n"
+    )
+    assert (state_dir / "fix-resolution.tsv").read_text(
+        encoding="utf-8"
+    ) == expected_report
+    for round_number in (1, 2):
+        run_owned_history = (
+            state_dir / "history" / f"fix-resolution.round-{round_number:02d}.tsv"
+        )
+        compatibility_history = (
+            batch_dir / "history" / f"fix-resolution.round-{round_number:02d}.tsv"
+        )
+        assert run_owned_history.read_text(encoding="utf-8") == expected_report
+        assert compatibility_history.read_bytes() == run_owned_history.read_bytes()
+    assert sorted(
+        path.name for path in batch_dir.glob("history/fix-from-batch-review.round-*.log")
+    ) == [
+        "fix-from-batch-review.round-01.log",
+        "fix-from-batch-review.round-02.log",
+    ]
+    assert read_lifecycle_state(state_dir) | {"updated_at": "ignored"} == {
+        "schema_version": "1",
+        "review_round": "3",
+        "fix_round": "2",
+        "next_action": "complete",
+        "updated_at": "ignored",
+    }
+
+
+def test_compatibility_fix_logs_do_not_choose_next_fixer_invocation_round(
+    tmp_path: Path,
+) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+    fake_log = batch_dir / "history" / "fix-from-batch-review.round-99.log"
+    fake_log.parent.mkdir(parents=True)
+    fake_log.write_text("non-authoritative compatibility data\n", encoding="utf-8")
+
+    completed = run_batch_lifecycle(batch_dir, state_dir)
+
+    assert completed.returncode == 0, completed.stderr
+    events = (batch_dir / "events").read_text(encoding="utf-8").splitlines()
+    assert events == ["review:1", "fix:1", "review:2"]
+    assert (batch_dir / "history" / "fix-from-batch-review.round-01.log").is_file()
+
+
+def test_batch_resume_refuses_to_repeat_unmatched_run_owned_fixer_attempt(
+    tmp_path: Path,
+) -> None:
+    batch_dir = tmp_path / "compat" / "batch-1"
+    state_dir = tmp_path / "run-a" / "batches" / "batch-1"
+    attempt_dir = (
+        state_dir
+        / "attempts"
+        / "batch"
+        / "batch-fix-from-review"
+        / "attempt-0001"
+    )
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "request.state").write_text(
+        "schema_version\t1\n"
+        "attempt_id\tattempt-0001\n"
+        "operation\tbatch-fix-from-review\n"
+        "round\t1\n"
+        "mode\twrite\n"
+        "started_at\t2026-08-21T00:00:00Z\n",
+        encoding="utf-8",
+    )
+
+    completed = run_batch_lifecycle(batch_dir, state_dir)
+
+    assert completed.returncode != 0
+    assert "refusing to repeat an active finding" in completed.stderr
+    assert (batch_dir / "events").read_text(encoding="utf-8").splitlines() == [
+        "review:1"
+    ]
 
 
 def test_batch_resume_after_fix_starts_with_next_review(tmp_path: Path) -> None:

@@ -129,9 +129,12 @@ review_details="${CODEX_FLOW_CODEX_DIR}/review-details.tsv"
 review_findings_ledger="${CODEX_FLOW_CODEX_DIR}/findings.tsv"
 pending_findings="${CODEX_FLOW_CODEX_DIR}/pending-findings.tsv"
 pending_finding_details="${CODEX_FLOW_CODEX_DIR}/pending-finding-details.tsv"
+active_finding="${CODEX_FLOW_CODEX_DIR}/active-finding.tsv"
+active_finding_details="${CODEX_FLOW_CODEX_DIR}/active-finding-details.tsv"
 fix_resolution_report="${CODEX_FLOW_CODEX_DIR}/fix-resolution.tsv"
 review_verification="${CODEX_FLOW_CODEX_DIR}/review-verification.tsv"
 review_snapshot="${CODEX_FLOW_CODEX_DIR}/review.snapshot.state"
+fix_review_snapshot="${CODEX_FLOW_CODEX_DIR}/fix-from-review.snapshot.state"
 fix_review_log="${CODEX_FLOW_CODEX_DIR}/fix-from-review.log"
 history_dir="$CODEX_FLOW_CODEX_HISTORY_DIR"
 
@@ -151,12 +154,11 @@ write_issue_flow_prompt_files \
   "$review_diff" \
   "$review_untracked" \
   "$review_summary" \
-  "$review_output" \
-  "$pending_findings" \
-  "$pending_finding_details" \
   "$review_findings_ledger" \
   "$fix_resolution_report" \
-  "$review_snapshot" \
+  "$active_finding" \
+  "$active_finding_details" \
+  "$fix_review_snapshot" \
   "$CODEX_FLOW_CHECKS_MANIFEST"
 
 run_implementation_phase

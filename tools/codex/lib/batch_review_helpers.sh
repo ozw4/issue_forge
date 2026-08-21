@@ -10,6 +10,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent_attempts.sh"
 if ! declare -F run_check_attempt >/dev/null 2>&1; then
   source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_attempts.sh"
 fi
+# shellcheck source=tools/codex/lib/finding_scheduler.sh
+if ! declare -F write_next_active_finding >/dev/null 2>&1; then
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/finding_scheduler.sh"
+fi
 
 generate_batch_review_material() {
   local base_commit="$1"
@@ -306,6 +310,9 @@ reconcile_committed_batch_review_fix() {
   local pending_findings="${batch_state_dir}/pending-findings.tsv"
   local review_details="${batch_state_dir}/review-details.tsv"
   local pending_finding_details="${batch_state_dir}/pending-finding-details.tsv"
+  local fix_resolution="${batch_state_dir}/fix-resolution.tsv"
+  local active_finding="${batch_state_dir}/active-finding.tsv"
+  local active_finding_details="${batch_state_dir}/active-finding-details.tsv"
   local review_details_history
   local review_fix_subject="chore: address batch review for issues #${first_issue}-#${last_issue}"
   local checks_fix_subject="chore: address batch checks for issues #${first_issue}-#${last_issue}"
@@ -314,6 +321,8 @@ reconcile_committed_batch_review_fix() {
   local previous_commit
   local subject
   local commit_index=0
+  local active_id
+  local active_status
 
   printf -v resolution_history '%s/history/fix-resolution.round-%02d.tsv' \
     "$batch_state_dir" "$review_fix_round"
@@ -323,6 +332,23 @@ reconcile_committed_batch_review_fix() {
   if [[ ! -f "$resolution_history" ]]; then
     printf 'Cannot reconcile committed batch review fix: resolution history is missing: %s\n' \
       "$resolution_history" >&2
+    return 1
+  fi
+  if ! _finding_scheduler_require_regular_file \
+    "$resolution_history" 'Run-owned fix resolution history'; then
+    printf 'Cannot reconcile committed batch review fix: resolution history is invalid: %s\n' \
+      "$resolution_history" >&2
+    return 1
+  fi
+  if ! _finding_scheduler_require_regular_file \
+    "$fix_resolution" 'Run-owned cumulative fix resolution report'; then
+    printf 'Cannot reconcile committed batch review fix: current resolution report is invalid: %s\n' \
+      "$fix_resolution" >&2
+    return 1
+  fi
+  if ! cmp -s -- "$fix_resolution" "$resolution_history"; then
+    printf 'Cannot reconcile committed batch review fix: current resolution report differs from round %s history.\n' \
+      "$review_fix_round" >&2
     return 1
   fi
   if [[ ! -f "$review_details_history" ]]; then
@@ -337,6 +363,26 @@ reconcile_committed_batch_review_fix() {
     "$pending_finding_details"; then
     printf 'Cannot reconcile committed batch review fix: pending finding details are invalid: %s\n' \
       "$pending_finding_details" >&2
+    return 1
+  fi
+  if ! write_next_active_finding \
+    "$pending_findings" \
+    "$pending_finding_details" \
+    "$fix_resolution" \
+    "$active_finding" \
+    "$active_finding_details"; then
+    printf 'Cannot reconcile committed batch review fix: cumulative resolution state is invalid.\n' >&2
+    return 1
+  fi
+  if active_id="$(active_finding_id "$active_finding")"; then
+    printf 'Cannot reconcile committed batch review fix: finding %s lacks a cumulative resolution.\n' \
+      "$active_id" >&2
+    return 1
+  else
+    active_status=$?
+  fi
+  if [[ "$active_status" -ne 2 ]]; then
+    printf 'Cannot reconcile committed batch review fix: active finding state is invalid.\n' >&2
     return 1
   fi
   if ! validate_pending_finding_details_artifact \
@@ -477,6 +523,146 @@ run_batch_review_once() {
   cp -- "$batch_review_verification" "${batch_dir}/review-verification.tsv"
 }
 
+prepare_batch_review_fix_cycle() {
+  local batch_dir="$1"
+  local batch_state_dir="$2"
+  local batch_findings_ledger="${batch_state_dir}/findings.tsv"
+  local batch_review_details="${batch_state_dir}/review-details.tsv"
+  local batch_pending_findings="${batch_state_dir}/pending-findings.tsv"
+  local batch_pending_finding_details="${batch_state_dir}/pending-finding-details.tsv"
+  local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
+
+  write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
+  write_pending_finding_details \
+    "$batch_findings_ledger" \
+    "$batch_pending_findings" \
+    "$batch_review_details" \
+    "$batch_pending_finding_details"
+  initialize_fix_resolution_report "$batch_fix_resolution"
+  cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
+  cp -- "$batch_pending_finding_details" "${batch_dir}/pending-finding-details.tsv"
+}
+
+batch_fix_attempt_max_round() {
+  local attempts_root="${CODEX_FLOW_AGENT_ATTEMPTS_ROOT:-}"
+  local operation_dir
+  local attempt_dir
+  local attempt_name
+  local expected_attempt_id
+  local request_file
+  local request_round
+  local max_round=0
+  local attempt_count=0
+  local -A seen_rounds=()
+
+  if [[ -z "$attempts_root" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  operation_dir="${attempts_root}/batch-fix-from-review"
+  if [[ ! -e "$operation_dir" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  if [[ ! -d "$operation_dir" || -L "$operation_dir" ]]; then
+    printf 'Batch Fixer attempt directory is invalid: %s\n' "$operation_dir" >&2
+    return 1
+  fi
+
+  for attempt_dir in "${operation_dir}"/attempt-*; do
+    [[ -e "$attempt_dir" ]] || continue
+    attempt_name="${attempt_dir##*/}"
+    if [[ ! "$attempt_name" =~ ^attempt-[0-9]+(\.running)?$ ]]; then
+      continue
+    fi
+    if [[ ! -d "$attempt_dir" || -L "$attempt_dir" ]]; then
+      printf 'Batch Fixer attempt is invalid: %s\n' "$attempt_dir" >&2
+      return 1
+    fi
+    request_file="${attempt_dir}/request.state"
+    if [[ ! -f "$request_file" || -L "$request_file" ]]; then
+      printf 'Batch Fixer attempt request is missing or invalid: %s\n' "$request_file" >&2
+      return 1
+    fi
+    expected_attempt_id="${attempt_name%.running}"
+    if ! request_round="$(awk -F '\t' -v expected_attempt_id="$expected_attempt_id" '
+      NF != 2 { exit 1 }
+      NR == 1 && ($1 != "schema_version" || $2 != "1") { exit 1 }
+      NR == 2 && ($1 != "attempt_id" || $2 != expected_attempt_id) { exit 1 }
+      NR == 3 && ($1 != "operation" || $2 != "batch-fix-from-review") { exit 1 }
+      NR == 4 && ($1 != "round" || $2 !~ /^[1-9][0-9]*$/) { exit 1 }
+      NR == 5 && ($1 != "mode" || $2 != "write") { exit 1 }
+      NR == 6 && ($1 != "started_at" || $2 == "") { exit 1 }
+      NR > 6 { exit 1 }
+      NR == 4 { round = $2 }
+      END {
+        if (NR != 6) exit 1
+        print round
+      }
+    ' "$request_file")"; then
+      printf 'Batch Fixer attempt request is invalid: %s\n' "$request_file" >&2
+      return 1
+    fi
+    if [[ -n "${seen_rounds[$request_round]:-}" ]]; then
+      printf 'Batch Fixer attempt round is duplicated: %s\n' "$request_round" >&2
+      return 1
+    fi
+    seen_rounds[$request_round]=1
+    attempt_count=$((attempt_count + 1))
+    if [[ "$request_round" -gt "$max_round" ]]; then
+      max_round="$request_round"
+    fi
+  done
+
+  if [[ "$attempt_count" -ne "$max_round" ]]; then
+    printf 'Batch Fixer attempt rounds are not contiguous in: %s\n' "$operation_dir" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$max_round"
+}
+
+batch_completed_fix_invocation_count() {
+  local batch_state_dir="$1"
+  local current_round="$2"
+  local current_resolution="${batch_state_dir}/fix-resolution.tsv"
+  local resolution_history
+  local history_name
+  local history_round
+  local row_count
+  local total=0
+
+  for resolution_history in "${batch_state_dir}/history"/fix-resolution.round-*.tsv; do
+    [[ -e "$resolution_history" ]] || continue
+    history_name="${resolution_history##*/}"
+    if [[ ! "$history_name" =~ ^fix-resolution\.round-([0-9]+)\.tsv$ ]]; then
+      continue
+    fi
+    history_round=$((10#${BASH_REMATCH[1]}))
+    if [[ "$history_round" -ge "$current_round" ]]; then
+      continue
+    fi
+    _finding_scheduler_require_regular_file \
+      "$resolution_history" 'Run-owned fix resolution history' || return 1
+    if ! _validate_fix_resolution_report "$resolution_history"; then
+      printf 'Run-owned fix resolution history is invalid: %s\n' "$resolution_history" >&2
+      return 1
+    fi
+    row_count="$(awk 'END { print NR - 1 }' "$resolution_history")"
+    total=$((total + row_count))
+  done
+
+  _finding_scheduler_require_regular_file \
+    "$current_resolution" 'Run-owned cumulative fix resolution report' || return 1
+  if ! _validate_fix_resolution_report "$current_resolution"; then
+    printf 'Run-owned cumulative fix resolution report is invalid: %s\n' \
+      "$current_resolution" >&2
+    return 1
+  fi
+  row_count="$(awk 'END { print NR - 1 }' "$current_resolution")"
+  printf '%s\n' "$((total + row_count))"
+}
+
 ensure_batch_review_accepted() {
   local batch_dir="$1"
   local issues_file="$2"
@@ -493,10 +679,13 @@ ensure_batch_review_accepted() {
   local fix_review_prompt="${batch_dir}/fix-from-batch-review.prompt.md"
   local fix_review_log="${batch_dir}/fix-from-batch-review.log"
   local batch_review_snapshot="${batch_dir}/batch-review.snapshot.state"
+  local fix_review_snapshot="${batch_dir}/fix-from-batch-review.snapshot.state"
   local batch_findings_ledger="${batch_state_dir}/findings.tsv"
   local batch_pending_findings="${batch_state_dir}/pending-findings.tsv"
   local batch_review_details="${batch_state_dir}/review-details.tsv"
   local batch_pending_finding_details="${batch_state_dir}/pending-finding-details.tsv"
+  local batch_active_finding="${batch_state_dir}/active-finding.tsv"
+  local batch_active_finding_details="${batch_state_dir}/active-finding-details.tsv"
   local batch_fix_resolution="${batch_state_dir}/fix-resolution.tsv"
   local batch_state_history_dir="${batch_state_dir}/history"
   local lifecycle_state="${batch_state_dir}/review-lifecycle.state"
@@ -505,6 +694,13 @@ ensure_batch_review_accepted() {
   local next_action
   local fix_commit_reconciled
   local run_fix_checks
+  local fix_invocation_round=0
+  local completed_fix_invocations
+  local recorded_fix_attempt_round
+  local active_id
+  local active_status
+  local active_artifact_digest
+  local one_row_resolution
   local history_dir="${batch_dir}/history"
 
   mkdir -p "$history_dir"
@@ -528,6 +724,7 @@ ensure_batch_review_accepted() {
           fi
         else
           review_fix_round="$review_round"
+          prepare_batch_review_fix_cycle "$batch_dir" "$batch_state_dir"
           write_batch_review_lifecycle "$lifecycle_state" "$review_round" "$review_fix_round" fix
           if declare -F queue_failpoint >/dev/null 2>&1; then
             queue_failpoint after_batch_review_lifecycle_fix
@@ -558,29 +755,85 @@ ensure_batch_review_accepted() {
         fi
 
         if [[ "$fix_commit_reconciled" -eq 0 ]]; then
-          write_pending_findings "$batch_findings_ledger" "$batch_pending_findings"
-          write_pending_finding_details \
+          validate_pending_finding_details_artifact \
             "$batch_findings_ledger" \
             "$batch_pending_findings" \
             "$batch_review_details" \
             "$batch_pending_finding_details"
-          cp -- "$batch_pending_findings" "${batch_dir}/pending-findings.tsv"
-          cp -- "$batch_pending_finding_details" "${batch_dir}/pending-finding-details.tsv"
-          write_fix_from_batch_review_prompt_file \
-            "$issues_file" \
-            "$batch_review_output" \
-            "$fix_review_prompt" \
-            "$batch_pending_findings" \
-            "$batch_review_snapshot" \
-            "$batch_pending_finding_details"
+          assert_review_snapshot_matches "$batch_review_snapshot" "before batch review fix"
           ensure_clean_worktree 'Working tree must be clean before batch review fix.'
-          log_info "codex fix from batch review (round ${review_fix_round})"
-          run_codex_batch_write \
-            batch-fix-from-review "$review_fix_round" "$fix_review_prompt" "$fix_review_log" \
-            "$review_fix_effort" "$batch_review_snapshot"
-          archive_round_file "$fix_review_log" 'fix-from-batch-review' "$review_fix_round" '.log'
-          ensure_batch_token_usage_tsv "$batch_dir" 'fix-from-batch-review' "$issues_label" "$review_fix_round" "$review_fix_effort" "$fix_review_log"
-          extract_fix_resolution_report "$fix_review_log" "$batch_pending_findings" "$batch_fix_resolution"
+
+          completed_fix_invocations="$(
+            batch_completed_fix_invocation_count "$batch_state_dir" "$review_fix_round"
+          )" || return 1
+          if [[ -n "${CODEX_FLOW_AGENT_ATTEMPTS_ROOT:-}" ]]; then
+            recorded_fix_attempt_round="$(batch_fix_attempt_max_round)" || return 1
+            if [[ "$recorded_fix_attempt_round" -ne "$completed_fix_invocations" ]]; then
+              printf 'Batch Fixer attempt state does not match cumulative resolutions; refusing to repeat an active finding.\n' >&2
+              return 1
+            fi
+            fix_invocation_round="$recorded_fix_attempt_round"
+          elif [[ "$completed_fix_invocations" -gt "$fix_invocation_round" ]]; then
+            fix_invocation_round="$completed_fix_invocations"
+          fi
+
+          while true; do
+            write_next_active_finding \
+              "$batch_pending_findings" \
+              "$batch_pending_finding_details" \
+              "$batch_fix_resolution" \
+              "$batch_active_finding" \
+              "$batch_active_finding_details"
+            if active_id="$(active_finding_id "$batch_active_finding")"; then
+              active_status=0
+            else
+              active_status=$?
+            fi
+            if [[ "$active_status" -eq 2 ]]; then
+              break
+            fi
+            if [[ "$active_status" -ne 0 ]]; then
+              return "$active_status"
+            fi
+
+            active_artifact_digest="$(
+              active_finding_artifact_digest \
+                "$batch_active_finding" "$batch_active_finding_details"
+            )" || return 1
+            fix_invocation_round=$((fix_invocation_round + 1))
+            capture_review_snapshot "$fix_review_snapshot"
+            write_fix_from_batch_review_prompt_file \
+              "$issues_file" \
+              "$fix_review_prompt" \
+              "$batch_active_finding" \
+              "$fix_review_snapshot" \
+              "$batch_active_finding_details"
+            log_info "codex fix from batch review (cycle ${review_fix_round}, finding ${active_id})"
+            run_codex_batch_write \
+              batch-fix-from-review "$fix_invocation_round" "$fix_review_prompt" "$fix_review_log" \
+              "$review_fix_effort" "$fix_review_snapshot"
+            assert_active_finding_artifacts_match \
+              "$batch_active_finding" "$batch_active_finding_details" \
+              "$active_artifact_digest" || return 1
+            archive_round_file \
+              "$fix_review_log" 'fix-from-batch-review' "$fix_invocation_round" '.log'
+            ensure_batch_token_usage_tsv \
+              "$batch_dir" 'fix-from-batch-review' "$issues_label" "$fix_invocation_round" \
+              "$review_fix_effort" "$fix_review_log"
+
+            one_row_resolution="$(mktemp "${batch_fix_resolution}.row.XXXXXX")" || {
+              printf 'Failed to create temporary one-finding Batch resolution report.\n' >&2
+              return 1
+            }
+            if ! extract_fix_resolution_report \
+              "$fix_review_log" "$batch_active_finding" "$one_row_resolution" \
+              || ! append_fix_resolution_report "$batch_fix_resolution" "$one_row_resolution"; then
+              rm -f -- "$one_row_resolution"
+              return 1
+            fi
+            rm -f -- "$one_row_resolution"
+          done
+
           history_dir="$batch_state_history_dir"
           archive_round_file "$batch_fix_resolution" 'fix-resolution' "$review_fix_round" '.tsv'
           cp -- "$batch_fix_resolution" "${batch_dir}/fix-resolution.tsv"

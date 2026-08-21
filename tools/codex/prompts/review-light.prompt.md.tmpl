@@ -49,10 +49,10 @@ Rules:
 - `evidence` must state facts actually observed in the supplied material. `impact` states the incorrect behavior or broken invariant. `required_outcome` states a verifiable postcondition rather than a patch design. `constraints` preserves contract and scope. `validation` states a test, scenario, or check without inventing existing coverage.
 - Explain the problem and required outcome without prescribing a function-specific patch, command rewrite, class, or data-structure migration unless the repository contract leaves only one valid implementation.
 - If there are no current findings, output exactly `details:` followed by `- none`. If any current finding exists, `- none` is forbidden in `details`.
-- If the fix resolution artifact exists, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
+- If the fix resolution artifact contains data rows, verify every listed finding ID exactly once against the reviewed snapshot and review material. Do not trust the Fixer action by itself.
 - Return `resolved`, `invalid`, or `unresolved` for each verified ID, with a one-line note without literal tabs or the literal delimiter ` | `.
 - For `unresolved`, repeat the ledger finding text exactly in the current blocker/major/minor sections. For `resolved` or `invalid`, do not repeat that text there.
-- Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist, output only `- none` under `verification:`.
+- Do not report unknown or duplicate finding IDs. If the fix resolution artifact does not exist or is header-only, output only `- none` under `verification:`.
 
 Return exactly this format and nothing else:
 

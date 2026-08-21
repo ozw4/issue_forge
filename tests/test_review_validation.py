@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import csv
 import shlex
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVIEW_HELPERS = REPO_ROOT / "tools" / "codex" / "lib" / "checks_review_helpers.sh"
 HISTORY_HELPERS = REPO_ROOT / "tools" / "codex" / "lib" / "history_helpers.sh"
 LEDGER_HEADER = "finding_id\tseverity\tfirst_round\tlast_seen_round\tstatus\tresolution\ttext\n"
+BLOCKER_FINDING = "blocker finding"
+MAJOR_FINDING = "major finding"
 
 
 def write_review(
@@ -81,6 +86,11 @@ def run_bash(script: str, *args: Path | str) -> subprocess.CompletedProcess[str]
         check=False,
         text=True,
     )
+
+
+def read_tsv(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8", newline="") as stream:
+        return list(csv.DictReader(stream, delimiter="\t"))
 
 
 def run_review_round(
@@ -169,6 +179,149 @@ else
 fi
 """
     return run_bash(script, review_fixture, work_dir, "flow" if full_flow else "round")
+
+
+def write_two_finding_ledger(path: Path) -> None:
+    path.write_text(
+        LEDGER_HEADER
+        + f"F0001\tmajor\t1\t1\tpresent\tunresolved\t{MAJOR_FINDING}\n"
+        + f"F0002\tblocker\t1\t1\tpresent\tunresolved\t{BLOCKER_FINDING}\n",
+        encoding="utf-8",
+    )
+
+
+def run_active_finding_flow(
+    fixtures_dir: Path,
+    work_dir: Path,
+    *,
+    actions: tuple[str, ...],
+    max_fix_rounds: int,
+) -> subprocess.CompletedProcess[str]:
+    actions_file = fixtures_dir / "fix-actions.txt"
+    actions_file.write_text("\n".join(actions) + "\n", encoding="utf-8")
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(HISTORY_HELPERS))}
+source {shlex.quote(str(REVIEW_HELPERS))}
+
+fixtures_dir="$1"
+work_dir="$2"
+actions_file="$3"
+history_dir="${{work_dir}}/history"
+events="${{work_dir}}/events.log"
+active_observations="${{work_dir}}/active-observations.tsv"
+mkdir -p "$history_dir"
+
+review_diff="${{work_dir}}/review.diff"
+review_untracked="${{work_dir}}/review.untracked.txt"
+review_summary="${{work_dir}}/review.summary.txt"
+review_snapshot="${{work_dir}}/review.snapshot.state"
+fix_review_snapshot="${{work_dir}}/fix-from-review.snapshot.state"
+review_prompt="${{work_dir}}/review.prompt.md"
+fix_review_prompt="${{work_dir}}/fix-from-review.prompt.md"
+review_raw_output="${{work_dir}}/review.raw.txt"
+review_output="${{work_dir}}/review.txt"
+review_details="${{work_dir}}/review-details.tsv"
+review_findings_ledger="${{work_dir}}/findings.tsv"
+pending_findings="${{work_dir}}/pending-findings.tsv"
+pending_finding_details="${{work_dir}}/pending-finding-details.tsv"
+active_finding="${{work_dir}}/active-finding.tsv"
+active_finding_details="${{work_dir}}/active-finding-details.tsv"
+fix_resolution_report="${{work_dir}}/fix-resolution.tsv"
+review_verification="${{work_dir}}/review-verification.tsv"
+fix_review_log="${{work_dir}}/fix-from-review.log"
+review_run_round=0
+fix_review_round=0
+snapshot_sequence=0
+issue_number=1
+CODEX_FLOW_REVIEW_REASONING=medium
+CODEX_FLOW_REVIEW_FIX_REASONING=high
+CODEX_FLOW_MAX_REVIEW_FIX_ROUNDS="$4"
+
+log_info() {{ :; }}
+log_fail_with_path() {{ printf '%s: %s\n' "$1" "$2" >&2; }}
+generate_review_material() {{
+  : > "$review_diff"
+  : > "$review_untracked"
+  : > "$review_summary"
+}}
+capture_review_snapshot() {{
+  snapshot_sequence=$((snapshot_sequence + 1))
+  printf 'snapshot-%s\n' "$snapshot_sequence" > "$1"
+}}
+assert_review_snapshot_matches() {{ [[ -f "$1" ]]; }}
+ensure_issue_token_usage_tsv() {{ :; }}
+ensure_checks_pass() {{ printf 'full-checks\n' >> "$events"; }}
+run_codex_phase() {{
+  local operation="$1"
+  local invocation="$2"
+  local output_file="$5"
+  local snapshot_file="${{8:-}}"
+  local fixture action active_id active_severity active_text
+  local detail_id detail_severity detail_text evidence impact required_outcome constraints validation
+  local -a active_rows=() detail_rows=()
+
+  if [[ "$operation" == review ]]; then
+    fixture="${{fixtures_dir}}/review-${{invocation}}.txt"
+    [[ -f "$fixture" ]]
+    printf 'review\n' >> "$events"
+    cp -- "$fixture" "$output_file"
+    return 0
+  fi
+
+  [[ "$operation" == fix-from-review ]]
+  [[ "$snapshot_file" == "$fix_review_snapshot" && -f "$snapshot_file" ]]
+  mapfile -t active_rows < <(tail -n +2 -- "$active_finding")
+  mapfile -t detail_rows < <(tail -n +2 -- "$active_finding_details")
+  [[ "${{#active_rows[@]}}" -eq 1 && "${{#detail_rows[@]}}" -eq 1 ]]
+  IFS=$'\t' read -r active_id active_severity active_text <<< "${{active_rows[0]}}"
+  IFS=$'\t' read -r \
+    detail_id detail_severity detail_text evidence impact required_outcome constraints validation \
+    <<< "${{detail_rows[0]}}"
+  [[ "$active_id" == "$detail_id" ]]
+  [[ "$active_severity" == "$detail_severity" ]]
+  [[ "$active_text" == "$detail_text" ]]
+  printf 'fix:%s\n' "$active_id" >> "$events"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$invocation" "$active_id" "$(( ${{#active_rows[@]}} + 1 ))" \
+    "$(( ${{#detail_rows[@]}} + 1 ))" "$detail_id" "$active_severity" \
+    "$active_text" "$(< "$snapshot_file")" >> "$active_observations"
+
+  action="$(sed -n "${{invocation}}p" "$actions_file")"
+  case "$action" in
+    fixed|false_positive|cannot_fix)
+      printf 'resolution:\n- %s | %s | claim for %s\n' "$active_id" "$action" "$active_id" > "$output_file"
+      ;;
+    wrong)
+      printf 'resolution:\n- F9999 | fixed | inactive claim\n' > "$output_file"
+      ;;
+    multiple)
+      printf 'resolution:\n- %s | fixed | active claim\n- F9999 | fixed | extra claim\n' \
+        "$active_id" > "$output_file"
+      ;;
+    mutate_active)
+      printf '%s\n' \
+        $'finding_id\tseverity\ttext' \
+        $'F9999\tmajor\tmutated active finding' \
+        > "$active_finding"
+      printf 'resolution:\n- F9999 | fixed | mutated active claim\n' > "$output_file"
+      ;;
+    *)
+      printf 'Missing Fixer action for invocation %s.\n' "$invocation" >&2
+      return 1
+      ;;
+  esac
+}}
+
+ensure_review_accepted
+"""
+    return run_bash(
+        script,
+        fixtures_dir,
+        work_dir,
+        actions_file,
+        str(max_fix_rounds),
+    )
 
 
 def run_review_validator(review: Path, validator: str) -> subprocess.CompletedProcess[str]:
@@ -364,3 +517,301 @@ def test_valid_issue_round_records_findings_once_after_validation(tmp_path: Path
     assert events.index("extract") < events.index("validate-format")
     assert events.index("validate-semantics") < events.index("update")
     assert events.index("update") < events.index("archive:findings")
+
+
+def test_issue_review_processes_one_active_finding_at_a_time_before_checks(
+    tmp_path: Path,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+    write_review(
+        fixtures / "review-2.txt",
+        accept="yes",
+        blocker=("none",),
+        major=("none",),
+        verification=(
+            "F0002 | resolved | blocker verified",
+            "F0001 | resolved | major verified",
+        ),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("fixed", "fixed"),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (work_dir / "events.log").read_text(encoding="utf-8").splitlines() == [
+        "review",
+        "fix:F0002",
+        "fix:F0001",
+        "full-checks",
+        "review",
+    ]
+    observations = [
+        line.split("\t")
+        for line in (work_dir / "active-observations.tsv")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert observations == [
+        ["1", "F0002", "2", "2", "F0002", "blocker", BLOCKER_FINDING, "snapshot-2"],
+        ["2", "F0001", "2", "2", "F0001", "major", MAJOR_FINDING, "snapshot-3"],
+    ]
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+        "F0002\tfixed\tclaim for F0002\n"
+        "F0001\tfixed\tclaim for F0001\n"
+    )
+    assert (work_dir / "review-verification.tsv").read_text(encoding="utf-8") == (
+        "finding_id\tresolution\tnote\n"
+        "F0002\tresolved\tblocker verified\n"
+        "F0001\tresolved\tmajor verified\n"
+    )
+    assert (work_dir / "findings.tsv").read_text(encoding="utf-8") == (
+        LEDGER_HEADER
+        + f"F0001\tmajor\t1\t1\tnot_observed\tresolved\t{MAJOR_FINDING}\n"
+        + f"F0002\tblocker\t1\t1\tnot_observed\tresolved\t{BLOCKER_FINDING}\n"
+    )
+
+
+def test_reviewer_can_resolve_finding_incidentally_fixed_by_another_fixer(
+    tmp_path: Path,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+    write_review(
+        fixtures / "review-2.txt",
+        accept="yes",
+        blocker=("none",),
+        major=("none",),
+        verification=(
+            "F0002 | resolved | primary fix verified",
+            "F0001 | resolved | earlier work incidentally resolved this finding",
+        ),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("fixed", "cannot_fix"),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert read_tsv(work_dir / "fix-resolution.tsv") == [
+        {"finding_id": "F0002", "action": "fixed", "note": "claim for F0002"},
+        {
+            "finding_id": "F0001",
+            "action": "cannot_fix",
+            "note": "claim for F0001",
+        },
+    ]
+    assert read_tsv(work_dir / "review-verification.tsv") == [
+        {
+            "finding_id": "F0002",
+            "resolution": "resolved",
+            "note": "primary fix verified",
+        },
+        {
+            "finding_id": "F0001",
+            "resolution": "resolved",
+            "note": "earlier work incidentally resolved this finding",
+        },
+    ]
+
+
+@pytest.mark.parametrize("invalid_action", ["wrong", "multiple"])
+def test_issue_review_rejects_inactive_or_multi_id_fixer_output(
+    tmp_path: Path,
+    invalid_action: str,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=(invalid_action,),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode != 0
+    assert "Fix resolution report is invalid" in completed.stderr
+    assert (work_dir / "events.log").read_text(encoding="utf-8").splitlines() == [
+        "review",
+        "fix:F0002",
+    ]
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
+    assert not (work_dir / "history" / "fix-resolution.round-01.tsv").exists()
+
+
+def test_issue_review_rejects_active_artifact_mutation_by_fixer(tmp_path: Path) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("mutate_active",),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode != 0
+    assert "Active finding artifacts changed during the Fixer invocation" in completed.stderr
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+    )
+
+
+def test_issue_review_max_fix_rounds_counts_rejected_cycles_not_fixer_invocations(
+    tmp_path: Path,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    for round_number, verification in (
+        (1, ("none",)),
+        (
+            2,
+            (
+                "F0002 | unresolved | blocker remains",
+                "F0001 | unresolved | major remains",
+            ),
+        ),
+    ):
+        write_review(
+            fixtures / f"review-{round_number}.txt",
+            blocker=(BLOCKER_FINDING,),
+            major=(MAJOR_FINDING,),
+            verification=verification,
+        )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("cannot_fix", "cannot_fix"),
+        max_fix_rounds=1,
+    )
+
+    assert completed.returncode != 0
+    assert "review did not reach acceptance after 1 fix rounds" in completed.stderr
+    assert (work_dir / "events.log").read_text(encoding="utf-8").splitlines() == [
+        "review",
+        "fix:F0002",
+        "fix:F0001",
+        "full-checks",
+        "review",
+    ]
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+        "F0002\tcannot_fix\tclaim for F0002\n"
+        "F0001\tcannot_fix\tclaim for F0001\n"
+    )
+
+
+def test_issue_review_reinitializes_cumulative_report_for_next_rejected_cycle(
+    tmp_path: Path,
+) -> None:
+    fixtures = tmp_path / "fixtures"
+    work_dir = tmp_path / "work"
+    fixtures.mkdir()
+    work_dir.mkdir()
+    write_two_finding_ledger(work_dir / "findings.tsv")
+    write_review(
+        fixtures / "review-1.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+    )
+    write_review(
+        fixtures / "review-2.txt",
+        blocker=(BLOCKER_FINDING,),
+        major=(MAJOR_FINDING,),
+        verification=(
+            "F0002 | unresolved | blocker remains",
+            "F0001 | unresolved | major remains",
+        ),
+    )
+    write_review(
+        fixtures / "review-3.txt",
+        accept="yes",
+        blocker=("none",),
+        major=("none",),
+        verification=(
+            "F0002 | resolved | blocker verified",
+            "F0001 | resolved | major verified",
+        ),
+    )
+
+    completed = run_active_finding_flow(
+        fixtures,
+        work_dir,
+        actions=("cannot_fix", "cannot_fix", "fixed", "fixed"),
+        max_fix_rounds=2,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (work_dir / "events.log").read_text(encoding="utf-8").splitlines() == [
+        "review",
+        "fix:F0002",
+        "fix:F0001",
+        "full-checks",
+        "review",
+        "fix:F0002",
+        "fix:F0001",
+        "full-checks",
+        "review",
+    ]
+    assert (work_dir / "fix-resolution.tsv").read_text(encoding="utf-8") == (
+        "finding_id\taction\tnote\n"
+        "F0002\tfixed\tclaim for F0002\n"
+        "F0001\tfixed\tclaim for F0001\n"
+    )
+    assert (work_dir / "history" / "fix-resolution.round-01.tsv").read_text(
+        encoding="utf-8"
+    ) == (
+        "finding_id\taction\tnote\n"
+        "F0002\tcannot_fix\tclaim for F0002\n"
+        "F0001\tcannot_fix\tclaim for F0001\n"
+    )
+    assert (work_dir / "history" / "fix-resolution.round-02.tsv").read_bytes() == (
+        work_dir / "fix-resolution.tsv"
+    ).read_bytes()

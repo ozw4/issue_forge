@@ -128,13 +128,12 @@ write_issue_flow_prompt_files() {
   local review_diff="$8"
   local review_untracked="$9"
   local review_summary="${10}"
-  local review_output="${11}"
-  local pending_findings="${12}"
-  local pending_finding_details="${13}"
-  local findings_ledger="${14}"
-  local fix_resolution="${15}"
-  local review_snapshot="${16}"
-  local checks_manifest="${17}"
+  local findings_ledger="${11}"
+  local fix_resolution="${12}"
+  local active_finding="${13}"
+  local active_finding_details="${14}"
+  local fix_review_snapshot="${15}"
+  local checks_manifest="${16}"
   local light_issue_review="${CODEX_FLOW_LIGHT_ISSUE_REVIEW:-0}"
   local review_template='review'
 
@@ -176,10 +175,9 @@ write_issue_flow_prompt_files() {
     "$(prompt_template_path fix-from-review)" \
     "$fix_review_prompt" \
     ISSUE_FILE "$issue_file" \
-    REVIEW_OUTPUT "$review_output" \
-    PENDING_FINDINGS "$pending_findings" \
-    PENDING_FINDING_DETAILS "$pending_finding_details" \
-    REVIEW_SNAPSHOT "$review_snapshot" \
+    ACTIVE_FINDING "$active_finding" \
+    ACTIVE_FINDING_DETAILS "$active_finding_details" \
+    FIX_REVIEW_SNAPSHOT "$fix_review_snapshot" \
     ISSUE_NUMBER "$issue_number"
 }
 
@@ -207,19 +205,17 @@ write_batch_review_prompt_file() {
 
 write_fix_from_batch_review_prompt_file() {
   local issues_file="$1"
-  local batch_review_output="$2"
-  local output_path="$3"
-  local pending_findings="$4"
-  local review_snapshot="$5"
-  local pending_finding_details="$6"
+  local output_path="$2"
+  local active_finding="$3"
+  local review_snapshot="$4"
+  local active_finding_details="$5"
 
   render_prompt_template \
     "$(prompt_template_path fix-from-batch-review)" \
     "$output_path" \
     BATCH_ISSUES_FILE "$issues_file" \
-    BATCH_REVIEW_OUTPUT "$batch_review_output" \
-    PENDING_FINDINGS "$pending_findings" \
-    PENDING_FINDING_DETAILS "$pending_finding_details" \
+    ACTIVE_FINDING "$active_finding" \
+    ACTIVE_FINDING_DETAILS "$active_finding_details" \
     REVIEW_SNAPSHOT "$review_snapshot"
 }
 

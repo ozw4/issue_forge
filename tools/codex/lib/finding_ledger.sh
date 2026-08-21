@@ -179,10 +179,12 @@ extract_review_verification() {
   fi
   if [[ -n "$fix_resolution_file" && -f "$fix_resolution_file" ]]; then
     require_tsv_header "$fix_resolution_file" "$FIX_RESOLUTION_HEADER" 'Fix resolution report' || return 1
-    fix_source="$fix_resolution_file"
-    if [[ "$ledger_source" == '/dev/null' ]]; then
-      printf 'Finding ledger is required for review verification: %s\n' "$ledger_file" >&2
-      return 1
+    if [[ "$(awk 'END { print NR }' "$fix_resolution_file")" -gt 1 ]]; then
+      fix_source="$fix_resolution_file"
+      if [[ "$ledger_source" == '/dev/null' ]]; then
+        printf 'Finding ledger is required for review verification: %s\n' "$ledger_file" >&2
+        return 1
+      fi
     fi
   fi
 
