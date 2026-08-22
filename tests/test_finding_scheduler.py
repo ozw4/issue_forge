@@ -605,3 +605,42 @@ restore_test"""
 
     assert_ok(completed)
     assert [artifact.read_bytes() for artifact in artifacts] == expected
+
+
+def test_scheduler_restore_keeps_backup_when_target_is_directory(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    artifacts = [tmp_path / f"artifact-{index}.tsv" for index in range(6)]
+    for index, artifact in enumerate(artifacts):
+        artifact.write_text(f"original-{index}\n", encoding="utf-8")
+
+    command = """
+directory_restore_test() {
+  expected_digest="$(finding_scheduler_state_digest "$@")" || exit 1
+  backup_dir="$(backup_finding_scheduler_state "$@")" || exit 1
+  printf '%s\n' "$backup_dir"
+  rm -f -- "$1" || exit 1
+  mkdir -- "$1" || exit 1
+  assert_finding_scheduler_state_matches_or_restore \
+    "$expected_digest" "$backup_dir" "$@" && exit 2
+  [[ -d "$backup_dir" && -f "$backup_dir/artifact-000000" ]] || exit 3
+}
+directory_restore_test"""
+    env = os.environ.copy()
+    env["TMPDIR"] = str(backup_root)
+    completed = run_helper(command, *artifacts, env=env)
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip()
+    backup_dir = Path(completed.stdout.strip())
+    assert backup_dir.parent == backup_root
+    assert artifacts[0].is_dir()
+    assert backup_dir.is_dir()
+    assert (backup_dir / "artifact-000000").read_text(encoding="utf-8") == (
+        "original-0\n"
+    )
+    assert str(artifacts[0]) in completed.stderr
+    assert str(backup_dir) in completed.stderr
+    assert "manual recovery" in completed.stderr

@@ -423,6 +423,16 @@ restore_finding_scheduler_state() {
     printf -v backup_file '%s/artifact-%06d' "$backup_dir" "$state_index"
     _finding_scheduler_require_regular_file \
       "$backup_file" 'Finding scheduler state backup artifact' || return 1
+    if [[ -d "$state_file" && ! -L "$state_file" ]]; then
+      printf 'Cannot restore finding scheduler state artifact replaced by a directory: %s (backup: %s)\n' \
+        "$state_file" "$backup_file" >&2
+      return 1
+    fi
+    state_index=$((state_index + 1))
+  done
+  state_index=0
+  for state_file in "$@"; do
+    printf -v backup_file '%s/artifact-%06d' "$backup_dir" "$state_index"
     restore_temporary="$(mktemp "${state_file}.restore.XXXXXX")" || {
       printf 'Failed to create temporary restored scheduler artifact: %s\n' \
         "$state_file" >&2
@@ -477,11 +487,13 @@ assert_finding_scheduler_state_matches_or_restore() {
     return 0
   fi
   restore_finding_scheduler_state "$backup_dir" "$@" || {
-    remove_finding_scheduler_state_backup "$backup_dir" || true
+    printf 'Finding scheduler state restoration requires manual recovery; backup retained at: %s\n' \
+      "$backup_dir" >&2
     return 1
   }
   assert_finding_scheduler_state_matches "$expected_digest" "$@" || {
-    remove_finding_scheduler_state_backup "$backup_dir" || true
+    printf 'Restored finding scheduler state could not be verified; backup retained at: %s\n' \
+      "$backup_dir" >&2
     return 1
   }
   remove_finding_scheduler_state_backup "$backup_dir" || return 1
