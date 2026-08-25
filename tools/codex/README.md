@@ -77,6 +77,17 @@ phase	issues	round	reasoning	tokens	log
 
 Rows are appended after Codex calls when the corresponding Codex log contains a `tokens used` block followed by a numeric value. Comma separators are normalized, so `133,813` is recorded as `133813`. Logs without token usage leave the TSV with only its header; collection is observability-only and does not fail the flow.
 
+## Queue Run Summary
+
+An authoritative queue run can be exported as one read-only TSV row:
+
+```bash
+./vendor/issue_forge/tools/codex/summarize_queue_run.sh \
+  .work/queue/runs/<run_id>
+```
+
+The output combines run identity/state, manifest Issue order, Batch and archived Issue finding ledgers, Fixer claims, immutable Agent attempts and token usage, and run-owned Checks manifests. `--no-header` emits only the data row so multiple runs can be appended beneath one header. The latest fixed/resolved rate uses the latest claim for each ledger-local finding and is `n/a` when no latest claim is `fixed`. Missing Agent results count as failures and missing token logs contribute zero. Existing state and TSV artifacts are validated before use; malformed input is a hard error. The command never writes below the supplied run directory.
+
 ## Queue Light Review
 
 Queue mode derives `CODEX_FLOW_LIGHT_ISSUE_REVIEW` for each `run_issue_flow.sh` invocation from `CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW`: `1` when queue light review is enabled, and `0` when it is disabled. The consumer config default is:

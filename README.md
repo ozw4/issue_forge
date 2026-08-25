@@ -166,6 +166,7 @@ run 123
 | `tools/codex/doctor.sh` | none | runtime preflight |
 | `tools/codex/run_issue_flow.sh` | `[issue_number]` | implementation、checks/review loops、commit、push、PR publish |
 | `tools/codex/run_issue_queue.sh` | `[options] <issue_number>...` | sequential queue、batch checks/review、batch PR publish |
+| `tools/codex/summarize_queue_run.sh` | `[--no-header] <queue-run-directory>` | run-owned queue artifactsをread-onlyで1行のTSVへ集計 |
 | `tools/codex/continue_after_review.sh` | `[issue_number]` | current changes を review follow-up commit にして flow を再実行 |
 | `tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | `.work/codex` を消して flow を再実行。`--hard` は repository changes を破棄 |
 | `tools/codex/make_pr_only.sh` | `[issue_number]` | current branch の PR title/body を作成または同期。新規 commit は push しない |
@@ -212,6 +213,15 @@ CODEX_FLOW_QUEUE_LIGHT_ISSUE_REVIEW=0
 - `--take-over-lease`: 別 host / 検証不能な lease を明示的に引き継ぐ resume 専用 option
 
 branch は `batch/<first_issue>-<last_issue>`、batch compatibility artifacts は `.work/queue/batches/batch-<first_issue>-<last_issue>/` に保存されます。Issue の authoritative archive と durable context は run 固有の `.work/queue/runs/<run_id>/` 配下に置かれます。batch PR は default で non-draft (`CODEX_FLOW_BATCH_PR_DRAFT_DEFAULT=0`) です。複数 batch が必要な入力では `--auto-merge` が必須です。`--draft` と `--auto-merge` は併用できません。
+
+保存済みrunの集計はauthoritative run directoryを直接指定します。header付きの1行TSVを出力し、`--no-header`は複数runの追記用です。このcommandはrun artifactsを変更しません。
+
+```bash
+./vendor/issue_forge/tools/codex/summarize_queue_run.sh \
+  .work/queue/runs/<run_id>
+```
+
+出力にはrun stateとIssue列、Batch/Issue reviewのfinding・Fixer claim、Agent attempt/token、full Checksの件数・failure・durationが含まれます。`latest_fixed_resolved_rate`は各ledger-local findingの最新claimが`fixed`である集合を分母にし、その後Reviewerが`resolved`と判定した件数を分子にします。分母が0なら`n/a`です。missing `result.state`はAgent failure、missing token logは0として扱い、存在するTSV/stateのheader・行・identityが不正ならfail closedします。
 
 各 invocation は branch 作成前に filesystem-safe な一意の run ID を生成し、schema v3 state を `.work/queue/runs/<run_id>/` に保存します。lease 前の immutable manifest、最小 `run.state`、manifest-derived entity graph は unadvertised candidate です。resume は graph、strict state/field transition、保存 base、direct-child Issue commit、run-owned archive manifest/hash、accepted batch head を mutation 前に検証します。通常起動では complete lease owner と matching `current` の publish 後にだけ authoritative resume command を表示し、contention loser の candidate は一度も resume 対象と表示せず削除します。minimal publication 後の実 failure / `SIGINT` / `SIGTERM` では candidate を保持し、exit handler が explicit run-ID command を表示します。
 

@@ -24,6 +24,7 @@ External consumer-facing entrypoints are:
 | `vendor/issue_forge/tools/codex/doctor.sh` | none | Preflight required commands, GitHub auth, consumer config, base ref, prompt path, and checks command |
 | `vendor/issue_forge/tools/codex/run_issue_flow.sh` | `[issue_number]` | Run implementation, checks/fix loop, review/fix loop, commit, push, and PR create/update |
 | `vendor/issue_forge/tools/codex/run_issue_queue.sh` | `[options] <issue_number> [issue_number...]` | Local-only sequential issue queue: process issues linearly on batch branches, run strict batch review, create one batch PR per batch, and optionally request auto-merge |
+| `vendor/issue_forge/tools/codex/summarize_queue_run.sh` | `[--no-header] <queue-run-directory>` | Read run-owned queue artifacts and emit one aggregate TSV row without modifying them |
 | `vendor/issue_forge/tools/codex/restart_issue_flow.sh` | `[--hard] [issue_number]` | Delete `.work/codex`, optionally discard dirty changes outside `.work`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/continue_after_review.sh` | `[issue_number]` | Commit current changes as review follow-up, delete `.work/codex`, and rerun the flow |
 | `vendor/issue_forge/tools/codex/make_pr_only.sh` | `[issue_number]` | Create or sync the PR title/body for the current issue branch without pushing new commits |
@@ -247,6 +248,7 @@ Usage:
 ```bash
 vendor/issue_forge/tools/codex/run_issue_queue.sh [options] <issue_number> [issue_number...]
 vendor/issue_forge/tools/codex/run_issue_queue.sh --resume <run_id|current> [--take-over-lease]
+vendor/issue_forge/tools/codex/summarize_queue_run.sh [--no-header] .work/queue/runs/<run_id>
 ```
 
 Options:
@@ -258,6 +260,8 @@ Options:
 - `--draft` creates draft batch PRs; it cannot be combined with `--auto-merge`
 - `--resume <run_id|current>` resumes unfinished work only from the immutable manifest identified by the run ID, or performs cleanup-only finalization for a completed run. It rejects Issue arguments and all queue-shaping options.
 - `--take-over-lease` is valid only with `--resume`; it is required for a lease owned by another or unverifiable host. A dead same-host owner is recoverable without this option only by explicit resume of the lease's same run ID. A live same-host owner always blocks takeover. By using different-host takeover, the operator asserts that the displaced process has stopped; elapsed time alone is never proof of death.
+
+The queue summary command is read-only and accepts only an explicit authoritative run directory. It emits a fixed 27-column TSV header and one row; `--no-header` emits only the row for append-oriented collection. It aggregates Batch and archived Issue finding ledgers, all resolution-history claims plus an unarchived non-empty current report when it differs from the latest history file, immutable Agent attempts and token logs, and run-owned Checks manifests. Claim totals count every collected claim; `latest_fixed` and `latest_fixed_resolved_rate` use the latest claim rank per ledger-local finding. A zero denominator produces `n/a`. A missing or nonterminal Agent result counts as a failure and a missing token log contributes zero. The command does not claim to validate resumability, but it rejects malformed state values, headers, finding/claim rows, check rows, cross-file run IDs, and unexpected archive paths rather than producing a partial interpretation of an artifact it reads.
 
 The queue processes issues strictly in the input order. It creates one deterministic batch branch per batch, named `${CODEX_FLOW_BATCH_BRANCH_PREFIX}<first_issue>-<last_issue>`; with defaults this is `batch/<first_issue>-<last_issue>`. After fetching `origin/${CODEX_FLOW_BASE_BRANCH}`, it resolves `CODEX_FLOW_BASE_REF` to an exact commit and persists that intended base before branch creation. The branch is created only from the saved SHA. A resumed branch-ready boundary accepts an existing branch only when its HEAD equals that SHA; unexplained commits and local/remote disagreement fail closed.
 
